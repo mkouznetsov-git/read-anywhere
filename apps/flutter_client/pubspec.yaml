@@ -1,0 +1,25 @@
+name: read_anywhere
+description: Local-first cross-platform reader MVP for Read anywhere.
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  crypto: ^3.0.3
+  file_picker: ^8.1.2
+  path: ^1.9.0
+  path_provider: ^2.1.4
+  uuid: ^4.5.1
+  web_socket_channel: ^3.0.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

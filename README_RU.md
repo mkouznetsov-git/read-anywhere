@@ -1,0 +1,62 @@
+# Read anywhere — MVP starter kit
+
+Цель проекта: приложение для чтения книг на Android, iOS, macOS, Windows и Linux с локальным хранением книг и синхронизацией прогресса/закладок между устройствами без сторонних облачных хранилищ.
+
+Этот репозиторий — стартовый каркас, а не законченный production-reader. Он содержит:
+
+- `apps/flutter_client` — кроссплатформенный Flutter-клиент: библиотека, импорт книг, локальный manifest, прогресс чтения, базовый TXT-reader, заготовки синхронизации.
+- `server/rendezvous_relay` — опциональный самохостируемый relay/signaling-сервис на FastAPI WebSocket. Он не пишет данные на диск и не хранит книги; только пересылает зашифрованные сообщения между онлайн-устройствами одного аккаунта.
+- `docs` — архитектура, план реализации, тест-план и решения по синхронизации.
+
+## Быстрый запуск клиента
+
+```bash
+cd apps/flutter_client
+flutter pub get
+flutter run -d linux     # или macos/windows/android/ios
+```
+
+Перед сборкой под desktop включите нужные платформы:
+
+```bash
+flutter config --enable-linux-desktop
+flutter config --enable-macos-desktop
+flutter config --enable-windows-desktop
+```
+
+## Быстрый запуск relay
+
+```bash
+cd server/rendezvous_relay
+python -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn main:app --host 0.0.0.0 --port 8787
+```
+
+Проверка:
+
+```bash
+curl http://127.0.0.1:8787/health
+```
+
+## Основные ограничения MVP
+
+1. Полноценный рендеринг PDF/EPUB/DOCX/FB2/DJVU еще не подключен. В коде заложена модель форматов и экраны; TXT-reader работает как простой пример.
+2. Синхронизация описана протоколом и частично реализована как transport-wrapper. Production-реализация должна добавить E2E-шифрование, peer discovery, chunked file transfer, возобновление загрузок и UX выбора книг для нового устройства.
+3. Relay не является облачным хранилищем: он не хранит книги, прогресс или закладки, но его надо запускать на своем сервере/VPS/NAS, если нужно соединять устройства вне одной LAN.
+
+## Production-направление
+
+Рекомендуемое ядро: Flutter UI + Rust native core через FFI для P2P/crypto/chunking + SQLite для локального состояния + MuPDF/Readium/форматные адаптеры для рендеринга.
+
+## Сборка DMG/PKG/APK
+
+Добавлены скрипты и GitHub Actions workflow для сборки установочных файлов без ручной установки Flutter на локальную машину:
+
+- `scripts/package_macos.sh` — собирает `.app`, `.dmg`, `.pkg` на macOS;
+- `scripts/package_android.sh` — собирает debug `.apk` для Android;
+- `.github/workflows/build_installers.yml` — собирает артефакты на GitHub Actions;
+- подробная инструкция: `docs/build_installers_ru.md`.
+
+Для публичной раздачи macOS-сборок потребуется Apple Developer ID signing + notarization. Для Android production-сборки потребуется release signing keystore.
