@@ -169,12 +169,8 @@ class SyncService {
       state.value.copyWith(connected: true, statusText: 'Подключено'),
     );
 
-    // Do not rely only on the relay-level peer_joined event. Depending on the
-    // order in which devices connect, a newly joined device may otherwise wait
-    // until the next manual snapshot/import/progress update. This explicit
-    // request makes metadata sync self-healing after reconnects.
-    await requestLibrarySnapshot(reason: 'connected');
-    await broadcastLibrarySnapshot(reason: 'connected');
+    await refreshMetadata(reason: 'connected');
+    _scheduleStartupMetadataRefresh(client);
   }
 
   Future<void> disconnect() async {
@@ -187,6 +183,24 @@ class SyncService {
       _appendLog('Отключено');
     }
     _setState(state.value.copyWith(connected: false, statusText: 'Не подключено'));
+  }
+
+  Future<void> refreshMetadata({required String reason}) async {
+    await requestLibrarySnapshot(reason: '$reason/request');
+    await broadcastLibrarySnapshot(reason: '$reason/snapshot');
+  }
+
+  void _scheduleStartupMetadataRefresh(RelayClient client) {
+    for (final delay in const [
+      Duration(milliseconds: 600),
+      Duration(seconds: 2),
+      Duration(seconds: 5),
+    ]) {
+      unawaited(Future<void>.delayed(delay, () async {
+        if (_client != client || !state.value.connected) return;
+        await refreshMetadata(reason: 'startup_retry_${delay.inMilliseconds}ms');
+      }));
+    }
   }
 
   Future<bool> broadcastLibrarySnapshot({required String reason}) async {
@@ -301,10 +315,19 @@ class SyncService {
     }
     if (envelope.deviceId == local.deviceId) return;
 
+    if (envelope.type == 'peer_list') {
+      final peers = ((envelope.payload['peers'] as List?) ?? const [])
+          .map((item) => item.toString())
+          .where((id) => id != local.deviceId)
+          .toList();
+      _appendLog('Relay peers online: ${peers.length}');
+      await refreshMetadata(reason: 'peer_list');
+      return;
+    }
+
     if (envelope.type == 'peer_joined') {
       _appendLog('Подключилось другое устройство: ${envelope.deviceId}');
-      await requestLibrarySnapshot(reason: 'peer_joined');
-      await broadcastLibrarySnapshot(reason: 'peer_joined');
+      await refreshMetadata(reason: 'peer_joined');
       return;
     }
 

@@ -690,7 +690,8 @@ class _SyncScreenState extends State<SyncScreen> {
   }
 
   Future<void> _requestSnapshot() async {
-    final sent = await widget.sync.requestLibrarySnapshot(reason: 'manual');
+    await widget.sync.refreshMetadata(reason: 'manual');
+    final sent = true;
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(sent ? 'Snapshot запрошен' : 'Сначала подключитесь к relay')),

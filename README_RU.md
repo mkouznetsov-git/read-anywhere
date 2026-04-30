@@ -90,3 +90,9 @@ curl http://127.0.0.1:8787/health
 TXT-reader больше не рендерит весь файл одним большим `SelectableText`; текст читается как bytes, поддерживает fallback Windows-1251 и отображается чанками через `ListView.builder`.
 
 Подробнее: `docs/sprint_03_hotfix_01_ru.md`.
+
+## Sprint 3 Hotfix 02
+
+Если после Sprint 3 оба устройства подключены к relay, но библиотека не появляется на втором устройстве, обновите и перезапустите relay. Начиная с Hotfix 02 relay держит последние metadata snapshots в памяти процесса и отдаёт их новым подключившимся устройствам. Книги и file chunks не сохраняются.
+
+Документация: `docs/sprint_03_hotfix_02_ru.md`.
