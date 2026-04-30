@@ -168,6 +168,12 @@ class SyncService {
     _setState(
       state.value.copyWith(connected: true, statusText: 'Подключено'),
     );
+
+    // Do not rely only on the relay-level peer_joined event. Depending on the
+    // order in which devices connect, a newly joined device may otherwise wait
+    // until the next manual snapshot/import/progress update. This explicit
+    // request makes metadata sync self-healing after reconnects.
+    await requestLibrarySnapshot(reason: 'connected');
     await broadcastLibrarySnapshot(reason: 'connected');
   }
 
@@ -208,6 +214,22 @@ class SyncService {
       _setState(state.value.copyWith(connected: false, statusText: 'Ошибка'));
       return false;
     }
+  }
+
+  Future<bool> requestLibrarySnapshot({required String reason}) async {
+    final manifest = await _storage.loadManifest();
+    return _sendEnvelope(
+      SyncEnvelope(
+        type: 'library_snapshot_requested',
+        accountId: manifest.accountId,
+        deviceId: manifest.deviceId,
+        payload: {
+          'reason': reason,
+          'requestingDeviceId': manifest.deviceId,
+        },
+      ),
+      logLabel: 'Запрошен snapshot: $reason',
+    );
   }
 
   Future<bool> requestBookFile(BookRecord book) async {
@@ -258,13 +280,20 @@ class SyncService {
         'preferredChunkSize': _defaultChunkSize,
       },
     );
-    client.send(envelope);
-    _appendLog('Запрошен файл: ${book.title}');
-    _setState(state.value.copyWith(sentEvents: state.value.sentEvents + 1));
-    return true;
+    return _sendEnvelope(envelope, logLabel: 'Запрошен файл: ${book.title}');
   }
 
   Future<void> _handleIncomingEnvelope(SyncEnvelope envelope) async {
+    try {
+      await _handleIncomingEnvelopeUnsafe(envelope);
+    } catch (error, stackTrace) {
+      // A malformed file-transfer event must never break metadata sync.
+      debugPrint('Sync event handling failed: $error\n$stackTrace');
+      _appendLog('Ошибка обработки ${envelope.type}: $error');
+    }
+  }
+
+  Future<void> _handleIncomingEnvelopeUnsafe(SyncEnvelope envelope) async {
     final local = await _storage.loadManifest();
     if (envelope.accountId != local.accountId) {
       _appendLog('Пропущено событие другого аккаунта: ${envelope.accountId}');
@@ -274,6 +303,7 @@ class SyncService {
 
     if (envelope.type == 'peer_joined') {
       _appendLog('Подключилось другое устройство: ${envelope.deviceId}');
+      await requestLibrarySnapshot(reason: 'peer_joined');
       await broadcastLibrarySnapshot(reason: 'peer_joined');
       return;
     }
@@ -289,6 +319,9 @@ class SyncService {
     }
 
     switch (envelope.type) {
+      case 'library_snapshot_requested':
+        await _handleLibrarySnapshotRequested(envelope, local);
+        break;
       case 'library_snapshot':
         await _handleLibrarySnapshot(envelope, local);
         break;
@@ -310,6 +343,16 @@ class SyncService {
       default:
         _appendLog('Неизвестное событие: ${envelope.type}');
     }
+  }
+
+  Future<void> _handleLibrarySnapshotRequested(
+    SyncEnvelope envelope,
+    LibraryManifest local,
+  ) async {
+    final requester = envelope.payload['requestingDeviceId'] as String?;
+    if (requester == local.deviceId) return;
+    _appendLog('Получен запрос snapshot от ${envelope.deviceId}');
+    await broadcastLibrarySnapshot(reason: 'requested_by_peer');
   }
 
   Future<void> _handleLibrarySnapshot(
@@ -732,13 +775,24 @@ class SyncService {
     return null;
   }
 
-  void _sendEnvelope(SyncEnvelope envelope) {
+  bool _sendEnvelope(SyncEnvelope envelope, {String? logLabel}) {
     final client = _client;
     if (client == null || !state.value.connected) {
-      throw StateError('RelayClient is not connected');
+      _appendLog('Не отправлено ${envelope.type}: нет подключения к relay');
+      return false;
     }
-    client.send(envelope);
-    _setState(state.value.copyWith(sentEvents: state.value.sentEvents + 1));
+    try {
+      client.send(envelope);
+      if (logLabel != null && logLabel.isNotEmpty) {
+        _appendLog(logLabel);
+      }
+      _setState(state.value.copyWith(sentEvents: state.value.sentEvents + 1));
+      return true;
+    } catch (error) {
+      _appendLog('Не удалось отправить ${envelope.type}: $error');
+      _setState(state.value.copyWith(connected: false, statusText: 'Ошибка'));
+      return false;
+    }
   }
 
   void _setDownloadSnapshot(FileTransferSnapshot snapshot) {

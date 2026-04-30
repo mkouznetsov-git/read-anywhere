@@ -31,9 +31,27 @@ class RelayClient {
     );
     final channel = WebSocketChannel.connect(wsUri);
     _channel = channel;
-    _subscription = channel.stream.listen((raw) {
-      if (raw is! String) return;
-      final decoded = jsonDecode(raw) as Map<String, dynamic>;
+    _subscription = channel.stream.listen(
+      _handleRawMessage,
+      onError: _incoming.addError,
+      onDone: () {
+        if (!_incoming.isClosed) {
+          _incoming.addError(StateError('Relay connection closed'));
+        }
+      },
+      cancelOnError: false,
+    );
+  }
+
+  void _handleRawMessage(dynamic raw) {
+    if (raw is! String) return;
+    try {
+      final decodedRaw = jsonDecode(raw);
+      if (decodedRaw is! Map) {
+        _incoming.add(_systemError('Relay message is not an object'));
+        return;
+      }
+      final decoded = Map<String, dynamic>.from(decodedRaw);
       final type = decoded['type'] as String?;
       if (type == 'peer_joined' || type == 'peer_left' || type == 'error') {
         _incoming.add(
@@ -46,11 +64,22 @@ class RelayClient {
         );
         return;
       }
+      if (type == null || decoded['payload'] is! Map) {
+        _incoming.add(_systemError('Relay message has invalid sync envelope'));
+        return;
+      }
       _incoming.add(SyncEnvelope.fromJson(decoded));
-    }, onError: _incoming.addError, onDone: () {
-      _incoming.addError(StateError('Relay connection closed'));
-    });
+    } catch (error) {
+      _incoming.add(_systemError('Cannot parse relay message: $error'));
+    }
   }
+
+  SyncEnvelope _systemError(String message) => SyncEnvelope(
+        type: 'error',
+        accountId: accountId,
+        deviceId: 'relay-client',
+        payload: {'message': message},
+      );
 
   void send(SyncEnvelope envelope) {
     final channel = _channel;

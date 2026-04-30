@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -322,8 +323,11 @@ class ReaderScreen extends StatefulWidget {
 }
 
 class _ReaderScreenState extends State<ReaderScreen> {
+  static const _chunkTargetChars = 6000;
+
   final _controller = ScrollController();
-  String? _text;
+  List<String>? _textChunks;
+  String? _loadError;
   Timer? _saveDebounce;
   double _lastProgress = 0;
 
@@ -343,22 +347,40 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   Future<void> _load() async {
-    if (widget.book.localPath == null) return;
-    if (widget.book.format != 'txt') {
-      setState(() => _text = null);
+    if (widget.book.localPath == null) {
+      setState(() => _loadError = 'Файл книги не скачан на это устройство');
       return;
     }
-    final file = File(widget.book.localPath!);
-    final raw = await file.readAsString();
-    if (!mounted) return;
-    setState(() => _text = raw);
+    if (widget.book.format != 'txt') {
+      setState(() => _textChunks = null);
+      return;
+    }
 
-    // Restore approximate position after first layout.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_controller.hasClients) return;
-      final max = _controller.position.maxScrollExtent;
-      _controller.jumpTo(max * (widget.book.progressPercent / 100));
-    });
+    try {
+      final file = File(widget.book.localPath!);
+      if (!await file.exists()) {
+        throw StateError('Файл отсутствует: ${widget.book.localPath}');
+      }
+      final bytes = await file.readAsBytes();
+      final raw = _decodeTextFile(bytes);
+      final chunks = _splitTextIntoReaderChunks(raw, _chunkTargetChars);
+      if (!mounted) return;
+      setState(() {
+        _textChunks = chunks.isEmpty ? const [''] : chunks;
+        _loadError = null;
+      });
+
+      // Restore approximate position after first layout.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_controller.hasClients) return;
+        final max = _controller.position.maxScrollExtent;
+        final target = (max * (widget.book.progressPercent / 100)).clamp(0, max);
+        _controller.jumpTo(target.toDouble());
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _loadError = 'Не удалось открыть TXT: $error');
+    }
   }
 
   void _onScroll() {
@@ -367,8 +389,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (max <= 0) return;
     final progress = ((_controller.offset / max) * 100).clamp(0, 100).toDouble();
     _lastProgress = progress;
+    if (mounted) setState(() {});
     _saveDebounce?.cancel();
-    _saveDebounce = Timer(const Duration(milliseconds: 600), () {
+    _saveDebounce = Timer(const Duration(milliseconds: 700), () {
       unawaited(_saveProgress(progress));
     });
   }
@@ -377,7 +400,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     await widget.storage.updateProgress(
       bookId: widget.book.id,
       progressPercent: progress,
-      locator: 'txt-scroll:${_controller.offset.toStringAsFixed(0)}',
+      locator: 'txt-scroll:${_controller.hasClients ? _controller.offset.toStringAsFixed(0) : 0}',
     );
     await widget.sync.broadcastLibrarySnapshot(reason: 'progress_updated');
   }
@@ -399,51 +422,139 @@ class _ReaderScreenState extends State<ReaderScreen> {
   @override
   Widget build(BuildContext context) {
     final isTxt = widget.book.format == 'txt';
+    final chunks = _textChunks;
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
           IconButton(
             tooltip: 'Добавить закладку',
-            onPressed: _addBookmark,
+            onPressed: isTxt && chunks != null ? _addBookmark : null,
             icon: const Icon(Icons.bookmark_add_outlined),
           ),
         ],
       ),
       body: !isTxt
           ? _UnsupportedReaderPlaceholder(book: widget.book)
-          : _text == null
-              ? const Center(child: CircularProgressIndicator())
-              : Column(
-                  children: [
-                    Expanded(
-                      child: SingleChildScrollView(
-                        controller: _controller,
-                        padding: const EdgeInsets.fromLTRB(24, 16, 24, 40),
-                        child: SelectableText(
-                          _text!,
-                          style: const TextStyle(fontSize: 18, height: 1.65),
+          : _loadError != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(28),
+                    child: Text(_loadError!, textAlign: TextAlign.center),
+                  ),
+                )
+              : chunks == null
+                  ? const Center(child: CircularProgressIndicator())
+                  : Column(
+                      children: [
+                        Expanded(
+                          child: ListView.builder(
+                            controller: _controller,
+                            padding: const EdgeInsets.fromLTRB(24, 16, 24, 40),
+                            itemCount: chunks.length,
+                            itemBuilder: (context, index) {
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 12),
+                                child: SelectableText(
+                                  chunks[index],
+                                  style: const TextStyle(fontSize: 18, height: 1.65),
+                                ),
+                              );
+                            },
+                          ),
                         ),
-                      ),
-                    ),
-                    SafeArea(
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: LinearProgressIndicator(value: _lastProgress / 100),
+                        SafeArea(
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: LinearProgressIndicator(value: _lastProgress / 100),
+                                ),
+                                const SizedBox(width: 12),
+                                Text('${_lastProgress.toStringAsFixed(1)}%'),
+                              ],
                             ),
-                            const SizedBox(width: 12),
-                            Text('${_lastProgress.toStringAsFixed(1)}%'),
-                          ],
+                          ),
                         ),
-                      ),
+                      ],
                     ),
-                  ],
-                ),
     );
   }
+}
+
+String _decodeTextFile(List<int> bytes) {
+  if (bytes.length >= 3 &&
+      bytes[0] == 0xEF &&
+      bytes[1] == 0xBB &&
+      bytes[2] == 0xBF) {
+    return utf8.decode(bytes.sublist(3), allowMalformed: true);
+  }
+  try {
+    return utf8.decode(bytes);
+  } on FormatException {
+    return _decodeWindows1251(bytes);
+  }
+}
+
+List<String> _splitTextIntoReaderChunks(String text, int targetChars) {
+  final normalized = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+  if (normalized.isEmpty) return const [];
+
+  final chunks = <String>[];
+  var start = 0;
+  while (start < normalized.length) {
+    var end = start + targetChars;
+    if (end >= normalized.length) {
+      end = normalized.length;
+    } else {
+      final paragraphBreak = normalized.lastIndexOf('\n\n', end);
+      final lineBreak = normalized.lastIndexOf('\n', end);
+      final minUsefulSplit = start + (targetChars ~/ 2);
+      if (paragraphBreak > minUsefulSplit) {
+        end = paragraphBreak + 2;
+      } else if (lineBreak > minUsefulSplit) {
+        end = lineBreak + 1;
+      }
+    }
+
+    final chunk = normalized.substring(start, end).trimRight();
+    if (chunk.isNotEmpty) chunks.add(chunk);
+    start = end;
+  }
+  return chunks;
+}
+
+String _decodeWindows1251(List<int> bytes) {
+  const table = <int>[
+    0x0402, 0x0403, 0x201A, 0x0453, 0x201E, 0x2026, 0x2020, 0x2021,
+    0x20AC, 0x2030, 0x0409, 0x2039, 0x040A, 0x040C, 0x040B, 0x040F,
+    0x0452, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+    0x0000, 0x2122, 0x0459, 0x203A, 0x045A, 0x045C, 0x045B, 0x045F,
+    0x00A0, 0x040E, 0x045E, 0x0408, 0x00A4, 0x0490, 0x00A6, 0x00A7,
+    0x0401, 0x00A9, 0x0404, 0x00AB, 0x00AC, 0x00AD, 0x00AE, 0x0407,
+    0x00B0, 0x00B1, 0x0406, 0x0456, 0x0491, 0x00B5, 0x00B6, 0x00B7,
+    0x0451, 0x2116, 0x0454, 0x00BB, 0x0458, 0x0405, 0x0455, 0x0457,
+    0x0410, 0x0411, 0x0412, 0x0413, 0x0414, 0x0415, 0x0416, 0x0417,
+    0x0418, 0x0419, 0x041A, 0x041B, 0x041C, 0x041D, 0x041E, 0x041F,
+    0x0420, 0x0421, 0x0422, 0x0423, 0x0424, 0x0425, 0x0426, 0x0427,
+    0x0428, 0x0429, 0x042A, 0x042B, 0x042C, 0x042D, 0x042E, 0x042F,
+    0x0430, 0x0431, 0x0432, 0x0433, 0x0434, 0x0435, 0x0436, 0x0437,
+    0x0438, 0x0439, 0x043A, 0x043B, 0x043C, 0x043D, 0x043E, 0x043F,
+    0x0440, 0x0441, 0x0442, 0x0443, 0x0444, 0x0445, 0x0446, 0x0447,
+    0x0448, 0x0449, 0x044A, 0x044B, 0x044C, 0x044D, 0x044E, 0x044F,
+  ];
+
+  final buffer = StringBuffer();
+  for (final byte in bytes) {
+    if (byte < 0x80) {
+      buffer.writeCharCode(byte);
+    } else {
+      final codePoint = table[byte - 0x80];
+      buffer.writeCharCode(codePoint == 0 ? 0xFFFD : codePoint);
+    }
+  }
+  return buffer.toString();
 }
 
 class _UnsupportedReaderPlaceholder extends StatelessWidget {
@@ -578,6 +689,14 @@ class _SyncScreenState extends State<SyncScreen> {
     );
   }
 
+  Future<void> _requestSnapshot() async {
+    final sent = await widget.sync.requestLibrarySnapshot(reason: 'manual');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(sent ? 'Snapshot запрошен' : 'Сначала подключитесь к relay')),
+    );
+  }
+
   Future<void> _copyAccountId() async {
     await Clipboard.setData(ClipboardData(text: _accountController.text.trim()));
     if (!mounted) return;
@@ -649,6 +768,12 @@ class _SyncScreenState extends State<SyncScreen> {
                       onPressed: _sendSnapshot,
                       icon: const Icon(Icons.upload_rounded),
                       label: const Text('Отправить snapshot библиотеки'),
+                    ),
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: _requestSnapshot,
+                      icon: const Icon(Icons.download_rounded),
+                      label: const Text('Запросить snapshot у других устройств'),
                     ),
                   ],
                 ),
