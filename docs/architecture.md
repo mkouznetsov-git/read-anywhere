@@ -170,3 +170,17 @@ See also: `docs/adr_002_internet_sync_and_format_scope.md`.
 - `lib/main.dart` — экран синхронизации и вызовы broadcast после изменений.
 
 Текущее решение сознательно не является финальной безопасной синхронизацией. Оно нужно для ранней проверки пользовательского сценария через интернет. Следующий этап: QR-pairing, device keys, подпись событий, E2E encryption и offline queue.
+
+## Sprint 3 addition: relay-based original file transfer
+
+Sprint 3 introduces MVP original-file transfer between trusted devices in the same manual-paired account. Metadata sync still happens via `library_snapshot`. Actual book files are requested on demand:
+
+```text
+requesting device -> book_file_requested -> relay -> source devices
+source device     -> book_file_offer     -> relay -> requesting device
+requesting device -> book_file_accept    -> relay -> chosen source
+source device     -> book_file_chunk*    -> relay -> requesting device
+requesting device -> SHA-256 verification -> local books directory
+```
+
+The relay remains in-memory and does not persist files. Sprint 3 uses JSON/base64 chunks with a conservative 256 KiB chunk size. This is intentionally simple for MVP testing. Production should use encrypted binary frames, chunk resume, direct LAN/P2P transfer when possible, and relay only as internet fallback.

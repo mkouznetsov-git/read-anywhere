@@ -131,7 +131,7 @@ class StorageService {
     final updatedBooks = manifest.books.map((book) {
       if (book.id != bookId) return book;
       return book.copyWith(
-        progressPercent: progressPercent.clamp(0, 100),
+        progressPercent: progressPercent.clamp(0, 100).toDouble(),
         currentLocator: locator,
         progressVersion: book.progressVersion + 1,
         updatedByDeviceId: manifest.deviceId,
@@ -160,6 +160,36 @@ class StorageService {
       );
     }).toList();
     await saveManifest(manifest.copyWith(books: updatedBooks));
+  }
+
+
+
+  Future<LibraryManifest> markBookDownloaded({
+    required String bookId,
+    required String localPath,
+  }) async {
+    final manifest = await loadManifest();
+    var found = false;
+    final updatedBooks = manifest.books.map((book) {
+      if (book.id != bookId) return book;
+      found = true;
+      final availableOn = <String>{
+        ...book.availableOnDeviceIds,
+        manifest.deviceId,
+      }.toList()
+        ..sort();
+      return book.copyWith(
+        localPath: localPath,
+        availableOnDeviceIds: availableOn,
+        updatedAt: DateTime.now().toUtc(),
+      );
+    }).toList();
+    if (!found) {
+      throw StateError('Книга не найдена в manifest: $bookId');
+    }
+    final updated = manifest.copyWith(books: updatedBooks);
+    await saveManifest(updated);
+    return updated;
   }
 
   String _defaultDeviceName() {

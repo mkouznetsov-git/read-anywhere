@@ -100,6 +100,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<void> _downloadBook(BookRecord book) async {
+    final started = await widget.sync.requestBookFile(book);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          started
+              ? 'Запросили файл у других устройств'
+              : 'Не удалось начать скачивание. Проверьте подключение к relay.',
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final manifest = _manifest;
@@ -152,28 +166,38 @@ class _LibraryScreenState extends State<LibraryScreen> {
           ? const Center(child: CircularProgressIndicator())
           : books.isEmpty
               ? const _EmptyLibrary()
-              : ListView.builder(
-                  padding: const EdgeInsets.only(bottom: 96),
-                  itemCount: books.length,
-                  itemBuilder: (context, index) {
-                    final book = books[index];
-                    return _BookCard(
-                      book: book,
-                      currentDeviceId: manifest.deviceId,
-                      onOpen: book.isDownloaded
-                          ? () async {
-                              await Navigator.of(context).push(
-                                MaterialPageRoute(
-                                  builder: (_) => ReaderScreen(
-                                    book: book,
-                                    storage: widget.storage,
-                                    sync: widget.sync,
-                                  ),
-                                ),
-                              );
-                              await _reload();
-                            }
-                          : null,
+              : ValueListenableBuilder<SyncStateSnapshot>(
+                  valueListenable: widget.sync.state,
+                  builder: (context, syncState, _) {
+                    return ListView.builder(
+                      padding: const EdgeInsets.only(bottom: 96),
+                      itemCount: books.length,
+                      itemBuilder: (context, index) {
+                        final book = books[index];
+                        final transfer = syncState.downloadForBook(book.id);
+                        return _BookCard(
+                          book: book,
+                          currentDeviceId: manifest.deviceId,
+                          transfer: transfer,
+                          onDownload: !book.isDownloaded && transfer?.active != true
+                              ? () => _downloadBook(book)
+                              : null,
+                          onOpen: book.isDownloaded
+                              ? () async {
+                                  await Navigator.of(context).push(
+                                    MaterialPageRoute(
+                                      builder: (_) => ReaderScreen(
+                                        book: book,
+                                        storage: widget.storage,
+                                        sync: widget.sync,
+                                      ),
+                                    ),
+                                  );
+                                  await _reload();
+                                }
+                              : null,
+                        );
+                      },
                     );
                   },
                 ),
@@ -203,11 +227,15 @@ class _BookCard extends StatelessWidget {
     required this.book,
     required this.currentDeviceId,
     required this.onOpen,
+    required this.onDownload,
+    required this.transfer,
   });
 
   final BookRecord book;
   final String currentDeviceId;
   final VoidCallback? onOpen;
+  final VoidCallback? onDownload;
+  final FileTransferSnapshot? transfer;
 
   @override
   Widget build(BuildContext context) {
@@ -220,6 +248,9 @@ class _BookCard extends StatelessWidget {
             ? 'Не скачана здесь • доступна на $remoteCount устройстве(ах)'
             : 'Только в библиотеке';
     final progress = book.progressPercent.clamp(0, 100).toStringAsFixed(1);
+    final transfer = this.transfer;
+    final isDownloading = transfer?.active == true;
+    final hasDownloadError = transfer?.hasError == true;
 
     return Card(
       child: ListTile(
@@ -237,17 +268,38 @@ class _BookCard extends StatelessWidget {
                 child: LinearProgressIndicator(value: book.progressPercent / 100),
               ),
               const SizedBox(height: 4),
-              Text('Прогресс: $progress%'),
+              Text('Прогресс чтения: $progress%'),
+              if (transfer != null) ...[
+                const SizedBox(height: 10),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(999),
+                  child: LinearProgressIndicator(
+                    value: transfer.progressPercent.clamp(0, 100) / 100,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  hasDownloadError
+                      ? '${transfer.statusText}: ${transfer.error}'
+                      : transfer.statusText,
+                ),
+              ],
             ],
           ),
         ),
-        trailing: IconButton(
-          tooltip: book.isDownloaded ? 'Читать' : 'Скачать позже',
-          onPressed: onOpen,
-          icon: Icon(book.isDownloaded
-              ? Icons.menu_book_rounded
-              : Icons.cloud_download_outlined),
-        ),
+        trailing: isDownloading
+            ? const SizedBox(
+                width: 28,
+                height: 28,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : IconButton(
+                tooltip: book.isDownloaded ? 'Читать' : 'Скачать на это устройство',
+                onPressed: book.isDownloaded ? onOpen : onDownload,
+                icon: Icon(book.isDownloaded
+                    ? Icons.menu_book_rounded
+                    : Icons.cloud_download_outlined),
+              ),
       ),
     );
   }
