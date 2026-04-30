@@ -43,6 +43,7 @@ class BookImportService {
     final exists = await sourceFile.exists();
     if (!exists) throw ArgumentError('File does not exist: ${sourceFile.path}');
 
+    final manifest = await _storage.loadManifest();
     final fileName = p.basename(sourceFile.path);
     final format = p.extension(fileName).replaceFirst('.', '').toLowerCase();
     final digest = await sha256.bind(sourceFile.openRead()).first;
@@ -54,15 +55,42 @@ class BookImportService {
     final destinationPath = p.join(destinationDir.path, '$sha.$format');
     await sourceFile.copy(destinationPath);
 
-    final book = BookRecord(
-      id: sha,
-      title: title,
-      fileName: fileName,
-      format: format,
-      sizeBytes: size,
-      contentSha256: sha,
-      localPath: destinationPath,
-    );
+    BookRecord? existing;
+    for (final candidate in manifest.books) {
+      if (candidate.id == sha) {
+        existing = candidate;
+        break;
+      }
+    }
+
+    final availableOn = <String>{
+      ...?existing?.availableOnDeviceIds,
+      manifest.deviceId,
+    }.toList()
+      ..sort();
+
+    final book = existing == null
+        ? BookRecord(
+            id: sha,
+            title: title,
+            fileName: fileName,
+            format: format,
+            sizeBytes: size,
+            contentSha256: sha,
+            localPath: destinationPath,
+            availableOnDeviceIds: availableOn,
+            updatedByDeviceId: manifest.deviceId,
+          )
+        : existing.copyWith(
+            title: title,
+            fileName: fileName,
+            format: format,
+            sizeBytes: size,
+            contentSha256: sha,
+            localPath: destinationPath,
+            availableOnDeviceIds: availableOn,
+            updatedAt: DateTime.now().toUtc(),
+          );
     await _storage.upsertBook(book);
     return book;
   }

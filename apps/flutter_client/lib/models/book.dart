@@ -65,11 +65,13 @@ class BookmarkRecord {
         label: json['label'] as String? ?? 'Закладка',
         locator: json['locator'] as String? ?? '',
         note: json['note'] as String?,
-        createdAt: DateTime.parse(json['createdAt'] as String),
-        updatedAt: DateTime.parse(json['updatedAt'] as String),
+        createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ??
+            DateTime.now().toUtc(),
+        updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
+            DateTime.now().toUtc(),
         deletedAt: json['deletedAt'] == null
             ? null
-            : DateTime.parse(json['deletedAt'] as String),
+            : DateTime.tryParse(json['deletedAt'] as String),
       );
 }
 
@@ -88,9 +90,11 @@ class BookRecord {
     this.currentLocator = '',
     this.progressVersion = 0,
     this.updatedByDeviceId = 'local-device',
+    List<String>? availableOnDeviceIds,
     List<BookmarkRecord>? bookmarks,
   })  : addedAt = addedAt ?? DateTime.now().toUtc(),
         updatedAt = updatedAt ?? DateTime.now().toUtc(),
+        availableOnDeviceIds = _uniqueStrings(availableOnDeviceIds ?? const []),
         bookmarks = bookmarks ?? [];
 
   final String id;
@@ -99,19 +103,26 @@ class BookRecord {
   final String format;
   final int sizeBytes;
   final String contentSha256;
+
+  /// Path is intentionally local-only. It must never be trusted from another
+  /// device. Remote snapshots carry [availableOnDeviceIds] instead.
   final String? localPath;
+
   final DateTime addedAt;
   final DateTime updatedAt;
   final double progressPercent;
   final String currentLocator;
   final int progressVersion;
   final String updatedByDeviceId;
+  final List<String> availableOnDeviceIds;
   final List<BookmarkRecord> bookmarks;
 
   bool get isDownloaded => localPath != null && localPath!.isNotEmpty;
 
   BookDownloadStatus get downloadStatus =>
       isDownloaded ? BookDownloadStatus.downloaded : BookDownloadStatus.remoteOnly;
+
+  bool isAvailableOnDevice(String deviceId) => availableOnDeviceIds.contains(deviceId);
 
   BookRecord copyWith({
     String? title,
@@ -125,6 +136,7 @@ class BookRecord {
     String? currentLocator,
     int? progressVersion,
     String? updatedByDeviceId,
+    List<String>? availableOnDeviceIds,
     List<BookmarkRecord>? bookmarks,
   }) {
     return BookRecord(
@@ -141,24 +153,26 @@ class BookRecord {
       currentLocator: currentLocator ?? this.currentLocator,
       progressVersion: progressVersion ?? this.progressVersion,
       updatedByDeviceId: updatedByDeviceId ?? this.updatedByDeviceId,
+      availableOnDeviceIds: availableOnDeviceIds ?? this.availableOnDeviceIds,
       bookmarks: bookmarks ?? this.bookmarks,
     );
   }
 
-  Map<String, dynamic> toJson() => {
+  Map<String, dynamic> toJson({bool includeLocalPath = true}) => {
         'id': id,
         'title': title,
         'fileName': fileName,
         'format': format,
         'sizeBytes': sizeBytes,
         'contentSha256': contentSha256,
-        'localPath': localPath,
+        'localPath': includeLocalPath ? localPath : null,
         'addedAt': addedAt.toIso8601String(),
         'updatedAt': updatedAt.toIso8601String(),
         'progressPercent': progressPercent,
         'currentLocator': currentLocator,
         'progressVersion': progressVersion,
         'updatedByDeviceId': updatedByDeviceId,
+        'availableOnDeviceIds': availableOnDeviceIds,
         'bookmarks': bookmarks.map((b) => b.toJson()).toList(),
       };
 
@@ -170,14 +184,23 @@ class BookRecord {
         sizeBytes: (json['sizeBytes'] as num?)?.toInt() ?? 0,
         contentSha256: json['contentSha256'] as String? ?? json['id'] as String,
         localPath: json['localPath'] as String?,
-        addedAt: DateTime.parse(json['addedAt'] as String),
-        updatedAt: DateTime.parse(json['updatedAt'] as String),
+        addedAt: DateTime.tryParse(json['addedAt'] as String? ?? '') ??
+            DateTime.now().toUtc(),
+        updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
+            DateTime.now().toUtc(),
         progressPercent: (json['progressPercent'] as num?)?.toDouble() ?? 0,
         currentLocator: json['currentLocator'] as String? ?? '',
         progressVersion: (json['progressVersion'] as num?)?.toInt() ?? 0,
         updatedByDeviceId: json['updatedByDeviceId'] as String? ?? 'unknown',
+        availableOnDeviceIds: ((json['availableOnDeviceIds'] as List?) ?? [])
+            .map((item) => item.toString())
+            .toList(),
         bookmarks: ((json['bookmarks'] as List?) ?? [])
             .map((item) => BookmarkRecord.fromJson(item as Map<String, dynamic>))
             .toList(),
       );
+}
+
+List<String> _uniqueStrings(List<String> items) {
+  return items.where((item) => item.trim().isNotEmpty).toSet().toList()..sort();
 }

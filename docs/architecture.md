@@ -156,3 +156,17 @@ Relay не должен хранить сообщения, книги или man
 The product must sync over the internet, not only inside LAN. The chosen approach is a self-hosted rendezvous/relay service that never stores account data or book files. Devices keep the authoritative local copies. The relay only helps devices discover each other and, when direct P2P is unavailable, forwards encrypted messages/chunks in transit.
 
 See also: `docs/adr_002_internet_sync_and_format_scope.md`.
+
+## Sprint 2 implementation note: metadata sync MVP
+
+В Sprint 2 metadata sync реализован через `library_snapshot` поверх self-hosted WebSocket relay. Клиент отправляет portable manifest через `LibraryManifest.toSyncJson()`, где намеренно удалены локальные файловые пути. На принимающем устройстве snapshot объединяется с локальным manifest через `mergeManifests()`.
+
+Ключевые файлы:
+
+- `lib/services/sync/sync_service.dart` — состояние подключения, отправка/приём snapshot;
+- `lib/services/sync/relay_client.dart` — WebSocket transport;
+- `lib/services/sync/merge.dart` — merge правил;
+- `lib/models/book.dart` — `availableOnDeviceIds` и локальный `localPath`;
+- `lib/main.dart` — экран синхронизации и вызовы broadcast после изменений.
+
+Текущее решение сознательно не является финальной безопасной синхронизацией. Оно нужно для ранней проверки пользовательского сценария через интернет. Следующий этап: QR-pairing, device keys, подпись событий, E2E encryption и offline queue.

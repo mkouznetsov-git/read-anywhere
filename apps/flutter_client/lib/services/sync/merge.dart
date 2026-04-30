@@ -25,6 +25,7 @@ LibraryManifest mergeManifests(LibraryManifest local, LibraryManifest remote) {
         currentLocator: remoteBook.currentLocator,
         progressVersion: remoteBook.progressVersion,
         updatedByDeviceId: remoteBook.updatedByDeviceId,
+        availableOnDeviceIds: remoteBook.availableOnDeviceIds,
         bookmarks: remoteBook.bookmarks,
       );
       continue;
@@ -42,6 +43,11 @@ LibraryManifest mergeManifests(LibraryManifest local, LibraryManifest remote) {
 BookRecord _mergeBook(BookRecord local, BookRecord remote) {
   final progressWinner = _progressCompare(local, remote) >= 0 ? local : remote;
   final bookmarks = _mergeBookmarks(local.bookmarks, remote.bookmarks);
+  final availableOn = <String>{
+    ...local.availableOnDeviceIds,
+    ...remote.availableOnDeviceIds,
+  }.toList()
+    ..sort();
 
   // Important: localPath is never accepted from another device. A remote book may
   // be visible in the library but still not downloaded on this device.
@@ -56,6 +62,7 @@ BookRecord _mergeBook(BookRecord local, BookRecord remote) {
     currentLocator: progressWinner.currentLocator,
     progressVersion: progressWinner.progressVersion,
     updatedByDeviceId: progressWinner.updatedByDeviceId,
+    availableOnDeviceIds: availableOn,
     bookmarks: bookmarks,
     updatedAt: DateTime.now().toUtc(),
   );

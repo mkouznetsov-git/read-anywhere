@@ -60,3 +60,19 @@ curl http://127.0.0.1:8787/health
 - подробная инструкция: `docs/build_installers_ru.md`.
 
 Для публичной раздачи macOS-сборок потребуется Apple Developer ID signing + notarization. Для Android production-сборки потребуется release signing keystore.
+
+## Sprint 2: metadata sync через интернет
+
+В обновлении Sprint 2 добавлена первая рабочая синхронизация metadata через self-hosted WebSocket relay:
+
+- экран **Синхронизация** в приложении;
+- настройка `Relay URL`;
+- ручной MVP-pairing через одинаковый `accountId` на двух устройствах;
+- отправка `library_snapshot` при подключении, добавлении книги, изменении прогресса и добавлении закладки;
+- merge библиотеки, прогресса и закладок;
+- отображение статуса книги: скачана локально или доступна на другом устройстве;
+- Android INTERNET permission добавляется скриптом `prepare_flutter_platforms.sh`.
+
+Подробности и сценарий проверки Mac ↔ Android: `docs/sprint_02_metadata_sync_ru.md`.
+
+Важно: ручной `accountId` — временный тестовый pairing. Для production нужен QR-pairing, ключи устройств, подпись событий и E2E encryption.
