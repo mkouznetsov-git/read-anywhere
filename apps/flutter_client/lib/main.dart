@@ -38,7 +38,7 @@ class _ReadAnywhereAppState extends State<ReadAnywhereApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Read anywhere',
+      title: 'ReadAnywhere',
       theme: ReadAnywhereTheme.light(),
       home: LibraryScreen(storage: _storage, sync: _sync),
     );
@@ -122,7 +122,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Read anywhere'),
+        title: const Text('ReadAnywhere'),
         actions: [
           ValueListenableBuilder<SyncStateSnapshot>(
             valueListenable: widget.sync.state,
@@ -728,6 +728,9 @@ class _SyncScreenState extends State<SyncScreen> {
                   children: [
                     Text(syncState.statusText),
                     const SizedBox(height: 8),
+                    SelectableText('accountId: ${manifest.accountId}'),
+                    Text('device: ${manifest.deviceName}'),
+                    const SizedBox(height: 8),
                     Text('Отправлено событий: ${syncState.sentEvents}'),
                     Text('Получено событий: ${syncState.receivedEvents}'),
                   ],
@@ -784,8 +787,15 @@ class _SyncScreenState extends State<SyncScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'Для теста Mac ↔ Android укажите одинаковый accountId на обоих устройствах. Это временный ручной pairing; QR-код и ключи будут в следующем спринте.',
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        color: Theme.of(context).colorScheme.tertiaryContainer,
+                      ),
+                      child: const Text(
+                        'Важно: библиотека синхронизируется только между устройствами с одинаковым accountId. Скопируйте accountId с первого устройства, вставьте на втором и нажмите “Сохранить” перед подключением.',
+                      ),
                     ),
                     const SizedBox(height: 12),
                     TextField(

@@ -22,6 +22,12 @@ if [[ -f "$ANDROID_MANIFEST" ]] && ! grep -q "android.permission.INTERNET" "$AND
   perl -0pi -e 's#<manifest([^>]*)>#<manifest$1>\n    <uses-permission android:name="android.permission.INTERNET" />#' "$ANDROID_MANIFEST"
 fi
 
+
+# Friendly Android launcher name.
+if [[ -f "$ANDROID_MANIFEST" ]]; then
+  perl -0pi -e 's#android:label="[^"]*"#android:label="ReadAnywhere"#' "$ANDROID_MANIFEST"
+fi
+
 # Debug MVP may use ws:// or http:// relay. Production should use HTTPS/WSS and remove cleartext.
 if [[ -f "$ANDROID_MANIFEST" ]] && ! grep -q "usesCleartextTraffic" "$ANDROID_MANIFEST"; then
   perl -0pi -e 's#<application#<application android:usesCleartextTraffic="true"#' "$ANDROID_MANIFEST"
@@ -29,8 +35,15 @@ fi
 
 # Friendly macOS app name.
 if [[ -f macos/Runner/Info.plist && -x /usr/libexec/PlistBuddy ]]; then
-  /usr/libexec/PlistBuddy -c "Set :CFBundleName Read anywhere" macos/Runner/Info.plist || true
-  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Read anywhere" macos/Runner/Info.plist || true
+  /usr/libexec/PlistBuddy -c "Set :CFBundleName ReadAnywhere" macos/Runner/Info.plist || true
+  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName ReadAnywhere" macos/Runner/Info.plist || true
+fi
+
+
+# Friendly macOS product name for generated .app bundles.
+MACOS_APPINFO="macos/Runner/Configs/AppInfo.xcconfig"
+if [[ -f "$MACOS_APPINFO" ]]; then
+  perl -0pi -e 's#PRODUCT_NAME = .*#PRODUCT_NAME = ReadAnywhere#' "$MACOS_APPINFO"
 fi
 
 # File picker / local file access and outgoing network entitlement for macOS sandbox builds.

@@ -4,11 +4,30 @@ on:
   workflow_dispatch:
   push:
     branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
 
 jobs:
+  tests:
+    name: Flutter and relay tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Run tests
+        run: ./scripts/run_tests.sh
+
   android-apk:
     name: Android APK
     runs-on: ubuntu-latest
+    needs: tests
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,6 +56,7 @@ jobs:
   macos-dmg-pkg:
     name: macOS DMG and PKG
     runs-on: macos-latest
+    needs: tests
     steps:
       - name: Checkout
         uses: actions/checkout@v4

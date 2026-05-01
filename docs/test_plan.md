@@ -1,4 +1,4 @@
-# Тест-план Read anywhere
+# Тест-план ReadAnywhere
 
 ## Unit
 
