@@ -1,0 +1,10 @@
+services:
+  relay:
+    build:
+      context: ./server/rendezvous_relay
+    image: readanywhere-relay:dev
+    ports:
+      - "8787:8787"
+    environment:
+      PORT: "8787"
+    restart: unless-stopped

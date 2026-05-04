@@ -8,7 +8,7 @@ from typing import DefaultDict, Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.1.1")
+app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.1.2")
 
 # In-memory only. The relay intentionally stores no books and writes nothing to
 # disk. Sprint 3 hotfix 2 keeps the latest *metadata snapshots* in RAM so a newly
@@ -19,6 +19,16 @@ _snapshot_cache: DefaultDict[str, Dict[str, str]] = defaultdict(dict)
 _lock = asyncio.Lock()
 MAX_MESSAGE_BYTES = 1024 * 1024 * 8  # 8 MB; production should use binary chunks.
 MAX_CACHED_SNAPSHOT_BYTES = 1024 * 1024  # metadata only; book chunks are never cached.
+
+
+@app.get("/")
+async def root() -> JSONResponse:
+    return JSONResponse({
+        "ok": True,
+        "service": "ReadAnywhere Rendezvous Relay",
+        "version": app.version,
+        "websocket": "/ws/{account_id}/{device_id}",
+    })
 
 
 @app.get("/health")

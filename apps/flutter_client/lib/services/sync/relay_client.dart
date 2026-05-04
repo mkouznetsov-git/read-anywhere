@@ -23,10 +23,23 @@ class RelayClient {
   Stream<SyncEnvelope> get incoming => _incoming.stream;
 
   Future<void> connect() async {
-    final scheme = relayUri.scheme == 'https' ? 'wss' : 'ws';
+    final scheme = switch (relayUri.scheme) {
+      'https' => 'wss',
+      'wss' => 'wss',
+      'ws' => 'ws',
+      'http' => 'ws',
+      _ => 'ws',
+    };
+
+    final basePath = relayUri.path.trim();
+    final normalizedBase = basePath == '/' ? '' : basePath.replaceAll(RegExp(r'/+$'), '');
+    final wsPath = normalizedBase.isEmpty || normalizedBase == '/ws'
+        ? '/ws/$accountId/$deviceId'
+        : '$normalizedBase/ws/$accountId/$deviceId';
+
     final wsUri = relayUri.replace(
       scheme: scheme,
-      path: '/ws/$accountId/$deviceId',
+      path: wsPath,
       query: '',
     );
     final channel = WebSocketChannel.connect(wsUri);

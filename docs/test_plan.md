@@ -90,3 +90,31 @@
 6. Verify the book can be opened on Android and reading progress still syncs back to macOS.
 7. Interrupt relay during a large transfer and verify the book is not marked as downloaded.
 8. Retry download and verify SHA-256 validation succeeds.
+
+## Sprint 4.0 checks
+
+### Relay endpoint modes
+
+1. Start relay locally with Docker:
+
+```bash
+docker compose up --build relay
+```
+
+2. In app select **Local development** on desktop and connect.
+3. In app select **Custom relay**, set a reachable URL, and connect.
+4. Build with `READANYWHERE_DEFAULT_RELAY_URL=https://your-service.koyeb.app` and select **ReadAnywhere relay**.
+5. Restart app and verify auto-connect is attempted after a successful connection.
+6. Press **Disconnect** and verify auto-connect is disabled.
+
+### CI
+
+GitHub Actions must run:
+
+```text
+Flutter tests
+Python relay syntax check
+Docker relay build smoke check
+Android APK build
+macOS DMG/PKG build
+```

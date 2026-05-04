@@ -12,7 +12,12 @@ PKG_NAME="ReadAnywhere-${VERSION}-macos.pkg"
 "$ROOT_DIR/scripts/prepare_flutter_platforms.sh"
 
 cd "$APP_DIR"
-flutter build macos --release
+DART_DEFINES=()
+if [[ -n "${READANYWHERE_DEFAULT_RELAY_URL:-}" ]]; then
+  DART_DEFINES+=("--dart-define=READANYWHERE_DEFAULT_RELAY_URL=${READANYWHERE_DEFAULT_RELAY_URL}")
+fi
+
+flutter build macos --release "${DART_DEFINES[@]}"
 
 APP_PATH="$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' -print -quit)"
 if [[ -z "${APP_PATH:-}" || ! -d "$APP_PATH" ]]; then

@@ -184,3 +184,19 @@ requesting device -> SHA-256 verification -> local books directory
 ```
 
 The relay remains in-memory and does not persist files. Sprint 3 uses JSON/base64 chunks with a conservative 256 KiB chunk size. This is intentionally simple for MVP testing. Production should use encrypted binary frames, chunk resume, direct LAN/P2P transfer when possible, and relay only as internet fallback.
+
+## Sprint 4.0: endpoint modes
+
+Синхронизация теперь проектируется так, чтобы обычный пользователь не вводил IP-адреса.
+
+Режимы:
+
+```text
+ReadAnywhere relay — официальный/default endpoint, задаётся на этапе сборки
+Свой relay — пользовательский публичный или домашний relay
+Локальная разработка — localhost/dev endpoint
+```
+
+Это не меняет принцип хранения данных: книги остаются на устройствах пользователя, relay пересылает сообщения и хранит только короткоживущий in-memory metadata cache для устойчивости подключения.
+
+Для MVP публичный endpoint можно развернуть на Koyeb или другом WebSocket-compatible hosting. Позже поверх этого будет добавлен pairing-код/QR, чтобы пользователь не копировал `accountId` вручную.

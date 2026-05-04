@@ -10,7 +10,6 @@ import 'package:uuid/uuid.dart';
 
 import '../../models/book.dart';
 import '../../models/manifest.dart';
-import '../../models/sync_settings.dart';
 import '../storage_service.dart';
 import 'merge.dart';
 import 'relay_client.dart';
@@ -163,7 +162,6 @@ class SyncService {
     );
 
     await client.connect();
-    await _storage.saveSyncSettings(SyncSettings(relayUrl: relayUrl.trim()));
     _appendLog('Подключено к $relayUrl');
     _setState(
       state.value.copyWith(connected: true, statusText: 'Подключено'),

@@ -108,3 +108,34 @@ TXT-reader больше не рендерит весь файл одним бо�
 ```
 
 Внутри проверяются Flutter-тесты клиента и синтаксис relay-сервера. Android APK и macOS DMG/PKG собираются только если этот job завершился успешно.
+
+## Sprint 4.0: публичный/self-hosted relay без ручного IP в будущем
+
+Добавлена подготовка к zero-config sync endpoint:
+
+- режим **ReadAnywhere relay** — endpoint компилируется в приложение через `READANYWHERE_DEFAULT_RELAY_URL`;
+- режим **Свой relay** — для Koyeb/VPS/Cloudflare Tunnel/self-hosted;
+- режим **Локальная разработка** — `http://127.0.0.1:8787`;
+- после успешного подключения включается автоподключение при следующем запуске;
+- relay теперь можно запускать через Docker/Docker Compose.
+
+Документы:
+
+```text
+docs/relay_hosting_koyeb_ru.md
+docs/sprint_04_0_hosted_relay_bootstrap_ru.md
+```
+
+Локальный Docker-запуск relay:
+
+```bash
+docker compose up --build relay
+```
+
+Сборка клиента с endpoint по умолчанию:
+
+```bash
+READANYWHERE_DEFAULT_RELAY_URL=https://your-service.koyeb.app ./scripts/package_android.sh
+```
+
+В GitHub Actions можно передать `default_relay_url` при ручном запуске workflow или создать repository variable `READANYWHERE_DEFAULT_RELAY_URL`.

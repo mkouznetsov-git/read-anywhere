@@ -29,6 +29,23 @@ class _ReadAnywhereAppState extends State<ReadAnywhereApp> {
   late final _sync = SyncService(_storage);
 
   @override
+  void initState() {
+    super.initState();
+    unawaited(_autoConnectSync());
+  }
+
+  Future<void> _autoConnectSync() async {
+    try {
+      final settings = await _storage.loadSyncSettings();
+      if (!settings.autoConnect) return;
+      if (settings.usesOfficialPlaceholder) return;
+      await _sync.connect(relayUrl: settings.effectiveRelayUrl);
+    } catch (error) {
+      debugPrint('ReadAnywhere auto-connect failed: $error');
+    }
+  }
+
+  @override
   void dispose() {
     unawaited(_sync.dispose());
     super.dispose();
@@ -608,6 +625,7 @@ class _SyncScreenState extends State<SyncScreen> {
   final _deviceNameController = TextEditingController();
   LibraryManifest? _manifest;
   SyncSettings? _settings;
+  RelayEndpointMode _endpointMode = RelayEndpointMode.custom;
   bool _busy = false;
 
   @override
@@ -630,7 +648,8 @@ class _SyncScreenState extends State<SyncScreen> {
     if (!mounted) return;
     _manifest = manifest;
     _settings = settings;
-    _relayController.text = settings.relayUrl;
+    _endpointMode = settings.endpointMode;
+    _relayController.text = settings.customRelayUrl;
     _accountController.text = manifest.accountId;
     _deviceNameController.text = manifest.deviceName;
     setState(() {});
@@ -660,10 +679,18 @@ class _SyncScreenState extends State<SyncScreen> {
   Future<void> _connect() async {
     setState(() => _busy = true);
     try {
-      await widget.storage.saveSyncSettings(
-        SyncSettings(relayUrl: _relayController.text.trim()),
+      final settings = SyncSettings(
+        endpointMode: _endpointMode,
+        customRelayUrl: _relayController.text.trim(),
+        autoConnect: true,
       );
-      await widget.sync.connect(relayUrl: _relayController.text.trim());
+      if (settings.usesOfficialPlaceholder) {
+        throw StateError(
+          'Официальный relay ещё не настроен в этой сборке. Выберите “Свой relay” или соберите приложение с READANYWHERE_DEFAULT_RELAY_URL.',
+        );
+      }
+      await widget.storage.saveSyncSettings(settings);
+      await widget.sync.connect(relayUrl: settings.effectiveRelayUrl);
       _settings = await widget.storage.loadSyncSettings();
       _manifest = await widget.storage.loadManifest();
       if (mounted) setState(() {});
@@ -679,6 +706,10 @@ class _SyncScreenState extends State<SyncScreen> {
 
   Future<void> _disconnect() async {
     await widget.sync.disconnect();
+    final settings = await widget.storage.loadSyncSettings();
+    await widget.storage.saveSyncSettings(settings.copyWith(autoConnect: false));
+    if (!mounted) return;
+    setState(() => _settings = settings.copyWith(autoConnect: false));
   }
 
   Future<void> _sendSnapshot() async {
@@ -737,16 +768,50 @@ class _SyncScreenState extends State<SyncScreen> {
                 ),
               ),
               _SectionCard(
-                title: 'Relay через интернет',
+                title: 'Relay endpoint',
                 child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    TextField(
-                      controller: _relayController,
-                      decoration: const InputDecoration(
-                        labelText: 'Relay URL',
-                        helperText: 'Например: http://your-server:8787',
-                      ),
+                    const Text(
+                      'Обычно пользователь не должен вводить IP-адрес. Для разработки можно выбрать локальный или свой relay; для продуктовой сборки задайте официальный endpoint через dart-define.',
                     ),
+                    const SizedBox(height: 12),
+                    _RelayModeOption(
+                      value: RelayEndpointMode.official,
+                      groupValue: _endpointMode,
+                      title: 'ReadAnywhere relay',
+                      subtitle: ReadAnywhereRelayConfig.officialRelayUrl,
+                      onChanged: (value) => setState(() => _endpointMode = value),
+                    ),
+                    _RelayModeOption(
+                      value: RelayEndpointMode.custom,
+                      groupValue: _endpointMode,
+                      title: 'Свой relay',
+                      subtitle: 'Koyeb, VPS, Cloudflare Tunnel, домашний сервер',
+                      onChanged: (value) => setState(() => _endpointMode = value),
+                    ),
+                    if (_endpointMode == RelayEndpointMode.custom) ...[
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: _relayController,
+                        decoration: const InputDecoration(
+                          labelText: 'Custom Relay URL',
+                          helperText: 'Например: https://your-app.koyeb.app или http://192.168.1.10:8787',
+                        ),
+                      ),
+                    ],
+                    _RelayModeOption(
+                      value: RelayEndpointMode.localDevelopment,
+                      groupValue: _endpointMode,
+                      title: 'Локальная разработка',
+                      subtitle: ReadAnywhereRelayConfig.localDevelopmentRelayUrl,
+                      onChanged: (value) => setState(() => _endpointMode = value),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Текущий endpoint: ${SyncSettings(endpointMode: _endpointMode, customRelayUrl: _relayController.text).effectiveRelayUrl}',
+                    ),
+                    Text("Автоподключение: ${_settings?.autoConnect == true ? 'включено' : 'выключено'}"),
                     const SizedBox(height: 12),
                     Row(
                       children: [
@@ -845,6 +910,37 @@ class _SyncScreenState extends State<SyncScreen> {
           );
         },
       ),
+    );
+  }
+}
+
+
+class _RelayModeOption extends StatelessWidget {
+  const _RelayModeOption({
+    required this.value,
+    required this.groupValue,
+    required this.title,
+    required this.subtitle,
+    required this.onChanged,
+  });
+
+  final RelayEndpointMode value;
+  final RelayEndpointMode groupValue;
+  final String title;
+  final String subtitle;
+  final ValueChanged<RelayEndpointMode> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return RadioListTile<RelayEndpointMode>(
+      contentPadding: EdgeInsets.zero,
+      value: value,
+      groupValue: groupValue,
+      onChanged: (next) {
+        if (next != null) onChanged(next);
+      },
+      title: Text(title),
+      subtitle: Text(subtitle),
     );
   }
 }

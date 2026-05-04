@@ -14,3 +14,10 @@ if command -v python3 >/dev/null 2>&1; then
   cd "$ROOT_DIR"
   python3 -m py_compile server/rendezvous_relay/main.py
 fi
+
+
+# Optional relay container smoke check for CI/local machines with Docker.
+if command -v docker >/dev/null 2>&1; then
+  cd "$ROOT_DIR"
+  docker build -t readanywhere-relay:test server/rendezvous_relay
+fi
