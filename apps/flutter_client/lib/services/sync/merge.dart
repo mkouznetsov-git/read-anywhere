@@ -35,6 +35,7 @@ LibraryManifest mergeManifests(LibraryManifest local, LibraryManifest remote) {
 
   return local.copyWith(
     updatedAt: DateTime.now().toUtc(),
+    trustedDevices: _mergeTrustedDevices(local.trustedDevices, remote.trustedDevices),
     books: mergedById.values.toList()
       ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt)),
   );
@@ -89,4 +90,19 @@ List<BookmarkRecord> _mergeBookmarks(
   }
   return byId.values.where((b) => !b.isDeleted).toList()
     ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+}
+
+
+List<TrustedDeviceRecord> _mergeTrustedDevices(
+  List<TrustedDeviceRecord> local,
+  List<TrustedDeviceRecord> remote,
+) {
+  final byId = <String, TrustedDeviceRecord>{};
+  for (final device in [...local, ...remote]) {
+    final existing = byId[device.deviceId];
+    if (existing == null || device.lastSeenAt.isAfter(existing.lastSeenAt)) {
+      byId[device.deviceId] = device;
+    }
+  }
+  return byId.values.toList()..sort((a, b) => a.name.compareTo(b.name));
 }

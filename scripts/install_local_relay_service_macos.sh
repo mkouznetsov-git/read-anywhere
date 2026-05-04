@@ -21,7 +21,7 @@ cat > "$PLIST" <<PLIST
   <key>EnvironmentVariables</key>
   <dict>
     <key>READANYWHERE_RELAY_HOST</key>
-    <string>127.0.0.1</string>
+    <string>0.0.0.0</string>
     <key>READANYWHERE_RELAY_PORT</key>
     <string>8787</string>
   </dict>

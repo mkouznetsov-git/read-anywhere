@@ -110,4 +110,22 @@ void main() {
       'bookmark-b',
     ]);
   });
+
+  test('merge trusted devices from both manifests', () {
+    final merged = mergeManifests(
+      LibraryManifest(
+        accountId: 'acc',
+        deviceId: 'a',
+        trustedDevices: [TrustedDeviceRecord(deviceId: 'a', name: 'Mac', role: 'owner')],
+      ),
+      LibraryManifest(
+        accountId: 'acc',
+        deviceId: 'b',
+        trustedDevices: [TrustedDeviceRecord(deviceId: 'b', name: 'Android')],
+      ),
+    );
+
+    expect(merged.trustedDevices.map((d) => d.deviceId).toSet(), {'a', 'b'});
+  });
+
 }

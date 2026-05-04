@@ -219,3 +219,13 @@ build_debug_artifacts = true
 ```
 
 Подробнее: `docs/sprint_04_1_cleanup_01_release_artifacts_ru.md`.
+
+
+### Personal Hub connectivity hotfix
+
+Если локальный relay запущен, но приложение показывает `Connection refused` на адресе `192.168.x.x:8787`, обновите скрипты из Sprint 4.1 Hotfix 01. Теперь `./scripts/run_local_relay.sh` по умолчанию слушает `0.0.0.0`, а не только `127.0.0.1`, и выводит LAN URL для проверки. Подробнее: `docs/sprint_04_1_hotfix_01_personal_hub_connectivity_ru.md`.
+
+
+## Sprint 4.2: подключение по коду
+
+Добавлен MVP-pairing: первое устройство создаёт 6-значный код подключения, новое устройство вводит код или вставляет `readanywhere://pair?...` приглашение и автоматически получает `accountId` и relay endpoint. Ручной ввод `accountId` оставлен только как fallback для разработки. Relay хранит pairing-коды только в памяти и удаляет их после первого использования или истечения срока. Подробности: `docs/sprint_04_2_pairing_codes_ru.md`.

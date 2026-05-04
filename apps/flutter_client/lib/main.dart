@@ -81,6 +81,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   LibraryManifest? _manifest;
   bool _busy = false;
   bool _healthBusy = false;
+  bool _pairingBusy = false;
+  PairingInvite? _pairingInvite;
   StreamSubscription<LibraryManifest>? _syncSubscription;
 
   @override
@@ -625,11 +627,14 @@ class _SyncScreenState extends State<SyncScreen> {
   final _personalHubRelayController = TextEditingController();
   final _accountController = TextEditingController();
   final _deviceNameController = TextEditingController();
+  final _pairingInputController = TextEditingController();
   LibraryManifest? _manifest;
   SyncSettings? _settings;
   RelayEndpointMode _endpointMode = RelayEndpointMode.custom;
   bool _busy = false;
   bool _healthBusy = false;
+  bool _pairingBusy = false;
+  PairingInvite? _pairingInvite;
 
   @override
   void initState() {
@@ -643,6 +648,7 @@ class _SyncScreenState extends State<SyncScreen> {
     _personalHubRelayController.dispose();
     _accountController.dispose();
     _deviceNameController.dispose();
+    _pairingInputController.dispose();
     super.dispose();
   }
 
@@ -659,6 +665,13 @@ class _SyncScreenState extends State<SyncScreen> {
     _deviceNameController.text = manifest.deviceName;
     setState(() {});
   }
+
+  SyncSettings _settingsFromForm({bool? autoConnect}) => SyncSettings(
+        endpointMode: _endpointMode,
+        customRelayUrl: _relayController.text.trim(),
+        personalHubRelayUrl: _personalHubRelayController.text.trim(),
+        autoConnect: autoConnect ?? _settings?.autoConnect ?? false,
+      );
 
   Future<void> _saveIdentity() async {
     setState(() => _busy = true);
@@ -684,12 +697,7 @@ class _SyncScreenState extends State<SyncScreen> {
   Future<void> _connect() async {
     setState(() => _busy = true);
     try {
-      final settings = SyncSettings(
-        endpointMode: _endpointMode,
-        customRelayUrl: _relayController.text.trim(),
-        personalHubRelayUrl: _personalHubRelayController.text.trim(),
-        autoConnect: true,
-      );
+      final settings = _settingsFromForm(autoConnect: true);
       if (settings.usesOfficialPlaceholder) {
         throw StateError(
           'Официальный relay ещё не настроен в этой сборке. Выберите “Свой relay”, “Personal Hub” или соберите приложение с READANYWHERE_DEFAULT_RELAY_URL.',
@@ -725,12 +733,7 @@ class _SyncScreenState extends State<SyncScreen> {
 
   Future<void> _checkRelayHealth() async {
     setState(() => _healthBusy = true);
-    final settings = SyncSettings(
-      endpointMode: _endpointMode,
-      customRelayUrl: _relayController.text.trim(),
-      personalHubRelayUrl: _personalHubRelayController.text.trim(),
-      autoConnect: _settings?.autoConnect ?? false,
-    );
+    final settings = _settingsFromForm();
     try {
       if (settings.usesOfficialPlaceholder) {
         throw StateError('Официальный relay ещё не настроен в этой сборке.');
@@ -771,6 +774,63 @@ class _SyncScreenState extends State<SyncScreen> {
     } finally {
       if (mounted) setState(() => _healthBusy = false);
     }
+  }
+
+  Future<void> _createPairingInvite() async {
+    setState(() => _pairingBusy = true);
+    try {
+      final settings = _settingsFromForm(autoConnect: _settings?.autoConnect ?? false);
+      await widget.storage.saveSyncSettings(settings);
+      final invite = await widget.sync.createPairingInvite(settings: settings);
+      if (!mounted) return;
+      setState(() {
+        _settings = settings;
+        _pairingInvite = invite;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Код подключения создан')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Не удалось создать код: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _pairingBusy = false);
+    }
+  }
+
+  Future<void> _claimPairingInvite() async {
+    setState(() => _pairingBusy = true);
+    try {
+      final settings = _settingsFromForm(autoConnect: true);
+      final result = await widget.sync.claimPairingInvite(
+        input: _pairingInputController.text,
+        fallbackSettings: settings,
+      );
+      await _load();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Подключено к аккаунту ${result.ownerDeviceName}')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Не удалось подключиться по коду: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _pairingBusy = false);
+    }
+  }
+
+  Future<void> _copyPairingInvite() async {
+    final invite = _pairingInvite;
+    if (invite == null) return;
+    await Clipboard.setData(ClipboardData(text: invite.inviteLink));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Приглашение скопировано')),
+    );
   }
 
   Future<void> _sendSnapshot() async {
@@ -938,7 +998,92 @@ class _SyncScreenState extends State<SyncScreen> {
                 ),
               ),
               _SectionCard(
-                title: 'Pairing MVP',
+                title: 'Подключение устройства',
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Теперь accountId не нужно копировать вручную. На первом устройстве создайте код, на новом устройстве введите код или вставьте приглашение.',
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton.icon(
+                      onPressed: _pairingBusy ? null : _createPairingInvite,
+                      icon: _pairingBusy
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.add_link_rounded),
+                      label: const Text('Создать код подключения'),
+                    ),
+                    if (_pairingInvite != null) ...[
+                      const SizedBox(height: 16),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(18),
+                          color: Theme.of(context).colorScheme.primaryContainer,
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _pairingInvite!.displayCode,
+                              style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text('Действует до: ${_pairingInvite!.expiresAt.toLocal()}'),
+                            const SizedBox(height: 8),
+                            SelectableText('Relay: ${_pairingInvite!.relayUrl}'),
+                            const SizedBox(height: 12),
+                            OutlinedButton.icon(
+                              onPressed: _copyPairingInvite,
+                              icon: const Icon(Icons.copy_rounded),
+                              label: const Text('Скопировать приглашение'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                    const Divider(height: 32),
+                    TextField(
+                      controller: _pairingInputController,
+                      decoration: const InputDecoration(
+                        labelText: 'Код или приглашение',
+                        helperText: 'Например: 483-921 или readanywhere://pair?...',
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton.icon(
+                      onPressed: _pairingBusy ? null : _claimPairingInvite,
+                      icon: const Icon(Icons.login_rounded),
+                      label: const Text('Подключиться по коду'),
+                    ),
+                  ],
+                ),
+              ),
+              _SectionCard(
+                title: 'Доверенные устройства',
+                child: manifest.trustedDevices.isEmpty
+                    ? const Text('Пока только текущее устройство')
+                    : Column(
+                        children: manifest.trustedDevices.map((device) {
+                          final isCurrent = device.deviceId == manifest.deviceId;
+                          return ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            leading: Icon(isCurrent ? Icons.phone_iphone_rounded : Icons.devices_rounded),
+                            title: Text('${device.name}${isCurrent ? ' • это устройство' : ''}'),
+                            subtitle: Text('${device.role} • ${device.deviceId}'),
+                          );
+                        }).toList(),
+                      ),
+              ),
+              _SectionCard(
+                title: 'Дополнительно: ручной accountId',
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -949,7 +1094,7 @@ class _SyncScreenState extends State<SyncScreen> {
                         color: Theme.of(context).colorScheme.tertiaryContainer,
                       ),
                       child: const Text(
-                        'Важно: библиотека синхронизируется только между устройствами с одинаковым accountId. Скопируйте accountId с первого устройства, вставьте на втором и нажмите “Сохранить” перед подключением.',
+                        'Ручной accountId оставлен только как fallback для разработки. В обычном сценарии используйте подключение по коду выше.',
                       ),
                     ),
                     const SizedBox(height: 12),

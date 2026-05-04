@@ -42,16 +42,26 @@ class StorageService {
   Future<LibraryManifest> loadManifest() async {
     final file = await manifestFile();
     if (!await file.exists()) {
+      final deviceId = 'device-${_uuid.v4()}';
+      final deviceName = _defaultDeviceName();
       final manifest = LibraryManifest(
         accountId: 'account-${_uuid.v4()}',
-        deviceId: 'device-${_uuid.v4()}',
-        deviceName: _defaultDeviceName(),
+        deviceId: deviceId,
+        deviceName: deviceName,
+        trustedDevices: [
+          TrustedDeviceRecord(deviceId: deviceId, name: deviceName, role: 'owner'),
+        ],
       );
       await saveManifest(manifest);
       return manifest;
     }
     final raw = await file.readAsString();
-    return LibraryManifest.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    final manifest = LibraryManifest.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    final migrated = _ensureCurrentDeviceTrusted(manifest);
+    if (!identical(migrated, manifest)) {
+      await saveManifest(migrated);
+    }
+    return migrated;
   }
 
   Future<void> saveManifest(LibraryManifest manifest) async {
@@ -90,9 +100,64 @@ class StorageService {
       throw ArgumentError('Название устройства не может быть пустым');
     }
     final manifest = await loadManifest();
-    final updated = manifest.copyWith(deviceName: normalized);
+    final devices = manifest.trustedDevices.map((device) {
+      if (device.deviceId != manifest.deviceId) return device;
+      return device.copyWith(name: normalized, lastSeenAt: DateTime.now().toUtc());
+    }).toList();
+    final updated = manifest.copyWith(deviceName: normalized, trustedDevices: devices);
     await saveManifest(updated);
     return updated;
+  }
+
+
+  Future<LibraryManifest> trustDevice({
+    required String deviceId,
+    required String name,
+    String role = 'device',
+  }) async {
+    final normalizedId = deviceId.trim();
+    final normalizedName = name.trim().isEmpty ? 'Устройство' : name.trim();
+    if (normalizedId.isEmpty) {
+      throw ArgumentError('deviceId не может быть пустым');
+    }
+    final manifest = await loadManifest();
+    final devices = [...manifest.trustedDevices];
+    final index = devices.indexWhere((d) => d.deviceId == normalizedId);
+    if (index >= 0) {
+      devices[index] = devices[index].copyWith(
+        name: normalizedName,
+        role: devices[index].role == 'owner' ? 'owner' : role,
+        lastSeenAt: DateTime.now().toUtc(),
+      );
+    } else {
+      devices.add(TrustedDeviceRecord(
+        deviceId: normalizedId,
+        name: normalizedName,
+        role: role,
+      ));
+    }
+    devices.sort((a, b) => a.name.compareTo(b.name));
+    final updated = manifest.copyWith(trustedDevices: devices);
+    await saveManifest(updated);
+    return updated;
+  }
+
+  Future<LibraryManifest> replaceAccountFromPairing({
+    required String accountId,
+    required String ownerDeviceId,
+    required String ownerDeviceName,
+  }) async {
+    final manifest = await changeAccountId(accountId);
+    final withOwner = await trustDevice(
+      deviceId: ownerDeviceId,
+      name: ownerDeviceName,
+      role: 'owner',
+    );
+    return trustDevice(
+      deviceId: withOwner.deviceId,
+      name: withOwner.deviceName,
+      role: 'device',
+    );
   }
 
   Future<void> upsertBook(BookRecord book) async {
@@ -190,6 +255,22 @@ class StorageService {
     final updated = manifest.copyWith(books: updatedBooks);
     await saveManifest(updated);
     return updated;
+  }
+
+
+  LibraryManifest _ensureCurrentDeviceTrusted(LibraryManifest manifest) {
+    final hasCurrent = manifest.trustedDevices.any((d) => d.deviceId == manifest.deviceId);
+    if (hasCurrent) return manifest;
+    return manifest.copyWith(
+      trustedDevices: [
+        ...manifest.trustedDevices,
+        TrustedDeviceRecord(
+          deviceId: manifest.deviceId,
+          name: manifest.deviceName,
+          role: manifest.trustedDevices.isEmpty ? 'owner' : 'device',
+        ),
+      ],
+    );
   }
 
   String _defaultDeviceName() {

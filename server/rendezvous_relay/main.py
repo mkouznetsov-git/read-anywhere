@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
+import time
 from collections import defaultdict
 from typing import DefaultDict, Dict
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.1.2")
+app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.1.3")
 
 # In-memory only. The relay intentionally stores no books and writes nothing to
 # disk. Sprint 3 hotfix 2 keeps the latest *metadata snapshots* in RAM so a newly
@@ -16,9 +18,11 @@ app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.1.2")
 # messages race each other on mobile networks. Restarting the relay drops it all.
 _rooms: DefaultDict[str, Dict[WebSocket, str]] = defaultdict(dict)
 _snapshot_cache: DefaultDict[str, Dict[str, str]] = defaultdict(dict)
+_pairing_codes: Dict[str, dict] = {}
 _lock = asyncio.Lock()
 MAX_MESSAGE_BYTES = 1024 * 1024 * 8  # 8 MB; production should use binary chunks.
 MAX_CACHED_SNAPSHOT_BYTES = 1024 * 1024  # metadata only; book chunks are never cached.
+PAIRING_TTL_SECONDS = 5 * 60
 
 
 @app.get("/")
@@ -33,6 +37,7 @@ async def root() -> JSONResponse:
 
 @app.get("/health")
 async def health() -> JSONResponse:
+    await _cleanup_expired_pairing_codes()
     async with _lock:
         rooms = {
             account_id: {
@@ -41,7 +46,77 @@ async def health() -> JSONResponse:
             }
             for account_id, device_ids in _rooms.items()
         }
-    return JSONResponse({"ok": True, "rooms": rooms})
+        active_pairing_codes = len(_pairing_codes)
+    return JSONResponse({"ok": True, "rooms": rooms, "pairing_codes": active_pairing_codes})
+
+
+@app.post("/pairing/start")
+async def start_pairing(request: Request) -> JSONResponse:
+    payload = await request.json()
+    account_id = str(payload.get("accountId") or "").strip()
+    owner_device_id = str(payload.get("ownerDeviceId") or "").strip()
+    owner_device_name = str(payload.get("ownerDeviceName") or "Устройство").strip()
+    relay_url = str(payload.get("relayUrl") or "").strip()
+    try:
+        expires_seconds = int(payload.get("expiresSeconds") or PAIRING_TTL_SECONDS)
+    except (TypeError, ValueError):
+        expires_seconds = PAIRING_TTL_SECONDS
+    expires_seconds = max(30, min(expires_seconds, PAIRING_TTL_SECONDS))
+
+    if not account_id or not owner_device_id or not relay_url:
+        return JSONResponse(
+            {"ok": False, "message": "accountId, ownerDeviceId and relayUrl are required"},
+            status_code=400,
+        )
+
+    code = await _generate_pairing_code()
+    expires_at = time.time() + expires_seconds
+    async with _lock:
+        _pairing_codes[code] = {
+            "accountId": account_id,
+            "ownerDeviceId": owner_device_id,
+            "ownerDeviceName": owner_device_name or "Устройство",
+            "relayUrl": relay_url,
+            "createdAt": time.time(),
+            "expiresAt": expires_at,
+            "claimedBy": None,
+        }
+
+    return JSONResponse({
+        "ok": True,
+        "code": code,
+        "expiresAt": expires_at,
+        "expiresInSeconds": expires_seconds,
+        "relayUrl": relay_url,
+    })
+
+
+@app.post("/pairing/claim")
+async def claim_pairing(request: Request) -> JSONResponse:
+    await _cleanup_expired_pairing_codes()
+    payload = await request.json()
+    code = _normalize_pairing_code(str(payload.get("code") or ""))
+    new_device_id = str(payload.get("deviceId") or "").strip()
+    new_device_name = str(payload.get("deviceName") or "Устройство").strip()
+    if not code or not new_device_id:
+        return JSONResponse({"ok": False, "message": "code and deviceId are required"}, status_code=400)
+
+    async with _lock:
+        record = _pairing_codes.pop(code, None)
+    if record is None:
+        return JSONResponse({"ok": False, "message": "Pairing code is invalid or expired"}, status_code=404)
+    if record["expiresAt"] < time.time():
+        return JSONResponse({"ok": False, "message": "Pairing code expired"}, status_code=410)
+
+    return JSONResponse({
+        "ok": True,
+        "accountId": record["accountId"],
+        "relayUrl": record["relayUrl"],
+        "ownerDeviceId": record["ownerDeviceId"],
+        "ownerDeviceName": record["ownerDeviceName"],
+        "acceptedDeviceId": new_device_id,
+        "acceptedDeviceName": new_device_name or "Устройство",
+    })
 
 
 @app.websocket("/ws/{account_id}/{device_id}")
@@ -130,6 +205,29 @@ async def websocket_endpoint(websocket: WebSocket, account_id: str, device_id: s
             "accountId": account_id,
             "deviceId": device_id,
         })
+
+
+async def _generate_pairing_code() -> str:
+    await _cleanup_expired_pairing_codes()
+    for _ in range(20):
+        raw = secrets.randbelow(1_000_000)
+        code = f"{raw:06d}"
+        async with _lock:
+            if code not in _pairing_codes:
+                return code
+    raise RuntimeError("Could not generate unique pairing code")
+
+
+def _normalize_pairing_code(code: str) -> str:
+    return "".join(ch for ch in code if ch.isdigit())
+
+
+async def _cleanup_expired_pairing_codes() -> None:
+    now = time.time()
+    async with _lock:
+        expired = [code for code, record in _pairing_codes.items() if record.get("expiresAt", 0) < now]
+        for code in expired:
+            _pairing_codes.pop(code, None)
 
 
 async def _cache_library_snapshot(account_id: str, device_id: str, message: str) -> None:

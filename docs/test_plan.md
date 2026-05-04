@@ -118,3 +118,8 @@ Docker relay build smoke check
 Android APK build
 macOS DMG/PKG build
 ```
+
+
+## Sprint 4.2: подключение по коду
+
+Добавлен MVP-pairing: первое устройство создаёт 6-значный код подключения, новое устройство вводит код или вставляет `readanywhere://pair?...` приглашение и автоматически получает `accountId` и relay endpoint. Ручной ввод `accountId` оставлен только как fallback для разработки. Relay хранит pairing-коды только в памяти и удаляет их после первого использования или истечения срока. Подробности: `docs/sprint_04_2_pairing_codes_ru.md`.

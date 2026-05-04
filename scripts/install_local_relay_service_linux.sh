@@ -14,7 +14,7 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$ROOT_DIR
-Environment=READANYWHERE_RELAY_HOST=127.0.0.1
+Environment=READANYWHERE_RELAY_HOST=0.0.0.0
 Environment=READANYWHERE_RELAY_PORT=8787
 ExecStart=/bin/bash $ROOT_DIR/scripts/run_local_relay.sh
 Restart=on-failure

@@ -1,5 +1,56 @@
 import 'book.dart';
 
+class TrustedDeviceRecord {
+  TrustedDeviceRecord({
+    required this.deviceId,
+    required this.name,
+    this.role = 'device',
+    DateTime? addedAt,
+    DateTime? lastSeenAt,
+  })  : addedAt = addedAt ?? DateTime.now().toUtc(),
+        lastSeenAt = lastSeenAt ?? DateTime.now().toUtc();
+
+  final String deviceId;
+  final String name;
+  final String role;
+  final DateTime addedAt;
+  final DateTime lastSeenAt;
+
+  TrustedDeviceRecord copyWith({
+    String? deviceId,
+    String? name,
+    String? role,
+    DateTime? addedAt,
+    DateTime? lastSeenAt,
+  }) {
+    return TrustedDeviceRecord(
+      deviceId: deviceId ?? this.deviceId,
+      name: name ?? this.name,
+      role: role ?? this.role,
+      addedAt: addedAt ?? this.addedAt,
+      lastSeenAt: lastSeenAt ?? this.lastSeenAt,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'deviceId': deviceId,
+        'name': name,
+        'role': role,
+        'addedAt': addedAt.toIso8601String(),
+        'lastSeenAt': lastSeenAt.toIso8601String(),
+      };
+
+  factory TrustedDeviceRecord.fromJson(Map<String, dynamic> json) => TrustedDeviceRecord(
+        deviceId: json['deviceId'] as String? ?? 'unknown-device',
+        name: json['name'] as String? ?? 'Устройство',
+        role: json['role'] as String? ?? 'device',
+        addedAt: DateTime.tryParse(json['addedAt'] as String? ?? '') ??
+            DateTime.now().toUtc(),
+        lastSeenAt: DateTime.tryParse(json['lastSeenAt'] as String? ?? '') ??
+            DateTime.now().toUtc(),
+      );
+}
+
 class LibraryManifest {
   LibraryManifest({
     required this.accountId,
@@ -7,14 +58,17 @@ class LibraryManifest {
     this.deviceName = 'Моё устройство',
     DateTime? updatedAt,
     List<BookRecord>? books,
+    List<TrustedDeviceRecord>? trustedDevices,
   })  : updatedAt = updatedAt ?? DateTime.now().toUtc(),
-        books = books ?? [];
+        books = books ?? [],
+        trustedDevices = trustedDevices ?? [];
 
   final String accountId;
   final String deviceId;
   final String deviceName;
   final DateTime updatedAt;
   final List<BookRecord> books;
+  final List<TrustedDeviceRecord> trustedDevices;
 
   LibraryManifest copyWith({
     String? accountId,
@@ -22,6 +76,7 @@ class LibraryManifest {
     String? deviceName,
     DateTime? updatedAt,
     List<BookRecord>? books,
+    List<TrustedDeviceRecord>? trustedDevices,
   }) {
     return LibraryManifest(
       accountId: accountId ?? this.accountId,
@@ -29,6 +84,7 @@ class LibraryManifest {
       deviceName: deviceName ?? this.deviceName,
       updatedAt: updatedAt ?? DateTime.now().toUtc(),
       books: books ?? this.books,
+      trustedDevices: trustedDevices ?? this.trustedDevices,
     );
   }
 
@@ -43,6 +99,7 @@ class LibraryManifest {
         'deviceId': deviceId,
         'deviceName': deviceName,
         'updatedAt': updatedAt.toIso8601String(),
+        'trustedDevices': trustedDevices.map((d) => d.toJson()).toList(),
         'books': books
             .map((b) => b.toJson(includeLocalPath: includeLocalPaths))
             .toList(),
@@ -54,6 +111,10 @@ class LibraryManifest {
         deviceName: json['deviceName'] as String? ?? 'Моё устройство',
         updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
             DateTime.now().toUtc(),
+        trustedDevices: ((json['trustedDevices'] as List?) ?? [])
+            .whereType<Map>()
+            .map((item) => TrustedDeviceRecord.fromJson(Map<String, dynamic>.from(item)))
+            .toList(),
         books: ((json['books'] as List?) ?? [])
             .map((item) => BookRecord.fromJson(item as Map<String, dynamic>))
             .toList(),

@@ -10,12 +10,50 @@ import 'package:uuid/uuid.dart';
 
 import '../../models/book.dart';
 import '../../models/manifest.dart';
+import '../../models/sync_settings.dart';
 import '../storage_service.dart';
 import 'merge.dart';
 import 'relay_client.dart';
 
 const _uuid = Uuid();
 const _defaultChunkSize = 256 * 1024; // JSON/base64-safe for the MVP relay.
+
+class PairingInvite {
+  const PairingInvite({
+    required this.code,
+    required this.relayUrl,
+    required this.expiresAt,
+    required this.inviteLink,
+  });
+
+  final String code;
+  final String relayUrl;
+  final DateTime expiresAt;
+  final String inviteLink;
+
+  String get displayCode => '${code.substring(0, 3)}-${code.substring(3)}';
+}
+
+class PairingClaimResult {
+  const PairingClaimResult({
+    required this.accountId,
+    required this.relayUrl,
+    required this.ownerDeviceId,
+    required this.ownerDeviceName,
+  });
+
+  final String accountId;
+  final String relayUrl;
+  final String ownerDeviceId;
+  final String ownerDeviceName;
+}
+
+class _ParsedPairingInput {
+  const _ParsedPairingInput({required this.code, this.relayUrl});
+
+  final String code;
+  final String? relayUrl;
+}
 
 class FileTransferSnapshot {
   const FileTransferSnapshot({
@@ -241,6 +279,190 @@ class SyncService {
         },
       ),
       logLabel: 'Запрошен snapshot: $reason',
+    );
+  }
+
+  Future<PairingInvite> createPairingInvite({
+    required SyncSettings settings,
+    Duration ttl = const Duration(minutes: 5),
+  }) async {
+    _validateEndpointForPairing(settings);
+    final manifest = await _storage.loadManifest();
+    final uri = _buildEndpointUri(settings.effectiveRelayUrl, '/pairing/start');
+    final response = await _postJson(uri, {
+      'accountId': manifest.accountId,
+      'ownerDeviceId': manifest.deviceId,
+      'ownerDeviceName': manifest.deviceName,
+      'relayUrl': settings.effectiveRelayUrl,
+      'expiresSeconds': ttl.inSeconds,
+    });
+    if (response['ok'] != true) {
+      throw StateError(response['message']?.toString() ?? 'Relay не создал pairing-код');
+    }
+    final code = _normalizePairingCode(response['code']?.toString() ?? '');
+    if (code.length != 6) {
+      throw StateError('Relay вернул некорректный pairing-код');
+    }
+    final expiresAtSeconds = (response['expiresAt'] as num?)?.toDouble();
+    final expiresAt = expiresAtSeconds == null
+        ? DateTime.now().toUtc().add(ttl)
+        : DateTime.fromMillisecondsSinceEpoch(
+            (expiresAtSeconds * 1000).round(),
+            isUtc: true,
+          );
+    final inviteLink = Uri(
+      scheme: 'readanywhere',
+      host: 'pair',
+      queryParameters: {
+        'relay': settings.effectiveRelayUrl,
+        'code': code,
+      },
+    ).toString();
+    _appendLog('Создан pairing-код ${code.substring(0, 3)}-${code.substring(3)}');
+    return PairingInvite(
+      code: code,
+      relayUrl: settings.effectiveRelayUrl,
+      expiresAt: expiresAt,
+      inviteLink: inviteLink,
+    );
+  }
+
+  Future<PairingClaimResult> claimPairingInvite({
+    required String input,
+    required SyncSettings fallbackSettings,
+  }) async {
+    final parsed = _parsePairingInput(input);
+    final relayUrl = parsed.relayUrl ?? fallbackSettings.effectiveRelayUrl;
+    final effectiveSettings = _settingsForClaimedRelayUrl(relayUrl, fallbackSettings);
+    _validateEndpointForPairing(effectiveSettings);
+
+    final local = await _storage.loadManifest();
+    final uri = _buildEndpointUri(relayUrl, '/pairing/claim');
+    final response = await _postJson(uri, {
+      'code': parsed.code,
+      'deviceId': local.deviceId,
+      'deviceName': local.deviceName,
+    });
+    if (response['ok'] != true) {
+      throw StateError(response['message']?.toString() ?? 'Pairing-код не принят relay');
+    }
+
+    final accountId = response['accountId']?.toString() ?? '';
+    final ownerDeviceId = response['ownerDeviceId']?.toString() ?? '';
+    final ownerDeviceName = response['ownerDeviceName']?.toString() ?? 'Устройство';
+    final returnedRelayUrl = response['relayUrl']?.toString() ?? relayUrl;
+    if (accountId.isEmpty || ownerDeviceId.isEmpty) {
+      throw StateError('Relay вернул неполные pairing-данные');
+    }
+
+    await disconnect();
+    await _storage.saveSyncSettings(
+      _settingsForClaimedRelayUrl(returnedRelayUrl, fallbackSettings).copyWith(autoConnect: true),
+    );
+    await _storage.replaceAccountFromPairing(
+      accountId: accountId,
+      ownerDeviceId: ownerDeviceId,
+      ownerDeviceName: ownerDeviceName,
+    );
+    _appendLog('Pairing выполнен. Аккаунт подключён автоматически.');
+    await connect(relayUrl: returnedRelayUrl);
+    await refreshMetadata(reason: 'pairing_completed');
+    return PairingClaimResult(
+      accountId: accountId,
+      relayUrl: returnedRelayUrl,
+      ownerDeviceId: ownerDeviceId,
+      ownerDeviceName: ownerDeviceName,
+    );
+  }
+
+  void _validateEndpointForPairing(SyncSettings settings) {
+    if (settings.usesOfficialPlaceholder) {
+      throw StateError('Официальный relay ещё не настроен в этой сборке. Выберите Personal Hub или свой relay.');
+    }
+    if (settings.usesPersonalHubPlaceholder) {
+      throw StateError('Для Personal Hub вставьте реальный Funnel/Tunnel URL.');
+    }
+  }
+
+  Uri _buildEndpointUri(String relayUrl, String endpointPath) {
+    final base = Uri.parse(relayUrl.trim());
+    final basePath = base.path.replaceAll(RegExp(r'/+$'), '');
+    final cleanEndpoint = endpointPath.startsWith('/') ? endpointPath : '/$endpointPath';
+    return base.replace(
+      scheme: base.scheme == 'ws'
+          ? 'http'
+          : base.scheme == 'wss'
+              ? 'https'
+              : base.scheme,
+      path: '$basePath$cleanEndpoint'.replaceAll(RegExp(r'/{2,}'), '/'),
+      query: '',
+    );
+  }
+
+  Future<Map<String, dynamic>> _postJson(Uri uri, Map<String, dynamic> body) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final request = await client.postUrl(uri);
+      request.headers.contentType = ContentType.json;
+      request.write(jsonEncode(body));
+      final response = await request.close().timeout(const Duration(seconds: 12));
+      final responseBody = await response.transform(utf8.decoder).join();
+      final decoded = responseBody.isEmpty ? <String, dynamic>{} : jsonDecode(responseBody);
+      if (decoded is! Map) {
+        throw StateError('Relay вернул не JSON-объект');
+      }
+      final result = Map<String, dynamic>.from(decoded);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw StateError(result['message']?.toString() ?? 'HTTP ${response.statusCode}');
+      }
+      return result;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  _ParsedPairingInput _parsePairingInput(String input) {
+    final raw = input.trim();
+    if (raw.isEmpty) {
+      throw ArgumentError('Введите pairing-код или приглашение');
+    }
+    if (raw.startsWith('readanywhere://')) {
+      final uri = Uri.parse(raw);
+      final code = _normalizePairingCode(uri.queryParameters['code'] ?? '');
+      final relay = uri.queryParameters['relay']?.trim();
+      if (code.length != 6) {
+        throw ArgumentError('В приглашении нет корректного 6-значного кода');
+      }
+      return _ParsedPairingInput(code: code, relayUrl: relay?.isEmpty == true ? null : relay);
+    }
+    final code = _normalizePairingCode(raw);
+    if (code.length != 6) {
+      throw ArgumentError('Pairing-код должен состоять из 6 цифр');
+    }
+    return _ParsedPairingInput(code: code);
+  }
+
+  String _normalizePairingCode(String raw) => raw.replaceAll(RegExp(r'[^0-9]'), '');
+
+  SyncSettings _settingsForClaimedRelayUrl(String relayUrl, SyncSettings fallback) {
+    final normalized = relayUrl.trim();
+    final looksLocal = normalized.contains('127.0.0.1') || normalized.contains('localhost');
+    final looksPersonalHub = normalized.contains('.ts.net') ||
+        normalized.contains('trycloudflare.com') ||
+        normalized.contains('tailscale') ||
+        normalized.contains('funnel');
+    if (looksLocal) {
+      return fallback.copyWith(endpointMode: RelayEndpointMode.localDevelopment);
+    }
+    if (looksPersonalHub) {
+      return fallback.copyWith(
+        endpointMode: RelayEndpointMode.personalHub,
+        personalHubRelayUrl: normalized,
+      );
+    }
+    return fallback.copyWith(
+      endpointMode: RelayEndpointMode.custom,
+      customRelayUrl: normalized,
     );
   }
 
