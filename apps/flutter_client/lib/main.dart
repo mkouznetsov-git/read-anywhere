@@ -80,6 +80,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   late final _importService = BookImportService(widget.storage);
   LibraryManifest? _manifest;
   bool _busy = false;
+  bool _healthBusy = false;
   StreamSubscription<LibraryManifest>? _syncSubscription;
 
   @override
@@ -621,12 +622,14 @@ class SyncScreen extends StatefulWidget {
 
 class _SyncScreenState extends State<SyncScreen> {
   final _relayController = TextEditingController();
+  final _personalHubRelayController = TextEditingController();
   final _accountController = TextEditingController();
   final _deviceNameController = TextEditingController();
   LibraryManifest? _manifest;
   SyncSettings? _settings;
   RelayEndpointMode _endpointMode = RelayEndpointMode.custom;
   bool _busy = false;
+  bool _healthBusy = false;
 
   @override
   void initState() {
@@ -637,6 +640,7 @@ class _SyncScreenState extends State<SyncScreen> {
   @override
   void dispose() {
     _relayController.dispose();
+    _personalHubRelayController.dispose();
     _accountController.dispose();
     _deviceNameController.dispose();
     super.dispose();
@@ -650,6 +654,7 @@ class _SyncScreenState extends State<SyncScreen> {
     _settings = settings;
     _endpointMode = settings.endpointMode;
     _relayController.text = settings.customRelayUrl;
+    _personalHubRelayController.text = settings.personalHubRelayUrl;
     _accountController.text = manifest.accountId;
     _deviceNameController.text = manifest.deviceName;
     setState(() {});
@@ -682,11 +687,17 @@ class _SyncScreenState extends State<SyncScreen> {
       final settings = SyncSettings(
         endpointMode: _endpointMode,
         customRelayUrl: _relayController.text.trim(),
+        personalHubRelayUrl: _personalHubRelayController.text.trim(),
         autoConnect: true,
       );
       if (settings.usesOfficialPlaceholder) {
         throw StateError(
-          'Официальный relay ещё не настроен в этой сборке. Выберите “Свой relay” или соберите приложение с READANYWHERE_DEFAULT_RELAY_URL.',
+          'Официальный relay ещё не настроен в этой сборке. Выберите “Свой relay”, “Personal Hub” или соберите приложение с READANYWHERE_DEFAULT_RELAY_URL.',
+        );
+      }
+      if (settings.usesPersonalHubPlaceholder) {
+        throw StateError(
+          'Для Personal Hub вставьте реальный Funnel/Tunnel URL, например https://your-device.your-tailnet.ts.net.',
         );
       }
       await widget.storage.saveSyncSettings(settings);
@@ -710,6 +721,56 @@ class _SyncScreenState extends State<SyncScreen> {
     await widget.storage.saveSyncSettings(settings.copyWith(autoConnect: false));
     if (!mounted) return;
     setState(() => _settings = settings.copyWith(autoConnect: false));
+  }
+
+  Future<void> _checkRelayHealth() async {
+    setState(() => _healthBusy = true);
+    final settings = SyncSettings(
+      endpointMode: _endpointMode,
+      customRelayUrl: _relayController.text.trim(),
+      personalHubRelayUrl: _personalHubRelayController.text.trim(),
+      autoConnect: _settings?.autoConnect ?? false,
+    );
+    try {
+      if (settings.usesOfficialPlaceholder) {
+        throw StateError('Официальный relay ещё не настроен в этой сборке.');
+      }
+      if (settings.usesPersonalHubPlaceholder) {
+        throw StateError('Укажите реальный URL Personal Hub/Funnel.');
+      }
+      final base = Uri.parse(settings.effectiveRelayUrl);
+      final healthUri = base.replace(
+        scheme: base.scheme == 'ws'
+            ? 'http'
+            : base.scheme == 'wss'
+                ? 'https'
+                : base.scheme,
+        path: '${base.path.replaceAll(RegExp(r'/+$'), '')}/health'.replaceAll('//health', '/health'),
+        query: '',
+      );
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+      final request = await client.getUrl(healthUri);
+      final response = await request.close().timeout(const Duration(seconds: 10));
+      final body = await response.transform(utf8.decoder).join();
+      client.close(force: true);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            response.statusCode >= 200 && response.statusCode < 300
+                ? 'Relay доступен: HTTP ${response.statusCode}'
+                : 'Relay ответил с ошибкой HTTP ${response.statusCode}: $body',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Relay недоступен: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _healthBusy = false);
+    }
   }
 
   Future<void> _sendSnapshot() async {
@@ -773,7 +834,7 @@ class _SyncScreenState extends State<SyncScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'Обычно пользователь не должен вводить IP-адрес. Для разработки можно выбрать локальный или свой relay; для продуктовой сборки задайте официальный endpoint через dart-define.',
+                      'Обычно пользователь не должен вводить IP-адрес. Сейчас можно использовать Personal Hub через Tailscale Funnel/Cloudflare Tunnel, локальный relay для разработки или свой relay. В продуктовой сборке официальный endpoint задается через dart-define.',
                     ),
                     const SizedBox(height: 12),
                     _RelayModeOption(
@@ -784,10 +845,27 @@ class _SyncScreenState extends State<SyncScreen> {
                       onChanged: (value) => setState(() => _endpointMode = value),
                     ),
                     _RelayModeOption(
+                      value: RelayEndpointMode.personalHub,
+                      groupValue: _endpointMode,
+                      title: 'Personal Hub / Tailscale Funnel',
+                      subtitle: 'Relay запущен на вашем устройстве и опубликован через Funnel/Tunnel',
+                      onChanged: (value) => setState(() => _endpointMode = value),
+                    ),
+                    if (_endpointMode == RelayEndpointMode.personalHub) ...[
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: _personalHubRelayController,
+                        decoration: const InputDecoration(
+                          labelText: 'Personal Hub URL',
+                          helperText: 'Например: https://your-device.your-tailnet.ts.net',
+                        ),
+                      ),
+                    ],
+                    _RelayModeOption(
                       value: RelayEndpointMode.custom,
                       groupValue: _endpointMode,
                       title: 'Свой relay',
-                      subtitle: 'Koyeb, VPS, Cloudflare Tunnel, домашний сервер',
+                      subtitle: 'VPS, Cloudflare Tunnel, домашний сервер, другой WebSocket relay',
                       onChanged: (value) => setState(() => _endpointMode = value),
                     ),
                     if (_endpointMode == RelayEndpointMode.custom) ...[
@@ -796,7 +874,7 @@ class _SyncScreenState extends State<SyncScreen> {
                         controller: _relayController,
                         decoration: const InputDecoration(
                           labelText: 'Custom Relay URL',
-                          helperText: 'Например: https://your-app.koyeb.app или http://192.168.1.10:8787',
+                          helperText: 'Например: https://relay.example.com или http://192.168.1.10:8787',
                         ),
                       ),
                     ],
@@ -809,9 +887,21 @@ class _SyncScreenState extends State<SyncScreen> {
                     ),
                     const SizedBox(height: 12),
                     Text(
-                      'Текущий endpoint: ${SyncSettings(endpointMode: _endpointMode, customRelayUrl: _relayController.text).effectiveRelayUrl}',
+                      'Текущий endpoint: ${SyncSettings(endpointMode: _endpointMode, customRelayUrl: _relayController.text, personalHubRelayUrl: _personalHubRelayController.text).effectiveRelayUrl}',
                     ),
                     Text("Автоподключение: ${_settings?.autoConnect == true ? 'включено' : 'выключено'}"),
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed: _healthBusy ? null : _checkRelayHealth,
+                      icon: _healthBusy
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.health_and_safety_outlined),
+                      label: const Text('Проверить relay'),
+                    ),
                     const SizedBox(height: 12),
                     Row(
                       children: [

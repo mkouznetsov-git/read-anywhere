@@ -28,4 +28,23 @@ void main() {
 
     expect(settings.effectiveRelayUrl, ReadAnywhereRelayConfig.officialRelayUrl);
   });
+
+  test('personal hub mode uses dedicated hub URL', () {
+    const settings = SyncSettings(
+      endpointMode: RelayEndpointMode.personalHub,
+      personalHubRelayUrl: 'https://my-mac.tailnet.ts.net',
+    );
+
+    expect(settings.effectiveRelayUrl, 'https://my-mac.tailnet.ts.net');
+    expect(settings.usesPersonalHubPlaceholder, isFalse);
+  });
+
+  test('migrates Tailscale-like legacy relayUrl to personal hub mode', () {
+    final settings = SyncSettings.fromJson({
+      'relayUrl': 'https://my-mac.tailnet.ts.net',
+    });
+
+    expect(settings.endpointMode, RelayEndpointMode.personalHub);
+    expect(settings.personalHubRelayUrl, 'https://my-mac.tailnet.ts.net');
+  });
 }

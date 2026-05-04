@@ -200,3 +200,18 @@ ReadAnywhere relay — официальный/default endpoint, задаётся
 Это не меняет принцип хранения данных: книги остаются на устройствах пользователя, relay пересылает сообщения и хранит только короткоживущий in-memory metadata cache для устойчивости подключения.
 
 Для MVP публичный endpoint можно развернуть на Koyeb или другом WebSocket-compatible hosting. Позже поверх этого будет добавлен pairing-код/QR, чтобы пользователь не копировал `accountId` вручную.
+
+## Transport strategy update: Personal Hub
+
+Начиная со Sprint 4.1 приложение не завязано на один тип relay. Поддерживаемые режимы endpoint:
+
+```text
+ReadAnywhere relay                  будущий официальный endpoint
+Custom relay                        VPS/self-hosted/любой совместимый relay
+Personal Hub / Tailscale Funnel     relay на устройстве пользователя, опубликованный через Funnel/Tunnel
+Local development                   http://127.0.0.1:8787
+```
+
+Personal Hub не превращает устройство в облачное хранилище. Оно остаётся устройством пользователя и выполняет роль relay/hub: принимает WebSocket-подключения, ретранслирует metadata и chunks, не пишет книги на серверный диск вне локального хранилища самого пользователя.
+
+Следующий шаг после Personal Hub — pairing-код, чтобы новое устройство получало `accountId` и endpoint автоматически, без ручного копирования.

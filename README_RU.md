@@ -149,3 +149,46 @@ DART_DEFINES[@]: unbound variable
 ```
 
 Причина была в несовместимости пустого bash-массива с `set -u` на macOS bash 3.2. Скрипты `package_macos.sh` и `package_android.sh` теперь передают `--dart-define` без пустых массивов. Также исправлено добавление `CFBundleDisplayName` в macOS `Info.plist`.
+
+## Sprint 4.1: Personal Hub + Tailscale Funnel
+
+После проблем с бесплатными VPS/PaaS добавлен режим **Personal Hub / Tailscale Funnel**. Теперь relay можно запустить на своём Mac/PC/Linux-устройстве и опубликовать его в интернет через Funnel/Tunnel без белого IP, проброса портов и отдельного VPS.
+
+Новые файлы:
+
+```text
+scripts/run_local_relay.sh
+scripts/check_relay_health.sh
+scripts/tailscale_start_funnel.sh
+scripts/tailscale_status.sh
+scripts/install_local_relay_service_macos.sh
+scripts/uninstall_local_relay_service_macos.sh
+scripts/install_local_relay_service_linux.sh
+scripts/uninstall_local_relay_service_linux.sh
+docs/relay_hosting_tailscale_funnel_ru.md
+docs/relay_hosting_cloudflare_tunnel_ru.md
+docs/sprint_04_1_personal_hub_tailscale_ru.md
+docs/adr_004_transport_strategy_personal_hub.md
+```
+
+Быстрый запуск Personal Hub:
+
+```bash
+./scripts/run_local_relay.sh
+```
+
+Во втором терминале:
+
+```bash
+./scripts/tailscale_start_funnel.sh
+```
+
+В приложении:
+
+```text
+Синхронизация → Relay endpoint → Personal Hub / Tailscale Funnel
+```
+
+Вставьте HTTPS URL, который покажет Tailscale, нажмите **Проверить relay**, затем **Подключиться**.
+
+Подробная инструкция: `docs/relay_hosting_tailscale_funnel_ru.md`.
