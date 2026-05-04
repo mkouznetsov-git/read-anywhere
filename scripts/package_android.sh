@@ -10,12 +10,11 @@ export READ_ANYWHERE_PLATFORMS="android"
 "$ROOT_DIR/scripts/prepare_flutter_platforms.sh"
 
 cd "$APP_DIR"
-DART_DEFINES=()
 if [[ -n "${READANYWHERE_DEFAULT_RELAY_URL:-}" ]]; then
-  DART_DEFINES+=("--dart-define=READANYWHERE_DEFAULT_RELAY_URL=${READANYWHERE_DEFAULT_RELAY_URL}")
+  flutter build apk --debug --dart-define="READANYWHERE_DEFAULT_RELAY_URL=${READANYWHERE_DEFAULT_RELAY_URL}"
+else
+  flutter build apk --debug
 fi
-
-flutter build apk --debug "${DART_DEFINES[@]}"
 
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"

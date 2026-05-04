@@ -139,3 +139,13 @@ READANYWHERE_DEFAULT_RELAY_URL=https://your-service.koyeb.app ./scripts/package_
 ```
 
 В GitHub Actions можно передать `default_relay_url` при ручном запуске workflow или создать repository variable `READANYWHERE_DEFAULT_RELAY_URL`.
+
+## Sprint 4.0 hotfix 01 — macOS CI packaging
+
+Исправлена ошибка macOS GitHub Actions build:
+
+```text
+DART_DEFINES[@]: unbound variable
+```
+
+Причина была в несовместимости пустого bash-массива с `set -u` на macOS bash 3.2. Скрипты `package_macos.sh` и `package_android.sh` теперь передают `--dart-define` без пустых массивов. Также исправлено добавление `CFBundleDisplayName` в macOS `Info.plist`.

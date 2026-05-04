@@ -35,8 +35,10 @@ fi
 
 # Friendly macOS app name.
 if [[ -f macos/Runner/Info.plist && -x /usr/libexec/PlistBuddy ]]; then
-  /usr/libexec/PlistBuddy -c "Set :CFBundleName ReadAnywhere" macos/Runner/Info.plist || true
-  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName ReadAnywhere" macos/Runner/Info.plist || true
+  /usr/libexec/PlistBuddy -c "Set :CFBundleName ReadAnywhere" macos/Runner/Info.plist 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Add :CFBundleName string ReadAnywhere" macos/Runner/Info.plist || true
+  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName ReadAnywhere" macos/Runner/Info.plist 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string ReadAnywhere" macos/Runner/Info.plist || true
 fi
 
 
