@@ -136,3 +136,22 @@ READANYWHERE_DEFAULT_RELAY_URL=https://your-service.koyeb.app ./scripts/package_
 2. Создать repository variable `READANYWHERE_DEFAULT_RELAY_URL`.
 
 После этого в приложении можно выбрать режим **ReadAnywhere relay** вместо ручного ввода URL.
+
+## Публикация через GitHub Releases
+
+Artifacts из workflow остаются удобными для CI-проверки, но для скачивания тестовых сборок лучше использовать GitHub Releases. Workflow автоматически создаёт релиз, когда в репозиторий отправляется тег вида `v*`.
+
+Пример:
+
+```bash
+git tag v0.1.0-test
+git push origin v0.1.0-test
+```
+
+После завершения workflow откройте:
+
+```text
+Repository → Releases → v0.1.0-test
+```
+
+Там будут APK/AAB/DMG/PKG/ZIP и checksum-файлы. Если релиз для этого тега уже существует, workflow обновит файлы с `--clobber`.

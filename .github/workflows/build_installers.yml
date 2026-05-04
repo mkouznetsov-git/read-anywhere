@@ -17,8 +17,13 @@ on:
           - 'true'
   push:
     branches: [ main, master ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ main, master ]
+
+permissions:
+  contents: read
 
 env:
   # Set repository variable READANYWHERE_DEFAULT_RELAY_URL after choosing a relay,
@@ -94,3 +99,101 @@ jobs:
         with:
           name: ReadAnywhere-macos-release-dmg-pkg
           path: dist/macos/*
+
+
+  github-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - android-release
+      - macos-release
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download Android release artifacts
+        uses: actions/download-artifact@v6
+        with:
+          name: ReadAnywhere-android-release
+          path: release-assets/android
+
+      - name: Download macOS release artifacts
+        uses: actions/download-artifact@v6
+        with:
+          name: ReadAnywhere-macos-release-dmg-pkg
+          path: release-assets/macos
+
+      - name: Prepare release assets and notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+
+          if [[ -f release-assets/android/SHA256SUMS ]]; then
+            mv release-assets/android/SHA256SUMS release-assets/android/ReadAnywhere-android-release-SHA256SUMS.txt
+          fi
+          if [[ -f release-assets/macos/SHA256SUMS ]]; then
+            mv release-assets/macos/SHA256SUMS release-assets/macos/ReadAnywhere-macos-release-SHA256SUMS.txt
+          fi
+
+          cat > RELEASE_NOTES.md <<'EOF'
+          # ReadAnywhere TAG_PLACEHOLDER
+
+          Автоматическая тестовая сборка ReadAnywhere.
+
+          ## Что внутри
+
+          ### Android
+
+          - arm64-v8a APK — основной вариант для большинства современных Android-телефонов.
+          - armeabi-v7a APK — для старых Android-устройств.
+          - x86_64 APK — в основном для эмуляторов.
+          - AAB — Android App Bundle для будущей публикации через Google Play.
+
+          ### macOS
+
+          - DMG — удобная установка перетаскиванием в Applications.
+          - PKG — installer package.
+          - app.zip — архив приложения для быстрой проверки.
+
+          ## Важно
+
+          Эти сборки предназначены для внутреннего тестирования. macOS-сборки пока не подписаны Developer ID и не notarized. Android release-сборки пока используют стандартную тестовую конфигурацию MVP; production-публикация позже потребует отдельного signing keystore.
+          EOF
+          sed -i "s/TAG_PLACEHOLDER/${TAG}/g" RELEASE_NOTES.md
+
+          echo "Release assets:"
+          find release-assets -maxdepth 3 -type f -print | sort
+
+          {
+            echo "## GitHub Release assets"
+            echo
+            echo "| File | Size |"
+            echo "|---|---:|"
+            while IFS= read -r file; do
+              size="$(du -h "$file" | awk '{print $1}')"
+              echo "| $(basename "$file") | $size |"
+            done < <(find release-assets -maxdepth 3 -type f -print | sort)
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish or update release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          TITLE="ReadAnywhere ${TAG}"
+          mapfile -t ASSETS < <(find release-assets -maxdepth 3 -type f -print | sort)
+
+          if [[ ${#ASSETS[@]} -eq 0 ]]; then
+            echo "No release assets found." >&2
+            exit 1
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes-file RELEASE_NOTES.md
+          else
+            gh release create "$TAG" "${ASSETS[@]}" --title "$TITLE" --notes-file RELEASE_NOTES.md
+          fi

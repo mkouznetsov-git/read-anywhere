@@ -229,3 +229,15 @@ build_debug_artifacts = true
 ## Sprint 4.2: подключение по коду
 
 Добавлен MVP-pairing: первое устройство создаёт 6-значный код подключения, новое устройство вводит код или вставляет `readanywhere://pair?...` приглашение и автоматически получает `accountId` и relay endpoint. Ручной ввод `accountId` оставлен только как fallback для разработки. Relay хранит pairing-коды только в памяти и удаляет их после первого использования или истечения срока. Подробности: `docs/sprint_04_2_pairing_codes_ru.md`.
+
+
+## Sprint 4.2 cleanup: публикация GitHub Releases
+
+CI теперь умеет автоматически публиковать установочные файлы в GitHub Releases. Для этого создайте и отправьте тег вида `v*`:
+
+```bash
+git tag v0.1.0-test
+git push origin v0.1.0-test
+```
+
+Workflow соберёт Android/macOS release-артефакты, создаст или обновит GitHub Release и прикрепит APK/AAB/DMG/PKG/ZIP вместе с SHA256SUMS. Подробности: `docs/sprint_04_2_cleanup_01_github_releases_ru.md`.
