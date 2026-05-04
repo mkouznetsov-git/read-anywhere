@@ -192,3 +192,30 @@ docs/adr_004_transport_strategy_personal_hub.md
 Вставьте HTTPS URL, который покажет Tailscale, нажмите **Проверить relay**, затем **Подключиться**.
 
 Подробная инструкция: `docs/relay_hosting_tailscale_funnel_ru.md`.
+
+## Sprint 4.1 cleanup: release-сборки меньшего размера
+
+CI теперь публикует release-артефакты вместо debug-сборок:
+
+```text
+ReadAnywhere-android-release
+  arm64-v8a release APK
+  armeabi-v7a release APK
+  x86_64 release APK
+  Android App Bundle .aab
+  SHA256SUMS
+
+ReadAnywhere-macos-release-dmg-pkg
+  release DMG
+  release PKG
+  release .app.zip
+  SHA256SUMS
+```
+
+Debug-артефакты можно включить вручную при запуске workflow через параметр:
+
+```text
+build_debug_artifacts = true
+```
+
+Подробнее: `docs/sprint_04_1_cleanup_01_release_artifacts_ru.md`.

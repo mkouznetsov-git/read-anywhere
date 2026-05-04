@@ -29,30 +29,36 @@
 3. Откройте вкладку `Actions`.
 4. Выберите workflow `Build installable packages`.
 5. Нажмите `Run workflow`.
-6. После завершения откройте completed run и скачайте `Artifacts`:
-   - `ReadAnywhere-android-apk`;
-   - `ReadAnywhere-macos-dmg-pkg`.
+6. Параметр `build_debug_artifacts` оставьте `false`, если не нужны debug-сборки.
+7. После завершения откройте completed run и скачайте `Artifacts`:
+   - `ReadAnywhere-android-release`;
+   - `ReadAnywhere-macos-release-dmg-pkg`.
 
 ## Что именно будет собрано
 
 ### Android
 
-По умолчанию собирается debug APK:
+По умолчанию собираются release-артефакты для внутреннего тестирования:
 
 ```text
-dist/android/ReadAnywhere-0.1.0-debug.apk
+dist/android/ReadAnywhere-0.1.0-android-arm64-v8a-release.apk
+dist/android/ReadAnywhere-0.1.0-android-armeabi-v7a-release.apk
+dist/android/ReadAnywhere-0.1.0-android-x86_64-release.apk
+dist/android/ReadAnywhere-0.1.0-android-release.aab
+dist/android/SHA256SUMS
 ```
 
-Этот файл можно установить на Android-устройство для тестирования. Для публикации в Google Play нужен release `.aab` или release `.apk`, подписанный вашим keystore.
+Для большинства современных телефонов нужен `arm64-v8a`. Для публикации в Google Play позже нужно настроить production keystore и загружать `.aab`.
 
 ### macOS
 
 Будут собраны:
 
 ```text
-dist/macos/ReadAnywhere-0.1.0-macos.dmg
-dist/macos/ReadAnywhere-0.1.0-macos.pkg
-dist/macos/ReadAnywhere-0.1.0-macos-app.zip
+dist/macos/ReadAnywhere-0.1.0-macos-release.dmg
+dist/macos/ReadAnywhere-0.1.0-macos-release.pkg
+dist/macos/ReadAnywhere-0.1.0-macos-release-app.zip
+dist/macos/SHA256SUMS
 ```
 
 Это unsigned-сборки для внутреннего тестирования. Для нормальной публичной раздачи macOS-приложение нужно подписать Developer ID certificate и notarize у Apple.
@@ -64,6 +70,13 @@ dist/macos/ReadAnywhere-0.1.0-macos-app.zip
 ```bash
 ./scripts/package_macos.sh
 ./scripts/package_android.sh
+```
+
+Debug-артефакты можно дополнительно собрать так:
+
+```bash
+BUILD_DEBUG_ARTIFACTS=true ./scripts/package_macos.sh
+BUILD_DEBUG_ARTIFACTS=true ./scripts/package_android.sh
 ```
 
 ## Production signing: Android
