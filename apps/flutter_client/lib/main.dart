@@ -352,13 +352,20 @@ class ReaderScreen extends StatefulWidget {
 }
 
 class _ReaderScreenState extends State<ReaderScreen> {
-  // Logical pages are intentionally content-based, not pixel/scroll based.
-  // This makes restore stable across macOS/Android screen sizes and font metrics.
-  static const _logicalPageTargetChars = 1800;
+  // Reader position must be content-based, not pixel-scroll based.
+  // TXT pages are rebuilt from the text and current viewport size, while the
+  // saved locator stores an anchor character index. This lets macOS/Android
+  // return to the same text fragment even when their screens differ.
+  static const _minLogicalPageChars = 420;
+  static const _maxLogicalPageChars = 2600;
 
   final _pageController = PageController();
   List<_TextChunk>? _textPages;
+  String? _rawText;
+  String? _pageLayoutSignature;
   int _totalChars = 0;
+  int _pendingRestoreChar = 0;
+  bool _restoreScheduled = false;
   String? _loadError;
   Timer? _saveDebounce;
   double _lastProgress = 0;
@@ -415,80 +422,134 @@ class _ReaderScreenState extends State<ReaderScreen> {
         throw StateError('Файл отсутствует: ${book.localPath}');
       }
       final bytes = await file.readAsBytes();
-      final raw = _decodeTextFile(bytes);
-      final pages = _splitTextIntoReaderChunks(raw, _logicalPageTargetChars);
-      final totalChars = pages.isEmpty ? 0 : pages.last.endChar;
-      final safePages = pages.isEmpty
-          ? [_TextChunk(text: '', startChar: 0, endChar: 0)]
-          : pages;
-      final targetPage = _targetPageForBook(book, safePages, totalChars);
-      final targetLocator = _locatorForPage(safePages, targetPage, totalChars);
+      final raw = _normalizeText(_decodeTextFile(bytes));
+      final totalChars = raw.length;
+      final targetChar = _targetCharForBook(book, totalChars);
 
       if (!mounted) return;
       setState(() {
-        _textPages = safePages;
+        _rawText = raw;
+        _textPages = null;
+        _pageLayoutSignature = null;
         _totalChars = totalChars;
-        _currentPageIndex = targetPage;
-        _lastKnownLocator = targetLocator;
-        _lastProgress = targetLocator.progressPercent;
+        _pendingRestoreChar = targetChar;
+        _currentPageIndex = 0;
+        _lastKnownLocator = null;
+        _lastProgress = totalChars <= 0
+            ? 0
+            : ((targetChar / totalChars) * 100).clamp(0.0, 100.0).toDouble();
         _loadError = null;
       });
-
-      unawaited(_restorePageAfterLayout(targetPage));
     } catch (error) {
       if (!mounted) return;
       setState(() => _loadError = 'Не удалось открыть TXT: $error');
     }
   }
 
-  Future<void> _restorePageAfterLayout(int targetPage) async {
+  void _scheduleRestorePage(int targetPage) {
     final pages = _textPages;
-    if (pages == null || pages.isEmpty) return;
+    if (pages == null || pages.isEmpty || _restoreScheduled) return;
+    _restoreScheduled = true;
     _restoringPosition = true;
-    try {
-      // PageView restoration is deterministic, but it still must happen after
-      // the first frame. Otherwise PageController may not yet have clients.
-      for (var attempt = 0; attempt < 10; attempt++) {
-        await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 16 : 50));
-        if (!mounted) return;
-        if (_pageController.hasClients) {
-          _pageController.jumpToPage(targetPage.clamp(0, pages.length - 1).toInt());
-          break;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      try {
+        for (var attempt = 0; attempt < 12; attempt++) {
+          await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 16 : 45));
+          if (!mounted) return;
+          if (_pageController.hasClients) {
+            final safeTarget = targetPage.clamp(0, pages.length - 1).toInt();
+            _pageController.jumpToPage(safeTarget);
+            _currentPageIndex = safeTarget;
+            _lastKnownLocator = _locatorForPage(pages, safeTarget, _totalChars);
+            _lastProgress = _lastKnownLocator!.progressPercent;
+            if (mounted) setState(() {});
+            break;
+          }
         }
+      } finally {
+        _restoringPosition = false;
+        _restoreScheduled = false;
       }
-    } finally {
-      _restoringPosition = false;
-      final current = _currentPageLocator();
-      if (current != null && mounted) {
-        _lastKnownLocator = current;
-        setState(() {
-          _currentPageIndex = current.pageIndex;
-          _lastProgress = current.progressPercent;
-        });
-      }
-    }
+    });
   }
 
-  int _targetPageForBook(BookRecord book, List<_TextChunk> pages, int totalChars) {
-    if (pages.isEmpty) return 0;
+  List<_TextChunk> _pagesForConstraints(BoxConstraints constraints) {
+    final raw = _rawText ?? '';
+    final width = constraints.maxWidth.isFinite ? constraints.maxWidth : 420.0;
+    final height = constraints.maxHeight.isFinite ? constraints.maxHeight : 640.0;
+    final targetChars = _estimatePageChars(width, height);
+    final signature = '${width.round()}x${height.round()}:$targetChars:${raw.length}';
+
+    if (_textPages != null && _pageLayoutSignature == signature) {
+      return _textPages!;
+    }
+
+    final pages = raw.isEmpty
+        ? [_TextChunk(text: '', startChar: 0, endChar: 0)]
+        : _splitTextIntoReaderChunks(raw, targetChars);
+    final safePages = pages.isEmpty
+        ? [_TextChunk(text: '', startChar: 0, endChar: 0)]
+        : pages;
+    final targetPage = _chunkIndexForChar(safePages, _pendingRestoreChar);
+    final locator = _locatorForPage(safePages, targetPage, _totalChars);
+
+    _textPages = safePages;
+    _pageLayoutSignature = signature;
+    _currentPageIndex = targetPage;
+    _lastKnownLocator = locator;
+    _lastProgress = locator.progressPercent;
+    _scheduleRestorePage(targetPage);
+
+    return safePages;
+  }
+
+  int _estimatePageChars(double viewportWidth, double viewportHeight) {
+    const horizontalPadding = 48.0;
+    const verticalPadding = 48.0;
+    const fontSize = 18.0;
+    const lineHeight = 1.65;
+    // A conservative average for Latin/Cyrillic prose. We deliberately keep
+    // pages a bit shorter so a logical page fits on phones and does not need a
+    // nested scroll view that would trap vertical swipes.
+    const averageCharWidth = fontSize * 0.58;
+    final contentWidth = (viewportWidth - horizontalPadding).clamp(220.0, 1600.0);
+    final contentHeight = (viewportHeight - verticalPadding).clamp(260.0, 1400.0);
+    final charsPerLine = (contentWidth / averageCharWidth).floor().clamp(18, 180);
+    final linesPerPage = (contentHeight / (fontSize * lineHeight)).floor().clamp(8, 60);
+    final estimated = (charsPerLine * linesPerPage * 0.72).floor();
+    return estimated.clamp(_minLogicalPageChars, _maxLogicalPageChars).toInt();
+  }
+
+  int _targetCharForBook(BookRecord book, int totalChars) {
+    if (totalChars <= 0) return 0;
 
     final decoded = _tryDecodeLocatorJson(book.currentLocator);
     if (decoded != null) {
       final type = decoded['type'];
-      if (type == 'txt-page-v1') {
-        return ((decoded['pageIndex'] as num?)?.round() ?? 0)
-            .clamp(0, pages.length - 1)
-            .toInt();
-      }
-      if (type == 'txt-char-v1') {
-        final charIndex = ((decoded['charIndex'] as num?)?.round() ?? 0)
+      if (type == 'txt-page-v2') {
+        final anchorChar = ((decoded['anchorChar'] as num?)?.round() ??
+                (decoded['startChar'] as num?)?.round() ??
+                0)
             .clamp(0, totalChars)
             .toInt();
-        return _chunkIndexForChar(pages, charIndex);
+        return anchorChar;
+      }
+      if (type == 'txt-page-v1') {
+        final startChar = (decoded['startChar'] as num?)?.round();
+        if (startChar != null) return startChar.clamp(0, totalChars).toInt();
+        final oldPageIndex = ((decoded['pageIndex'] as num?)?.round() ?? 0).clamp(0, 1000000).toInt();
+        final oldPageCount = ((decoded['pageCount'] as num?)?.round() ?? 0).clamp(0, 1000000).toInt();
+        if (oldPageCount > 0) {
+          return ((oldPageIndex / oldPageCount) * totalChars).round().clamp(0, totalChars).toInt();
+        }
+      }
+      if (type == 'txt-char-v1') {
+        return ((decoded['charIndex'] as num?)?.round() ?? 0).clamp(0, totalChars).toInt();
       }
     }
 
-    return _pageIndexFromProgress(book.progressPercent, pages.length);
+    final progress = book.progressPercent.clamp(0.0, 100.0).toDouble();
+    return ((progress / 100.0) * totalChars).round().clamp(0, totalChars).toInt();
   }
 
   Map<String, dynamic>? _tryDecodeLocatorJson(String raw) {
@@ -583,14 +644,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
   @override
   Widget build(BuildContext context) {
     final isTxt = _book.format == 'txt';
-    final pages = _textPages;
+    final rawText = _rawText;
     return Scaffold(
       appBar: AppBar(
         title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
           IconButton(
             tooltip: 'Добавить закладку',
-            onPressed: isTxt && pages != null ? _addBookmark : null,
+            onPressed: isTxt && rawText != null ? _addBookmark : null,
             icon: const Icon(Icons.bookmark_add_outlined),
           ),
         ],
@@ -604,46 +665,53 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     child: Text(_loadError!, textAlign: TextAlign.center),
                   ),
                 )
-              : pages == null
+              : rawText == null
                   ? const Center(child: CircularProgressIndicator())
-                  : Column(
-                      children: [
-                        Expanded(
-                          child: PageView.builder(
-                            controller: _pageController,
-                            onPageChanged: _onPageChanged,
-                            itemCount: pages.length,
-                            itemBuilder: (context, index) {
-                              return Padding(
-                                padding: const EdgeInsets.fromLTRB(24, 18, 24, 24),
-                                child: SingleChildScrollView(
-                                  child: SelectableText(
-                                    pages[index].text,
-                                    style: const TextStyle(fontSize: 18, height: 1.65),
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-                        ),
-                        SafeArea(
-                          child: Padding(
-                            padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child: LinearProgressIndicator(value: _lastProgress / 100),
-                                ),
-                                const SizedBox(width: 12),
-                                Text(
-                                  '${_lastProgress.toStringAsFixed(1)}% · '
-                                  'стр. ${_currentPageIndex + 1}/${pages.length}',
-                                ),
-                              ],
+                  : LayoutBuilder(
+                      builder: (context, constraints) {
+                        final pages = _pagesForConstraints(constraints);
+                        return Column(
+                          children: [
+                            Expanded(
+                              child: PageView.builder(
+                                controller: _pageController,
+                                scrollDirection: Axis.vertical,
+                                onPageChanged: _onPageChanged,
+                                itemCount: pages.length,
+                                itemBuilder: (context, index) {
+                                  return Padding(
+                                    padding: const EdgeInsets.fromLTRB(24, 18, 24, 24),
+                                    child: Align(
+                                      alignment: Alignment.topLeft,
+                                      child: SelectableText(
+                                        pages[index].text,
+                                        style: const TextStyle(fontSize: 18, height: 1.65),
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
                             ),
-                          ),
-                        ),
-                      ],
+                            SafeArea(
+                              child: Padding(
+                                padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: LinearProgressIndicator(value: _lastProgress / 100),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Text(
+                                      '${_lastProgress.toStringAsFixed(1)}% · '
+                                      'стр. ${_currentPageIndex + 1}/${pages.length}',
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                      },
                     ),
     );
   }
@@ -678,14 +746,17 @@ class _TextPageLocator {
   final int endChar;
   final int totalChars;
 
-  double get progressPercent => pageCount <= 0
-      ? 0
-      : (((pageIndex + 1) / pageCount) * 100).clamp(0.0, 100.0).toDouble();
+  double get progressPercent {
+    if (totalChars <= 0) return 0;
+    if (pageCount > 0 && pageIndex >= pageCount - 1) return 100;
+    return ((startChar / totalChars) * 100).clamp(0.0, 100.0).toDouble();
+  }
 
   String toJsonString() => jsonEncode({
-        'type': 'txt-page-v1',
+        'type': 'txt-page-v2',
         'pageIndex': pageIndex,
         'pageCount': pageCount,
+        'anchorChar': startChar,
         'startChar': startChar,
         'endChar': endChar,
         'totalChars': totalChars,
@@ -726,8 +797,10 @@ String _decodeTextFile(List<int> bytes) {
   }
 }
 
+String _normalizeText(String text) => text.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+
 List<_TextChunk> _splitTextIntoReaderChunks(String text, int targetChars) {
-  final normalized = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+  final normalized = _normalizeText(text);
   if (normalized.isEmpty) return const [];
 
   final chunks = <_TextChunk>[];
