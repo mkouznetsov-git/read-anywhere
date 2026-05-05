@@ -352,19 +352,20 @@ class ReaderScreen extends StatefulWidget {
 }
 
 class _ReaderScreenState extends State<ReaderScreen> {
-  static const _chunkTargetChars = 2500;
+  // Logical pages are intentionally content-based, not pixel/scroll based.
+  // This makes restore stable across macOS/Android screen sizes and font metrics.
+  static const _logicalPageTargetChars = 1800;
 
-  final _controller = ScrollController();
-  final _listKey = GlobalKey();
-  List<_TextChunk>? _textChunks;
-  List<GlobalKey> _chunkKeys = const [];
+  final _pageController = PageController();
+  List<_TextChunk>? _textPages;
   int _totalChars = 0;
   String? _loadError;
   Timer? _saveDebounce;
   double _lastProgress = 0;
+  int _currentPageIndex = 0;
   bool _restoringPosition = false;
   BookRecord? _runtimeBook;
-  _TextLocator? _lastKnownLocator;
+  _TextPageLocator? _lastKnownLocator;
 
   BookRecord get _book => _runtimeBook ?? widget.book;
 
@@ -381,18 +382,17 @@ class _ReaderScreenState extends State<ReaderScreen> {
     super.initState();
     _lastProgress = widget.book.progressPercent;
     _load();
-    _controller.addListener(_onScroll);
   }
 
   @override
   void dispose() {
     _saveDebounce?.cancel();
-    final locator = _currentTextLocatorFromViewport() ?? _lastKnownLocator;
+    final locator = _currentPageLocator() ?? _lastKnownLocator;
     if (locator != null) {
-      // Best-effort flush so closing the reader does not lose the last position.
+      // Best-effort flush so closing the reader does not lose the last page.
       unawaited(_saveProgress(locator));
     }
-    _controller.dispose();
+    _pageController.dispose();
     super.dispose();
   }
 
@@ -405,7 +405,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       return;
     }
     if (book.format != 'txt') {
-      setState(() => _textChunks = null);
+      setState(() => _textPages = null);
       return;
     }
 
@@ -416,101 +416,142 @@ class _ReaderScreenState extends State<ReaderScreen> {
       }
       final bytes = await file.readAsBytes();
       final raw = _decodeTextFile(bytes);
-      final chunks = _splitTextIntoReaderChunks(raw, _chunkTargetChars);
-      final totalChars = chunks.isEmpty ? 0 : chunks.last.endChar;
+      final pages = _splitTextIntoReaderChunks(raw, _logicalPageTargetChars);
+      final totalChars = pages.isEmpty ? 0 : pages.last.endChar;
+      final safePages = pages.isEmpty
+          ? [_TextChunk(text: '', startChar: 0, endChar: 0)]
+          : pages;
+      final targetPage = _targetPageForBook(book, safePages, totalChars);
+      final targetLocator = _locatorForPage(safePages, targetPage, totalChars);
+
       if (!mounted) return;
       setState(() {
-        _textChunks = chunks.isEmpty ? [_TextChunk(text: '', startChar: 0, endChar: 0)] : chunks;
-        _chunkKeys = List<GlobalKey>.generate(_textChunks!.length, (_) => GlobalKey());
+        _textPages = safePages;
         _totalChars = totalChars;
+        _currentPageIndex = targetPage;
+        _lastKnownLocator = targetLocator;
+        _lastProgress = targetLocator.progressPercent;
         _loadError = null;
       });
 
-      unawaited(_restorePositionAfterLayout());
+      unawaited(_restorePageAfterLayout(targetPage));
     } catch (error) {
       if (!mounted) return;
       setState(() => _loadError = 'Не удалось открыть TXT: $error');
     }
   }
 
-  Future<void> _restorePositionAfterLayout() async {
-    final chunks = _textChunks;
-    if (chunks == null || chunks.isEmpty || _totalChars <= 0) return;
+  Future<void> _restorePageAfterLayout(int targetPage) async {
+    final pages = _textPages;
+    if (pages == null || pages.isEmpty) return;
     _restoringPosition = true;
     try {
-      final book = await _loadCurrentBook();
-      _runtimeBook = book;
-      final locator = _TextLocator.tryParse(book.currentLocator);
-      final targetChar = (locator?.charIndex.clamp(0, _totalChars) ??
-              ((_totalChars * (book.progressPercent / 100)).round()).clamp(0, _totalChars))
-          .toInt();
-      final progress = _totalChars <= 0 ? 0.0 : targetChar / _totalChars;
-      final targetChunkIndex = _chunkIndexForChar(chunks, targetChar);
-
-      // The ListView is lazy. A target chunk far from the beginning may not have
-      // a BuildContext until we first jump roughly by content progress. Earlier
-      // versions attempted this before maxScrollExtent was ready and therefore
-      // often restored to 0.
-      for (var attempt = 0; attempt < 14; attempt++) {
-        await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 16 : 60));
-        if (!mounted || !_controller.hasClients) return;
-
-        final max = _controller.position.maxScrollExtent;
-        if (max > 0) {
-          final approximateOffset = (max * progress).clamp(0, max).toDouble();
-          _controller.jumpTo(approximateOffset);
-          await Future<void>.delayed(const Duration(milliseconds: 40));
+      // PageView restoration is deterministic, but it still must happen after
+      // the first frame. Otherwise PageController may not yet have clients.
+      for (var attempt = 0; attempt < 10; attempt++) {
+        await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 16 : 50));
+        if (!mounted) return;
+        if (_pageController.hasClients) {
+          _pageController.jumpToPage(targetPage.clamp(0, pages.length - 1).toInt());
           break;
-        }
-      }
-
-      if (!mounted || !_controller.hasClients) return;
-      final chunkContext = targetChunkIndex < _chunkKeys.length
-          ? _chunkKeys[targetChunkIndex].currentContext
-          : null;
-      if (chunkContext != null) {
-        await Scrollable.ensureVisible(
-          chunkContext,
-          duration: Duration.zero,
-          alignment: 0,
-        );
-        await Future<void>.delayed(const Duration(milliseconds: 16));
-        if (!mounted || !_controller.hasClients) return;
-
-        final chunkBox = chunkContext.findRenderObject() as RenderBox?;
-        final chunk = chunks[targetChunkIndex];
-        if (chunkBox != null && chunkBox.hasSize && chunk.length > 0) {
-          final insideRatio = ((targetChar - chunk.startChar) / chunk.length).clamp(0.0, 1.0).toDouble();
-          final extraPixels = chunkBox.size.height * insideRatio;
-          final currentMax = _controller.position.maxScrollExtent;
-          final targetOffset = (_controller.offset + extraPixels).clamp(0, currentMax).toDouble();
-          _controller.jumpTo(targetOffset);
         }
       }
     } finally {
       _restoringPosition = false;
-      final current = _currentTextLocatorFromViewport();
+      final current = _currentPageLocator();
       if (current != null && mounted) {
         _lastKnownLocator = current;
-        setState(() => _lastProgress = current.progressPercent);
+        setState(() {
+          _currentPageIndex = current.pageIndex;
+          _lastProgress = current.progressPercent;
+        });
       }
     }
   }
 
-  void _onScroll() {
-    if (_restoringPosition || !_controller.hasClients) return;
-    final locator = _currentTextLocatorFromViewport();
-    if (locator == null) return;
+  int _targetPageForBook(BookRecord book, List<_TextChunk> pages, int totalChars) {
+    if (pages.isEmpty) return 0;
+
+    final decoded = _tryDecodeLocatorJson(book.currentLocator);
+    if (decoded != null) {
+      final type = decoded['type'];
+      if (type == 'txt-page-v1') {
+        return ((decoded['pageIndex'] as num?)?.round() ?? 0)
+            .clamp(0, pages.length - 1)
+            .toInt();
+      }
+      if (type == 'txt-char-v1') {
+        final charIndex = ((decoded['charIndex'] as num?)?.round() ?? 0)
+            .clamp(0, totalChars)
+            .toInt();
+        return _chunkIndexForChar(pages, charIndex);
+      }
+    }
+
+    return _pageIndexFromProgress(book.progressPercent, pages.length);
+  }
+
+  Map<String, dynamic>? _tryDecodeLocatorJson(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(trimmed);
+      if (decoded is Map) {
+        return decoded.map((key, value) => MapEntry(key.toString(), value));
+      }
+    } catch (_) {
+      // Old locators such as txt-scroll:... are intentionally ignored; the
+      // stored progress percent is a safer fallback for them.
+    }
+    return null;
+  }
+
+  int _pageIndexFromProgress(double progressPercent, int pageCount) {
+    if (pageCount <= 1) return 0;
+    final progress = progressPercent.clamp(0.0, 100.0).toDouble();
+    if (progress <= 0) return 0;
+    // Progress is displayed as currentPage / totalPages. For example, 5% in a
+    // 100-page book means page 5, which is zero-based index 4.
+    final oneBasedPage = (progress / 100.0 * pageCount).ceil();
+    return (oneBasedPage - 1).clamp(0, pageCount - 1).toInt();
+  }
+
+  _TextPageLocator? _currentPageLocator() {
+    final pages = _textPages;
+    if (pages == null || pages.isEmpty) return null;
+    final index = _currentPageIndex.clamp(0, pages.length - 1).toInt();
+    return _locatorForPage(pages, index, _totalChars);
+  }
+
+  _TextPageLocator _locatorForPage(List<_TextChunk> pages, int pageIndex, int totalChars) {
+    final safeIndex = pageIndex.clamp(0, pages.length - 1).toInt();
+    final page = pages[safeIndex];
+    return _TextPageLocator(
+      pageIndex: safeIndex,
+      pageCount: pages.length,
+      startChar: page.startChar,
+      endChar: page.endChar,
+      totalChars: totalChars,
+    );
+  }
+
+  void _onPageChanged(int index) {
+    if (_restoringPosition) return;
+    final pages = _textPages;
+    if (pages == null || pages.isEmpty) return;
+    final safeIndex = index.clamp(0, pages.length - 1).toInt();
+    final locator = _locatorForPage(pages, safeIndex, _totalChars);
+    _currentPageIndex = safeIndex;
     _lastKnownLocator = locator;
     _lastProgress = locator.progressPercent;
     if (mounted) setState(() {});
     _saveDebounce?.cancel();
-    _saveDebounce = Timer(const Duration(milliseconds: 700), () {
+    _saveDebounce = Timer(const Duration(milliseconds: 450), () {
       unawaited(_saveProgress(locator));
     });
   }
 
-  Future<void> _saveProgress(_TextLocator locator) async {
+  Future<void> _saveProgress(_TextPageLocator locator) async {
     final manifest = await widget.storage.updateProgress(
       bookId: widget.book.id,
       progressPercent: locator.progressPercent,
@@ -526,7 +567,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   Future<void> _addBookmark() async {
-    final locator = _currentTextLocatorFromViewport();
+    final locator = _currentPageLocator();
     await widget.storage.addBookmark(
       bookId: widget.book.id,
       label: 'Закладка ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
@@ -539,69 +580,17 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
-  _TextLocator? _currentTextLocatorFromViewport() {
-    final chunks = _textChunks;
-    if (chunks == null || chunks.isEmpty || _totalChars <= 0 || _chunkKeys.length != chunks.length) {
-      return null;
-    }
-
-    final listContext = _listKey.currentContext;
-    final listBox = listContext?.findRenderObject() as RenderBox?;
-    if (listBox == null || !listBox.hasSize) {
-      return _fallbackLocatorFromScroll();
-    }
-
-    final viewportTop = listBox.localToGlobal(Offset.zero).dy;
-    final viewportBottom = viewportTop + listBox.size.height;
-
-    for (var index = 0; index < chunks.length; index++) {
-      final context = _chunkKeys[index].currentContext;
-      final box = context?.findRenderObject() as RenderBox?;
-      if (box == null || !box.hasSize) continue;
-      final top = box.localToGlobal(Offset.zero).dy;
-      final bottom = top + box.size.height;
-      if (bottom < viewportTop + 1 || top > viewportBottom) continue;
-
-      final chunk = chunks[index];
-      final hiddenTopPixels = (viewportTop - top).clamp(0.0, box.size.height);
-      final insideRatio = box.size.height <= 0 ? 0.0 : hiddenTopPixels / box.size.height;
-      final charIndex = (chunk.startChar + (chunk.length * insideRatio).round()).clamp(0, _totalChars).toInt();
-      return _TextLocator(
-        charIndex: charIndex,
-        totalChars: _totalChars,
-        chunkIndex: index,
-        chunkCount: chunks.length,
-      );
-    }
-
-    return _fallbackLocatorFromScroll();
-  }
-
-  _TextLocator? _fallbackLocatorFromScroll() {
-    if (!_controller.hasClients || _totalChars <= 0) return null;
-    final max = _controller.position.maxScrollExtent;
-    final ratio = max <= 0 ? 0.0 : (_controller.offset / max).clamp(0.0, 1.0);
-    final charIndex = (_totalChars * ratio).round().clamp(0, _totalChars).toInt();
-    final chunks = _textChunks ?? const <_TextChunk>[];
-    return _TextLocator(
-      charIndex: charIndex,
-      totalChars: _totalChars,
-      chunkIndex: chunks.isEmpty ? 0 : _chunkIndexForChar(chunks, charIndex),
-      chunkCount: chunks.length,
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final isTxt = _book.format == 'txt';
-    final chunks = _textChunks;
+    final pages = _textPages;
     return Scaffold(
       appBar: AppBar(
         title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
           IconButton(
             tooltip: 'Добавить закладку',
-            onPressed: isTxt && chunks != null ? _addBookmark : null,
+            onPressed: isTxt && pages != null ? _addBookmark : null,
             icon: const Icon(Icons.bookmark_add_outlined),
           ),
         ],
@@ -615,23 +604,23 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     child: Text(_loadError!, textAlign: TextAlign.center),
                   ),
                 )
-              : chunks == null
+              : pages == null
                   ? const Center(child: CircularProgressIndicator())
                   : Column(
                       children: [
                         Expanded(
-                          child: ListView.builder(
-                            key: _listKey,
-                            controller: _controller,
-                            padding: const EdgeInsets.fromLTRB(24, 16, 24, 40),
-                            itemCount: chunks.length,
+                          child: PageView.builder(
+                            controller: _pageController,
+                            onPageChanged: _onPageChanged,
+                            itemCount: pages.length,
                             itemBuilder: (context, index) {
                               return Padding(
-                                key: _chunkKeys[index],
-                                padding: const EdgeInsets.only(bottom: 12),
-                                child: SelectableText(
-                                  chunks[index].text,
-                                  style: const TextStyle(fontSize: 18, height: 1.65),
+                                padding: const EdgeInsets.fromLTRB(24, 18, 24, 24),
+                                child: SingleChildScrollView(
+                                  child: SelectableText(
+                                    pages[index].text,
+                                    style: const TextStyle(fontSize: 18, height: 1.65),
+                                  ),
                                 ),
                               );
                             },
@@ -646,7 +635,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
                                   child: LinearProgressIndicator(value: _lastProgress / 100),
                                 ),
                                 const SizedBox(width: 12),
-                                Text('${_lastProgress.toStringAsFixed(1)}%'),
+                                Text(
+                                  '${_lastProgress.toStringAsFixed(1)}% · '
+                                  'стр. ${_currentPageIndex + 1}/${pages.length}',
+                                ),
                               ],
                             ),
                           ),
@@ -671,50 +663,35 @@ class _TextChunk {
   int get length => endChar - startChar;
 }
 
-class _TextLocator {
-  const _TextLocator({
-    required this.charIndex,
+class _TextPageLocator {
+  const _TextPageLocator({
+    required this.pageIndex,
+    required this.pageCount,
+    required this.startChar,
+    required this.endChar,
     required this.totalChars,
-    required this.chunkIndex,
-    required this.chunkCount,
   });
 
-  final int charIndex;
+  final int pageIndex;
+  final int pageCount;
+  final int startChar;
+  final int endChar;
   final int totalChars;
-  final int chunkIndex;
-  final int chunkCount;
 
-  double get progressPercent => totalChars <= 0
+  double get progressPercent => pageCount <= 0
       ? 0
-      : ((charIndex / totalChars) * 100).clamp(0.0, 100.0).toDouble();
+      : (((pageIndex + 1) / pageCount) * 100).clamp(0.0, 100.0).toDouble();
 
   String toJsonString() => jsonEncode({
-        'type': 'txt-char-v1',
-        'charIndex': charIndex,
+        'type': 'txt-page-v1',
+        'pageIndex': pageIndex,
+        'pageCount': pageCount,
+        'startChar': startChar,
+        'endChar': endChar,
         'totalChars': totalChars,
-        'chunkIndex': chunkIndex,
-        'chunkCount': chunkCount,
         'progressPercent': progressPercent,
         'updatedAt': DateTime.now().toUtc().toIso8601String(),
       });
-
-  static _TextLocator? tryParse(String raw) {
-    final trimmed = raw.trim();
-    if (trimmed.isEmpty) return null;
-    try {
-      final decoded = jsonDecode(trimmed);
-      if (decoded is! Map) return null;
-      if (decoded['type'] != 'txt-char-v1') return null;
-      return _TextLocator(
-        charIndex: (decoded['charIndex'] as num?)?.round() ?? 0,
-        totalChars: (decoded['totalChars'] as num?)?.round() ?? 0,
-        chunkIndex: (decoded['chunkIndex'] as num?)?.round() ?? 0,
-        chunkCount: (decoded['chunkCount'] as num?)?.round() ?? 0,
-      );
-    } catch (_) {
-      return null;
-    }
-  }
 }
 
 int _chunkIndexForChar(List<_TextChunk> chunks, int charIndex) {
@@ -726,7 +703,7 @@ int _chunkIndexForChar(List<_TextChunk> chunks, int charIndex) {
     final chunk = chunks[mid];
     if (charIndex < chunk.startChar) {
       high = mid - 1;
-    } else if (charIndex > chunk.endChar) {
+    } else if (charIndex >= chunk.endChar) {
       low = mid + 1;
     } else {
       return mid;
