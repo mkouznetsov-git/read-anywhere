@@ -86,7 +86,7 @@
 2. Verify Android shows the book as remote-only.
 3. Tap the cloud download button on Android.
 4. Verify transfer progress is shown in the book card.
-5. Verify final status becomes `Скачано и проверено`.
+5. Verify the final state shows the normal downloaded/read action and the temporary download progress disappears.
 6. Verify the book can be opened on Android and reading progress still syncs back to macOS.
 7. Interrupt relay during a large transfer and verify the book is not marked as downloaded.
 8. Retry download and verify SHA-256 validation succeeds.

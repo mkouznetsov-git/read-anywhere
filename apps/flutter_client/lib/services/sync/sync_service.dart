@@ -1039,17 +1039,8 @@ class SyncService {
     _manifestChanges.add(manifest);
     _downloadsByTransferId.remove(session.transferId);
 
-    _setDownloadSnapshot(
-      state.value.downloadForBook(session.bookId)!.copyWith(
-            statusText: 'Скачано и проверено',
-            progressPercent: 100,
-            transferredBytes: session.expectedBytes,
-            totalBytes: session.expectedBytes,
-            active: false,
-            clearError: true,
-          ),
-    );
-    _appendLog('Файл скачан и проверен: ${session.fileName}');
+    _clearTransferForBook(session.bookId);
+    _appendLog('Файл скачан: ${session.fileName}');
     await broadcastLibrarySnapshot(reason: 'book_file_downloaded');
   }
 
@@ -1184,6 +1175,12 @@ class SyncService {
   void _updateTransferByKey(String key, FileTransferSnapshot snapshot) {
     final updated = Map<String, FileTransferSnapshot>.from(state.value.fileTransfers);
     updated[key] = snapshot;
+    _setState(state.value.copyWith(fileTransfers: Map.unmodifiable(updated)));
+  }
+
+  void _clearTransferForBook(String bookId) {
+    final updated = Map<String, FileTransferSnapshot>.from(state.value.fileTransfers);
+    updated.remove(bookId);
     _setState(state.value.copyWith(fileTransfers: Map.unmodifiable(updated)));
   }
 
