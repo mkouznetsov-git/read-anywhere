@@ -245,3 +245,7 @@ Workflow соберёт Android/macOS release-артефакты, создаст
 ## Hotfix: публикация GitHub Releases
 
 Если workflow запускается по тегу `v*`, job `Publish GitHub Release` теперь явно делает checkout и передаёт `--repo`, поэтому публикация release работает и при создании тега через веб-интерфейс GitHub.
+
+## Sprint 4.3: TXT locator fix
+
+Исправлена проблема, когда процент чтения синхронизировался, но фактическое место открытия TXT на другом устройстве отличалось. TXT-reader теперь сохраняет content-based locator `txt-char-v1` с позицией в тексте (`charIndex`), а не пиксельный scroll offset. Подробнее: `docs/sprint_04_3_text_locator_ru.md`.
