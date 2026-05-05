@@ -16,10 +16,13 @@ flutter --version
 flutter create --project-name read_anywhere --org "$ORG" --platforms "$PLATFORMS" .
 flutter pub get
 
-# Android needs explicit Internet permission for WebSocket sync.
+# Android needs explicit Internet permission for WebSocket sync and camera permission for QR pairing scan.
 ANDROID_MANIFEST="android/app/src/main/AndroidManifest.xml"
 if [[ -f "$ANDROID_MANIFEST" ]] && ! grep -q "android.permission.INTERNET" "$ANDROID_MANIFEST"; then
   perl -0pi -e 's#<manifest([^>]*)>#<manifest$1>\n    <uses-permission android:name="android.permission.INTERNET" />#' "$ANDROID_MANIFEST"
+fi
+if [[ -f "$ANDROID_MANIFEST" ]] && ! grep -q "android.permission.CAMERA" "$ANDROID_MANIFEST"; then
+  perl -0pi -e 's#<manifest([^>]*)>#<manifest$1>\n    <uses-permission android:name="android.permission.CAMERA" />#' "$ANDROID_MANIFEST"
 fi
 
 
@@ -59,5 +62,13 @@ for entitlements in macos/Runner/DebugProfile.entitlements macos/Runner/Release.
       /usr/libexec/PlistBuddy -c "Set :com.apple.security.network.client true" "$entitlements" || true
   fi
 done
+
+
+# iOS camera usage string for future QR pairing builds.
+IOS_PLIST="ios/Runner/Info.plist"
+if [[ -f "$IOS_PLIST" && -x /usr/libexec/PlistBuddy ]]; then
+  /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string ReadAnywhere uses the camera to scan pairing QR codes." "$IOS_PLIST" 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Set :NSCameraUsageDescription ReadAnywhere uses the camera to scan pairing QR codes." "$IOS_PLIST" || true
+fi
 
 echo "Flutter platform preparation complete."

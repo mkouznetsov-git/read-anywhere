@@ -22,6 +22,12 @@ build_with_optional_define() {
   fi
 }
 
+echo "Building Android universal release APK for simple sideload installation..."
+build_with_optional_define build apk --release
+if [[ -f build/app/outputs/flutter-apk/app-release.apk ]]; then
+  cp build/app/outputs/flutter-apk/app-release.apk "$DIST_DIR/ReadAnywhere-${VERSION}-android-universal-release.apk"
+fi
+
 echo "Building Android release APKs split per ABI..."
 build_with_optional_define build apk --release --split-per-abi
 

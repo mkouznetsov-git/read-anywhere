@@ -4,6 +4,8 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 import 'models/book.dart';
 import 'models/manifest.dart';
@@ -272,33 +274,66 @@ class _BookCard extends StatelessWidget {
     final remoteCount = book.availableOnDeviceIds
         .where((deviceId) => deviceId != currentDeviceId)
         .length;
-    final statusText = book.isDownloaded
-        ? 'Скачана на этом устройстве'
-        : remoteCount > 0
-            ? 'Не скачана здесь • доступна на $remoteCount устройстве(ах)'
-            : 'Только в библиотеке';
-    final progress = book.progressPercent.clamp(0, 100).toStringAsFixed(1);
+    final progressValue = (book.progressPercent.clamp(0, 100) / 100).toDouble();
+    final progressText = book.progressPercent.clamp(0, 100).toStringAsFixed(1);
     final transfer = this.transfer;
     final isDownloading = transfer?.active == true;
     final hasDownloadError = transfer?.hasError == true;
+    final availabilityHint = book.isDownloaded
+        ? 'Скачано'
+        : remoteCount > 0
+            ? 'В облаке устройств: $remoteCount'
+            : 'Нет локальной копии';
 
     return Card(
       child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
         title: Text(book.title, maxLines: 2, overflow: TextOverflow.ellipsis),
         subtitle: Padding(
           padding: const EdgeInsets.only(top: 8),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('${book.format.toUpperCase()} • $statusText'),
-              const SizedBox(height: 8),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(999),
-                child: LinearProgressIndicator(value: book.progressPercent / 100),
+              Row(
+                children: [
+                  Text(book.format.toUpperCase()),
+                  const SizedBox(width: 8),
+                  Icon(
+                    book.isDownloaded ? Icons.check_circle_outline : Icons.cloud_outlined,
+                    size: 15,
+                    color: Theme.of(context).colorScheme.secondary,
+                  ),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      availabilityHint,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 4),
-              Text('Прогресс чтения: $progress%'),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(999),
+                      child: LinearProgressIndicator(value: progressValue),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    width: 48,
+                    child: Text(
+                      '$progressText%',
+                      textAlign: TextAlign.right,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                ],
+              ),
               if (transfer != null) ...[
                 const SizedBox(height: 10),
                 ClipRRect(
@@ -312,6 +347,7 @@ class _BookCard extends StatelessWidget {
                   hasDownloadError
                       ? '${transfer.statusText}: ${transfer.error}'
                       : transfer.statusText,
+                  style: Theme.of(context).textTheme.bodySmall,
                 ),
               ],
             ],
@@ -352,28 +388,26 @@ class ReaderScreen extends StatefulWidget {
 }
 
 class _ReaderScreenState extends State<ReaderScreen> {
-  // Reader position must be content-based, not pixel-scroll based.
-  // TXT pages are rebuilt from the text and current viewport size using
-  // TextPainter pagination, while the saved locator stores an anchor character index. This lets macOS/Android
-  // return to the same text fragment even when their screens differ.
-  static const _minLogicalPageChars = 220;
-  static const _maxLogicalPageChars = 2200;
+  // Smooth TXT reader: a single vertical scroll view for the whole book.
+  // Position is saved by an anchor character index, not by discrete pages or
+  // Flutter pixels. This keeps scrolling smooth, avoids resize re-pagination,
+  // and restores to approximately the same text fragment across devices.
+  static const _readerChunkChars = 3600;
   static const _readerTextStyle = TextStyle(fontSize: 18, height: 1.65);
 
-  final _pageController = PageController();
-  List<_TextChunk>? _textPages;
+  final _scrollController = ScrollController();
+  List<_TextChunk>? _textChunks;
   String? _rawText;
-  String? _pageLayoutSignature;
   int _totalChars = 0;
   int _pendingRestoreChar = 0;
   bool _restoreScheduled = false;
+  bool _restoringPosition = false;
+  bool _didInitialRestore = false;
   String? _loadError;
   Timer? _saveDebounce;
   double _lastProgress = 0;
-  int _currentPageIndex = 0;
-  bool _restoringPosition = false;
   BookRecord? _runtimeBook;
-  _TextPageLocator? _lastKnownLocator;
+  _TextAnchorLocator? _lastKnownLocator;
 
   BookRecord get _book => _runtimeBook ?? widget.book;
 
@@ -389,18 +423,19 @@ class _ReaderScreenState extends State<ReaderScreen> {
   void initState() {
     super.initState();
     _lastProgress = widget.book.progressPercent;
+    _scrollController.addListener(_onScroll);
     _load();
   }
 
   @override
   void dispose() {
     _saveDebounce?.cancel();
-    final locator = _currentPageLocator() ?? _lastKnownLocator;
+    final locator = _currentLocator() ?? _lastKnownLocator;
     if (locator != null) {
-      // Best-effort flush so closing the reader does not lose the last page.
       unawaited(_saveProgress(locator));
     }
-    _pageController.dispose();
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -413,7 +448,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       return;
     }
     if (book.format != 'txt') {
-      setState(() => _textPages = null);
+      setState(() => _textChunks = null);
       return;
     }
 
@@ -424,48 +459,52 @@ class _ReaderScreenState extends State<ReaderScreen> {
       }
       final bytes = await file.readAsBytes();
       final raw = _normalizeText(_decodeTextFile(bytes));
+      final chunks = _splitTextIntoReaderChunks(raw, _readerChunkChars);
       final totalChars = raw.length;
       final targetChar = _targetCharForBook(book, totalChars);
 
       if (!mounted) return;
       setState(() {
         _rawText = raw;
-        _textPages = null;
-        _pageLayoutSignature = null;
+        _textChunks = chunks.isEmpty
+            ? [const _TextChunk(text: '', startChar: 0, endChar: 0)]
+            : chunks;
         _totalChars = totalChars;
         _pendingRestoreChar = targetChar;
-        _currentPageIndex = 0;
-        _lastKnownLocator = null;
-        _lastProgress = totalChars <= 0
-            ? 0
-            : ((targetChar / totalChars) * 100).clamp(0.0, 100.0).toDouble();
+        _lastKnownLocator = _locatorForAnchorChar(targetChar);
+        _lastProgress = _lastKnownLocator?.progressPercent ?? 0;
+        _didInitialRestore = false;
         _loadError = null;
       });
+      _scheduleRestoreScroll();
     } catch (error) {
       if (!mounted) return;
       setState(() => _loadError = 'Не удалось открыть TXT: $error');
     }
   }
 
-  void _scheduleRestorePage(int targetPage) {
-    final pages = _textPages;
-    if (pages == null || pages.isEmpty || _restoreScheduled) return;
+  void _scheduleRestoreScroll() {
+    if (_restoreScheduled) return;
     _restoreScheduled = true;
     _restoringPosition = true;
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       try {
-        for (var attempt = 0; attempt < 12; attempt++) {
-          await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 16 : 45));
+        for (var attempt = 0; attempt < 18; attempt++) {
+          await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 16 : 40));
           if (!mounted) return;
-          if (_pageController.hasClients) {
-            final safeTarget = targetPage.clamp(0, pages.length - 1).toInt();
-            _pageController.jumpToPage(safeTarget);
-            _currentPageIndex = safeTarget;
-            _lastKnownLocator = _locatorForPage(pages, safeTarget, _totalChars);
-            _lastProgress = _lastKnownLocator!.progressPercent;
-            if (mounted) setState(() {});
-            break;
-          }
+          if (!_scrollController.hasClients) continue;
+          final position = _scrollController.position;
+          if (!position.hasContentDimensions) continue;
+          final max = position.maxScrollExtent;
+          final ratio = _totalChars <= 0 ? 0.0 : (_pendingRestoreChar / _totalChars).clamp(0.0, 1.0).toDouble();
+          final target = (max * ratio).clamp(0.0, max).toDouble();
+          _scrollController.jumpTo(target);
+          final locator = _currentLocator() ?? _locatorForAnchorChar(_pendingRestoreChar);
+          _lastKnownLocator = locator;
+          _lastProgress = locator.progressPercent;
+          _didInitialRestore = true;
+          if (mounted) setState(() {});
+          break;
         }
       } finally {
         _restoringPosition = false;
@@ -474,125 +513,18 @@ class _ReaderScreenState extends State<ReaderScreen> {
     });
   }
 
-  List<_TextChunk> _pagesForConstraints(BoxConstraints constraints) {
-    final raw = _rawText ?? '';
-    final viewportWidth = constraints.maxWidth.isFinite ? constraints.maxWidth : 420.0;
-    final viewportHeight = constraints.maxHeight.isFinite ? constraints.maxHeight : 640.0;
-
-    // Keep this in sync with the Padding around page content in itemBuilder.
-    const horizontalPadding = 48.0;
-    const verticalPadding = 42.0;
-    final contentWidth = (viewportWidth - horizontalPadding).clamp(220.0, 1600.0).toDouble();
-    final contentHeight = (viewportHeight - verticalPadding).clamp(260.0, 1400.0).toDouble();
-    final signature =
-        '${contentWidth.round()}x${contentHeight.round()}:${raw.length}:txt-page-v3';
-
-    if (_textPages != null && _pageLayoutSignature == signature) {
-      return _textPages!;
-    }
-
-    final pages = raw.isEmpty
-        ? [_TextChunk(text: '', startChar: 0, endChar: 0)]
-        : _paginateTextForViewport(raw, contentWidth, contentHeight, _readerTextStyle);
-    final safePages = pages.isEmpty
-        ? [_TextChunk(text: '', startChar: 0, endChar: 0)]
-        : pages;
-    final targetPage = _chunkIndexForChar(safePages, _pendingRestoreChar);
-    final locator = _locatorForPage(safePages, targetPage, _totalChars);
-
-    _textPages = safePages;
-    _pageLayoutSignature = signature;
-    _currentPageIndex = targetPage;
-    _lastKnownLocator = locator;
-    _lastProgress = locator.progressPercent;
-    _scheduleRestorePage(targetPage);
-
-    return safePages;
-  }
-
-  List<_TextChunk> _paginateTextForViewport(
-    String text,
-    double contentWidth,
-    double contentHeight,
-    TextStyle style,
-  ) {
-    final normalized = _normalizeText(text);
-    if (normalized.isEmpty) return const [];
-
-    final pages = <_TextChunk>[];
-    var start = 0;
-
-    while (start < normalized.length) {
-      final remaining = normalized.length - start;
-      final hardHigh = start + remaining.clamp(_minLogicalPageChars, _maxLogicalPageChars).toInt();
-      var low = start + 1;
-      var high = hardHigh.clamp(start + 1, normalized.length).toInt();
-      var best = low;
-
-      // Binary-search the longest substring that fits into the visible page.
-      while (low <= high) {
-        final mid = low + ((high - low) >> 1);
-        if (_textFitsPage(normalized.substring(start, mid), contentWidth, contentHeight, style)) {
-          best = mid;
-          low = mid + 1;
-        } else {
-          high = mid - 1;
-        }
-      }
-
-      // Prefer clean page breaks, but never skip text and never create a tiny page.
-      final minUsefulEnd = start + ((best - start) * 0.65).floor();
-      var end = best;
-      if (best < normalized.length) {
-        final paragraphBreak = normalized.lastIndexOf('\n\n', best);
-        final lineBreak = normalized.lastIndexOf('\n', best);
-        final spaceBreak = normalized.lastIndexOf(' ', best);
-        if (paragraphBreak > minUsefulEnd) {
-          end = paragraphBreak + 2;
-        } else if (lineBreak > minUsefulEnd) {
-          end = lineBreak + 1;
-        } else if (spaceBreak > minUsefulEnd) {
-          end = spaceBreak + 1;
-        }
-      }
-
-      // Safety fallback for very long unbreakable fragments.
-      if (end <= start) {
-        end = (start + _minLogicalPageChars).clamp(start + 1, normalized.length).toInt();
-      }
-
-      pages.add(_TextChunk(
-        text: normalized.substring(start, end),
-        startChar: start,
-        endChar: end,
-      ));
-      start = end;
-    }
-
-    return pages;
-  }
-
-  bool _textFitsPage(
-    String text,
-    double maxWidth,
-    double maxHeight,
-    TextStyle style,
-  ) {
-    final painter = TextPainter(
-      text: TextSpan(text: text, style: style),
-      textDirection: TextDirection.ltr,
-      textAlign: TextAlign.left,
-      maxLines: null,
-    )..layout(maxWidth: maxWidth);
-    return painter.height <= maxHeight;
-  }
-
   int _targetCharForBook(BookRecord book, int totalChars) {
     if (totalChars <= 0) return 0;
 
     final decoded = _tryDecodeLocatorJson(book.currentLocator);
     if (decoded != null) {
       final type = decoded['type'];
+      if (type == 'txt-anchor-v1') {
+        final anchorChar = ((decoded['anchorChar'] as num?)?.round() ?? 0)
+            .clamp(0, totalChars)
+            .toInt();
+        return anchorChar;
+      }
       if (type == 'txt-page-v3' || type == 'txt-page-v2') {
         final anchorChar = ((decoded['anchorChar'] as num?)?.round() ??
                 (decoded['startChar'] as num?)?.round() ??
@@ -629,57 +561,52 @@ class _ReaderScreenState extends State<ReaderScreen> {
       }
     } catch (_) {
       // Old locators such as txt-scroll:... are intentionally ignored; the
-      // stored progress percent is a safer fallback for them.
+      // stored progress percent is a safer fallback.
     }
     return null;
   }
 
-  int _pageIndexFromProgress(double progressPercent, int pageCount) {
-    if (pageCount <= 1) return 0;
-    final progress = progressPercent.clamp(0.0, 100.0).toDouble();
-    if (progress <= 0) return 0;
-    // Progress is displayed as currentPage / totalPages. For example, 5% in a
-    // 100-page book means page 5, which is zero-based index 4.
-    final oneBasedPage = (progress / 100.0 * pageCount).ceil();
-    return (oneBasedPage - 1).clamp(0, pageCount - 1).toInt();
+  _TextAnchorLocator? _currentLocator() {
+    if (_totalChars <= 0) return null;
+    if (!_scrollController.hasClients || !_scrollController.position.hasContentDimensions) {
+      return _lastKnownLocator ?? _locatorForAnchorChar(_pendingRestoreChar);
+    }
+    final position = _scrollController.position;
+    final max = position.maxScrollExtent;
+    final ratio = max <= 0
+        ? (_pendingRestoreChar / _totalChars).clamp(0.0, 1.0).toDouble()
+        : (position.pixels / max).clamp(0.0, 1.0).toDouble();
+    final anchorChar = (ratio * _totalChars).round().clamp(0, _totalChars).toInt();
+    return _locatorForAnchorChar(anchorChar);
   }
 
-  _TextPageLocator? _currentPageLocator() {
-    final pages = _textPages;
-    if (pages == null || pages.isEmpty) return null;
-    final index = _currentPageIndex.clamp(0, pages.length - 1).toInt();
-    return _locatorForPage(pages, index, _totalChars);
-  }
-
-  _TextPageLocator _locatorForPage(List<_TextChunk> pages, int pageIndex, int totalChars) {
-    final safeIndex = pageIndex.clamp(0, pages.length - 1).toInt();
-    final page = pages[safeIndex];
-    return _TextPageLocator(
-      pageIndex: safeIndex,
-      pageCount: pages.length,
-      startChar: page.startChar,
-      endChar: page.endChar,
-      totalChars: totalChars,
+  _TextAnchorLocator _locatorForAnchorChar(int anchorChar) {
+    final chunks = _textChunks ?? const <_TextChunk>[];
+    final safeChar = _totalChars <= 0 ? 0 : anchorChar.clamp(0, _totalChars).toInt();
+    final chunkIndex = chunks.isEmpty ? 0 : _chunkIndexForChar(chunks, safeChar);
+    return _TextAnchorLocator(
+      anchorChar: safeChar,
+      totalChars: _totalChars,
+      chunkIndex: chunkIndex,
+      chunkCount: chunks.length,
     );
   }
 
-  void _onPageChanged(int index) {
-    if (_restoringPosition) return;
-    final pages = _textPages;
-    if (pages == null || pages.isEmpty) return;
-    final safeIndex = index.clamp(0, pages.length - 1).toInt();
-    final locator = _locatorForPage(pages, safeIndex, _totalChars);
-    _currentPageIndex = safeIndex;
+  void _onScroll() {
+    if (_restoringPosition || !_didInitialRestore) return;
+    final locator = _currentLocator();
+    if (locator == null) return;
+    final shouldRedraw = (locator.progressPercent - _lastProgress).abs() >= 0.05;
     _lastKnownLocator = locator;
     _lastProgress = locator.progressPercent;
-    if (mounted) setState(() {});
+    if (shouldRedraw && mounted) setState(() {});
     _saveDebounce?.cancel();
-    _saveDebounce = Timer(const Duration(milliseconds: 450), () {
+    _saveDebounce = Timer(const Duration(milliseconds: 550), () {
       unawaited(_saveProgress(locator));
     });
   }
 
-  Future<void> _saveProgress(_TextPageLocator locator) async {
+  Future<void> _saveProgress(_TextAnchorLocator locator) async {
     final manifest = await widget.storage.updateProgress(
       bookId: widget.book.id,
       progressPercent: locator.progressPercent,
@@ -695,7 +622,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   Future<void> _addBookmark() async {
-    final locator = _currentPageLocator();
+    final locator = _currentLocator();
     await widget.storage.addBookmark(
       bookId: widget.book.id,
       label: 'Закладка ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
@@ -712,6 +639,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Widget build(BuildContext context) {
     final isTxt = _book.format == 'txt';
     final rawText = _rawText;
+    final chunks = _textChunks;
     return Scaffold(
       appBar: AppBar(
         title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -732,55 +660,48 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     child: Text(_loadError!, textAlign: TextAlign.center),
                   ),
                 )
-              : rawText == null
+              : rawText == null || chunks == null
                   ? const Center(child: CircularProgressIndicator())
-                  : LayoutBuilder(
-                      builder: (context, constraints) {
-                        final pages = _pagesForConstraints(constraints);
-                        return Column(
-                          children: [
-                            Expanded(
-                              child: PageView.builder(
-                                controller: _pageController,
-                                scrollDirection: Axis.vertical,
-                                onPageChanged: _onPageChanged,
-                                itemCount: pages.length,
-                                itemBuilder: (context, index) {
-                                  return Padding(
-                                    padding: const EdgeInsets.fromLTRB(24, 18, 24, 24),
-                                    child: Align(
-                                      alignment: Alignment.topLeft,
-                                      child: Text(
-                                        pages[index].text,
-                                        softWrap: true,
-                                        overflow: TextOverflow.clip,
-                                        style: _readerTextStyle,
-                                      ),
-                                    ),
-                                  );
-                                },
-                              ),
-                            ),
-                            SafeArea(
-                              child: Padding(
-                                padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
-                                child: Row(
-                                  children: [
-                                    Expanded(
-                                      child: LinearProgressIndicator(value: _lastProgress / 100),
-                                    ),
-                                    const SizedBox(width: 12),
+                  : Column(
+                      children: [
+                        Expanded(
+                          child: Scrollbar(
+                            controller: _scrollController,
+                            thumbVisibility: true,
+                            child: SingleChildScrollView(
+                              controller: _scrollController,
+                              padding: const EdgeInsets.fromLTRB(24, 18, 24, 28),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  for (final chunk in chunks) ...[
                                     Text(
-                                      '${_lastProgress.toStringAsFixed(1)}% · '
-                                      'стр. ${_currentPageIndex + 1}/${pages.length}',
+                                      chunk.text,
+                                      softWrap: true,
+                                      style: _readerTextStyle,
                                     ),
+                                    const SizedBox(height: 12),
                                   ],
-                                ),
+                                ],
                               ),
                             ),
-                          ],
-                        );
-                      },
+                          ),
+                        ),
+                        SafeArea(
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: LinearProgressIndicator(value: _lastProgress / 100),
+                                ),
+                                const SizedBox(width: 12),
+                                Text('${_lastProgress.toStringAsFixed(1)}%'),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
     );
   }
@@ -800,35 +721,30 @@ class _TextChunk {
   int get length => endChar - startChar;
 }
 
-class _TextPageLocator {
-  const _TextPageLocator({
-    required this.pageIndex,
-    required this.pageCount,
-    required this.startChar,
-    required this.endChar,
+class _TextAnchorLocator {
+  const _TextAnchorLocator({
+    required this.anchorChar,
     required this.totalChars,
+    required this.chunkIndex,
+    required this.chunkCount,
   });
 
-  final int pageIndex;
-  final int pageCount;
-  final int startChar;
-  final int endChar;
+  final int anchorChar;
   final int totalChars;
+  final int chunkIndex;
+  final int chunkCount;
 
   double get progressPercent {
     if (totalChars <= 0) return 0;
-    if (pageCount > 0 && pageIndex >= pageCount - 1) return 100;
-    return ((startChar / totalChars) * 100).clamp(0.0, 100.0).toDouble();
+    return ((anchorChar / totalChars) * 100).clamp(0.0, 100.0).toDouble();
   }
 
   String toJsonString() => jsonEncode({
-        'type': 'txt-page-v3',
-        'pageIndex': pageIndex,
-        'pageCount': pageCount,
-        'anchorChar': startChar,
-        'startChar': startChar,
-        'endChar': endChar,
+        'type': 'txt-anchor-v1',
+        'anchorChar': anchorChar,
         'totalChars': totalChars,
+        'chunkIndex': chunkIndex,
+        'chunkCount': chunkCount,
         'progressPercent': progressPercent,
         'updatedAt': DateTime.now().toUtc().toIso8601String(),
       });
@@ -1159,6 +1075,81 @@ class _SyncScreenState extends State<SyncScreen> {
     }
   }
 
+  Future<PairingInvite?> _ensurePairingInvite() async {
+    if (_pairingInvite != null) return _pairingInvite;
+    setState(() => _pairingBusy = true);
+    try {
+      final settings = _settingsFromForm(autoConnect: _settings?.autoConnect ?? false);
+      await widget.storage.saveSyncSettings(settings);
+      final invite = await widget.sync.createPairingInvite(settings: settings);
+      if (!mounted) return invite;
+      setState(() {
+        _settings = settings;
+        _pairingInvite = invite;
+      });
+      return invite;
+    } catch (error) {
+      if (!mounted) return null;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Не удалось создать QR-код: $error')),
+      );
+      return null;
+    } finally {
+      if (mounted) setState(() => _pairingBusy = false);
+    }
+  }
+
+  Future<void> _showPairingQrCode() async {
+    final invite = await _ensurePairingInvite();
+    if (!mounted || invite == null) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('QR-код подключения'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            QrImageView(
+              data: invite.inviteLink,
+              version: QrVersions.auto,
+              size: 260,
+              backgroundColor: Colors.white,
+            ),
+            const SizedBox(height: 12),
+            Text('Код: ${invite.displayCode}'),
+            const SizedBox(height: 4),
+            Text(
+              'Отсканируйте QR-код на новом устройстве в ReadAnywhere.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Закрыть'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _scanPairingQrCode() async {
+    if (!(Platform.isAndroid || Platform.isIOS)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Сканирование QR-кода доступно на мобильных устройствах.')),
+      );
+      return;
+    }
+    final scanned = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => const _PairingQrScannerScreen()),
+    );
+    if (scanned == null || scanned.trim().isEmpty || !mounted) return;
+    _pairingInputController.text = scanned.trim();
+    await _claimPairingInvite();
+  }
+
   Future<void> _claimPairingInvite() async {
     setState(() => _pairingBusy = true);
     try {
@@ -1365,16 +1356,30 @@ class _SyncScreenState extends State<SyncScreen> {
                       'Теперь accountId не нужно копировать вручную. На первом устройстве создайте код, на новом устройстве введите код или вставьте приглашение.',
                     ),
                     const SizedBox(height: 12),
-                    FilledButton.icon(
-                      onPressed: _pairingBusy ? null : _createPairingInvite,
-                      icon: _pairingBusy
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.add_link_rounded),
-                      label: const Text('Создать код подключения'),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: FilledButton.icon(
+                            onPressed: _pairingBusy ? null : _createPairingInvite,
+                            icon: _pairingBusy
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                  )
+                                : const Icon(Icons.add_link_rounded),
+                            label: const Text('Создать код подключения'),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: _pairingBusy ? null : _showPairingQrCode,
+                            icon: const Icon(Icons.qr_code_2_rounded),
+                            label: const Text('Создать QR-код'),
+                          ),
+                        ),
+                      ],
                     ),
                     if (_pairingInvite != null) ...[
                       const SizedBox(height: 16),
@@ -1417,10 +1422,26 @@ class _SyncScreenState extends State<SyncScreen> {
                       ),
                     ),
                     const SizedBox(height: 12),
-                    FilledButton.icon(
-                      onPressed: _pairingBusy ? null : _claimPairingInvite,
-                      icon: const Icon(Icons.login_rounded),
-                      label: const Text('Подключиться по коду'),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: FilledButton.icon(
+                            onPressed: _pairingBusy ? null : _claimPairingInvite,
+                            icon: const Icon(Icons.login_rounded),
+                            label: const Text('Подключиться по коду'),
+                          ),
+                        ),
+                        if (Platform.isAndroid || Platform.isIOS) ...[
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: _pairingBusy ? null : _scanPairingQrCode,
+                              icon: const Icon(Icons.qr_code_scanner_rounded),
+                              label: const Text('Сканировать QR'),
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ],
                 ),
@@ -1508,6 +1529,59 @@ class _SyncScreenState extends State<SyncScreen> {
   }
 }
 
+
+class _PairingQrScannerScreen extends StatefulWidget {
+  const _PairingQrScannerScreen();
+
+  @override
+  State<_PairingQrScannerScreen> createState() => _PairingQrScannerScreenState();
+}
+
+class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
+  final _controller = MobileScannerController();
+  bool _handled = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Сканировать QR-код')),
+      body: Column(
+        children: [
+          Expanded(
+            child: MobileScanner(
+              controller: _controller,
+              onDetect: (capture) {
+                if (_handled) return;
+                final barcodes = capture.barcodes;
+                if (barcodes.isEmpty) return;
+                final value = barcodes.first.rawValue;
+                if (value == null || value.trim().isEmpty) return;
+                _handled = true;
+                Navigator.of(context).pop(value.trim());
+              },
+            ),
+          ),
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                'Наведите камеру на QR-код подключения ReadAnywhere.',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 class _RelayModeOption extends StatelessWidget {
   const _RelayModeOption({
