@@ -15,6 +15,26 @@ on:
         options:
           - 'false'
           - 'true'
+      publish_release:
+        description: 'Publish GitHub Release from this run'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      release_tag:
+        description: 'Release tag for manual publishing, e.g. v0.1.2-test. Empty means main-latest.'
+        required: false
+        default: ''
+      release_prerelease:
+        description: 'Mark manual release as prerelease'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
   push:
     branches: [ main, master ]
     tags:
@@ -76,6 +96,7 @@ jobs:
         with:
           name: ReadAnywhere-android-release
           path: dist/android/*
+          retention-days: 7
 
   macos-release:
     name: macOS release DMG and PKG
@@ -99,7 +120,7 @@ jobs:
         with:
           name: ReadAnywhere-macos-release-dmg-pkg
           path: dist/macos/*
-
+          retention-days: 7
 
   github-release:
     name: Publish GitHub Release
@@ -107,15 +128,17 @@ jobs:
     needs:
       - android-release
       - macos-release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true')
     permissions:
       contents: write
     steps:
-      # gh release can work without a checkout when --repo is passed,
-      # but checkout gives the job a normal repository context and makes
-      # local troubleshooting more predictable.
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Download Android release artifacts
         uses: actions/download-artifact@v6
@@ -129,11 +152,52 @@ jobs:
           name: ReadAnywhere-macos-release-dmg-pkg
           path: release-assets/macos
 
+      - name: Decide release channel
+        id: release_channel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG=""
+          TITLE=""
+          PRERELEASE="true"
+          ROLLING="false"
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            TITLE="ReadAnywhere ${TAG}"
+            PRERELEASE="false"
+            ROLLING="false"
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && -n "${{ github.event.inputs.release_tag }}" ]]; then
+            TAG="${{ github.event.inputs.release_tag }}"
+            TITLE="ReadAnywhere ${TAG}"
+            PRERELEASE="${{ github.event.inputs.release_prerelease }}"
+            ROLLING="false"
+          else
+            TAG="main-latest"
+            TITLE="ReadAnywhere main-latest"
+            PRERELEASE="true"
+            ROLLING="true"
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "rolling=${ROLLING}" >> "$GITHUB_OUTPUT"
+
+          echo "Release tag: ${TAG}"
+          echo "Release title: ${TITLE}"
+          echo "Prerelease: ${PRERELEASE}"
+          echo "Rolling: ${ROLLING}"
+
       - name: Prepare release assets and notes
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ steps.release_channel.outputs.tag }}"
+          TITLE="${{ steps.release_channel.outputs.title }}"
+          PRERELEASE="${{ steps.release_channel.outputs.prerelease }}"
+          ROLLING="${{ steps.release_channel.outputs.rolling }}"
 
           if [[ -f release-assets/android/SHA256SUMS ]]; then
             mv release-assets/android/SHA256SUMS release-assets/android/ReadAnywhere-android-release-SHA256SUMS.txt
@@ -142,10 +206,21 @@ jobs:
             mv release-assets/macos/SHA256SUMS release-assets/macos/ReadAnywhere-macos-release-SHA256SUMS.txt
           fi
 
-          cat > RELEASE_NOTES.md <<'EOF'
-          # ReadAnywhere TAG_PLACEHOLDER
+          if [[ "$ROLLING" == "true" ]]; then
+            CHANNEL_TEXT="Автоматическая rolling-сборка из ветки ${GITHUB_REF_NAME}. Этот релиз обновляется при каждом push в main/master."
+          else
+            CHANNEL_TEXT="Автоматическая тестовая сборка ReadAnywhere."
+          fi
 
-          Автоматическая тестовая сборка ReadAnywhere.
+          cat > RELEASE_NOTES.md <<EOF
+          # ${TITLE}
+
+          ${CHANNEL_TEXT}
+
+          ## Commit
+
+          - SHA: \`${GITHUB_SHA}\`
+          - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 
           ## Что внутри
 
@@ -166,13 +241,14 @@ jobs:
 
           Эти сборки предназначены для внутреннего тестирования. macOS-сборки пока не подписаны Developer ID и не notarized. Android release-сборки пока используют стандартную тестовую конфигурацию MVP; production-публикация позже потребует отдельного signing keystore.
           EOF
-          sed -i "s/TAG_PLACEHOLDER/${TAG}/g" RELEASE_NOTES.md
 
           echo "Release assets:"
           find release-assets -maxdepth 3 -type f -print | sort
 
           {
             echo "## GitHub Release assets"
+            echo
+            echo "Release: \`${TAG}\`"
             echo
             echo "| File | Size |"
             echo "|---|---:|"
@@ -182,6 +258,19 @@ jobs:
             done < <(find release-assets -maxdepth 3 -type f -print | sort)
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Move rolling release tag to this commit
+        if: steps.release_channel.outputs.rolling == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.release_channel.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "$TAG" "$GITHUB_SHA"
+          git push --force origin "refs/tags/${TAG}"
+
       - name: Publish or update release
         shell: bash
         env:
@@ -189,8 +278,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
-          TITLE="ReadAnywhere ${TAG}"
+          TAG="${{ steps.release_channel.outputs.tag }}"
+          TITLE="${{ steps.release_channel.outputs.title }}"
+          PRERELEASE="${{ steps.release_channel.outputs.prerelease }}"
           REPO="${GITHUB_REPOSITORY}"
           mapfile -t ASSETS < <(find release-assets -maxdepth 3 -type f -print | sort)
 
@@ -199,9 +289,19 @@ jobs:
             exit 1
           fi
 
+          CREATE_FLAGS=(--repo "$REPO" --title "$TITLE" --notes-file RELEASE_NOTES.md)
+          EDIT_FLAGS=(--repo "$REPO" --title "$TITLE" --notes-file RELEASE_NOTES.md)
+          if [[ "$PRERELEASE" == "true" ]]; then
+            CREATE_FLAGS+=(--prerelease --latest=false)
+            EDIT_FLAGS+=(--prerelease --latest=false)
+          else
+            CREATE_FLAGS+=(--latest)
+            EDIT_FLAGS+=(--latest)
+          fi
+
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release upload "$TAG" "${ASSETS[@]}" --repo "$REPO" --clobber
-            gh release edit "$TAG" --repo "$REPO" --title "$TITLE" --notes-file RELEASE_NOTES.md
+            gh release edit "$TAG" "${EDIT_FLAGS[@]}"
           else
-            gh release create "$TAG" "${ASSETS[@]}" --repo "$REPO" --title "$TITLE" --notes-file RELEASE_NOTES.md
+            gh release create "$TAG" "${ASSETS[@]}" "${CREATE_FLAGS[@]}"
           fi

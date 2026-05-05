@@ -249,3 +249,14 @@ Workflow соберёт Android/macOS release-артефакты, создаст
 ## Sprint 4.3: TXT locator fix
 
 Исправлена проблема, когда процент чтения синхронизировался, но фактическое место открытия TXT на другом устройстве отличалось. TXT-reader теперь сохраняет content-based locator `txt-char-v1` с позицией в тексте (`charIndex`), а не пиксельный scroll offset. Подробнее: `docs/sprint_04_3_text_locator_ru.md`.
+
+## Скачивание последних сборок
+
+После каждого push в `main` workflow обновляет GitHub prerelease `main-latest`. Для обычного тестирования скачивайте APK/DMG/PKG из:
+
+```text
+Repository → Releases → main-latest
+```
+
+Для контрольной версии можно создать тег `v0.1.x-test`; workflow соберёт и опубликует отдельный versioned release без повторной ручной сборки.
+
