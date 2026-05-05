@@ -260,3 +260,9 @@ Repository → Releases → main-latest
 
 Для контрольной версии можно создать тег `v0.1.x-test`; workflow соберёт и опубликует отдельный versioned release без повторной ручной сборки.
 
+
+## Sprint 5
+
+Добавлено устойчивое скачивание книг: cancel/retry/resume partial chunks. Также исправлено восстановление места чтения TXT: reader перечитывает свежий locator из manifest и больше не должен открывать книгу с начала после закрытия.
+
+Подробности: `docs/sprint_05_resumable_downloads_and_reader_restore_ru.md`.

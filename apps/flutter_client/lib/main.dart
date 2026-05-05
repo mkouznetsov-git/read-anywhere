@@ -135,6 +135,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
+  Future<void> _cancelBookDownload(BookRecord book) async {
+    await widget.sync.cancelBookFileDownload(book.id);
+  }
+
   @override
   Widget build(BuildContext context) {
     final manifest = _manifest;
@@ -203,6 +207,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           onDownload: !book.isDownloaded && transfer?.active != true
                               ? () => _downloadBook(book)
                               : null,
+                          onCancelDownload: transfer?.active == true
+                              ? () => _cancelBookDownload(book)
+                              : null,
                           onOpen: book.isDownloaded
                               ? () async {
                                   await Navigator.of(context).push(
@@ -249,6 +256,7 @@ class _BookCard extends StatelessWidget {
     required this.currentDeviceId,
     required this.onOpen,
     required this.onDownload,
+    required this.onCancelDownload,
     required this.transfer,
   });
 
@@ -256,6 +264,7 @@ class _BookCard extends StatelessWidget {
   final String currentDeviceId;
   final VoidCallback? onOpen;
   final VoidCallback? onDownload;
+  final VoidCallback? onCancelDownload;
   final FileTransferSnapshot? transfer;
 
   @override
@@ -309,10 +318,10 @@ class _BookCard extends StatelessWidget {
           ),
         ),
         trailing: isDownloading
-            ? const SizedBox(
-                width: 28,
-                height: 28,
-                child: CircularProgressIndicator(strokeWidth: 2),
+            ? IconButton(
+                tooltip: 'Отменить скачивание',
+                onPressed: onCancelDownload,
+                icon: const Icon(Icons.cancel_outlined),
               )
             : IconButton(
                 tooltip: book.isDownloaded ? 'Читать' : 'Скачать на это устройство',
@@ -354,6 +363,18 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Timer? _saveDebounce;
   double _lastProgress = 0;
   bool _restoringPosition = false;
+  BookRecord? _runtimeBook;
+  _TextLocator? _lastKnownLocator;
+
+  BookRecord get _book => _runtimeBook ?? widget.book;
+
+  Future<BookRecord> _loadCurrentBook() async {
+    final manifest = await widget.storage.loadManifest();
+    for (final book in manifest.books) {
+      if (book.id == widget.book.id) return book;
+    }
+    return widget.book;
+  }
 
   @override
   void initState() {
@@ -366,24 +387,32 @@ class _ReaderScreenState extends State<ReaderScreen> {
   @override
   void dispose() {
     _saveDebounce?.cancel();
+    final locator = _currentTextLocatorFromViewport() ?? _lastKnownLocator;
+    if (locator != null) {
+      // Best-effort flush so closing the reader does not lose the last position.
+      unawaited(_saveProgress(locator));
+    }
     _controller.dispose();
     super.dispose();
   }
 
   Future<void> _load() async {
-    if (widget.book.localPath == null) {
+    final book = await _loadCurrentBook();
+    if (!mounted) return;
+    _runtimeBook = book;
+    if (book.localPath == null) {
       setState(() => _loadError = 'Файл книги не скачан на это устройство');
       return;
     }
-    if (widget.book.format != 'txt') {
+    if (book.format != 'txt') {
       setState(() => _textChunks = null);
       return;
     }
 
     try {
-      final file = File(widget.book.localPath!);
+      final file = File(book.localPath!);
       if (!await file.exists()) {
-        throw StateError('Файл отсутствует: ${widget.book.localPath}');
+        throw StateError('Файл отсутствует: ${book.localPath}');
       }
       final bytes = await file.readAsBytes();
       final raw = _decodeTextFile(bytes);
@@ -409,28 +438,37 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (chunks == null || chunks.isEmpty || _totalChars <= 0) return;
     _restoringPosition = true;
     try {
-      final locator = _TextLocator.tryParse(widget.book.currentLocator);
+      final book = await _loadCurrentBook();
+      _runtimeBook = book;
+      final locator = _TextLocator.tryParse(book.currentLocator);
       final targetChar = (locator?.charIndex.clamp(0, _totalChars) ??
-              ((_totalChars * (widget.book.progressPercent / 100)).round()).clamp(0, _totalChars))
+              ((_totalChars * (book.progressPercent / 100)).round()).clamp(0, _totalChars))
           .toInt();
       final progress = _totalChars <= 0 ? 0.0 : targetChar / _totalChars;
       final targetChunkIndex = _chunkIndexForChar(chunks, targetChar);
 
-      for (var attempt = 0; attempt < 6; attempt++) {
-        await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 0 : 40));
+      // The ListView is lazy. A target chunk far from the beginning may not have
+      // a BuildContext until we first jump roughly by content progress. Earlier
+      // versions attempted this before maxScrollExtent was ready and therefore
+      // often restored to 0.
+      for (var attempt = 0; attempt < 14; attempt++) {
+        await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 16 : 60));
         if (!mounted || !_controller.hasClients) return;
 
         final max = _controller.position.maxScrollExtent;
-        if (attempt == 0 && max > 0) {
+        if (max > 0) {
           final approximateOffset = (max * progress).clamp(0, max).toDouble();
           _controller.jumpTo(approximateOffset);
+          await Future<void>.delayed(const Duration(milliseconds: 40));
+          break;
         }
+      }
 
-        final chunkContext = _chunkKeys[targetChunkIndex].currentContext;
-        if (chunkContext == null) {
-          continue;
-        }
-
+      if (!mounted || !_controller.hasClients) return;
+      final chunkContext = targetChunkIndex < _chunkKeys.length
+          ? _chunkKeys[targetChunkIndex].currentContext
+          : null;
+      if (chunkContext != null) {
         await Scrollable.ensureVisible(
           chunkContext,
           duration: Duration.zero,
@@ -448,12 +486,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
           final targetOffset = (_controller.offset + extraPixels).clamp(0, currentMax).toDouble();
           _controller.jumpTo(targetOffset);
         }
-        break;
       }
     } finally {
       _restoringPosition = false;
       final current = _currentTextLocatorFromViewport();
       if (current != null && mounted) {
+        _lastKnownLocator = current;
         setState(() => _lastProgress = current.progressPercent);
       }
     }
@@ -463,6 +501,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (_restoringPosition || !_controller.hasClients) return;
     final locator = _currentTextLocatorFromViewport();
     if (locator == null) return;
+    _lastKnownLocator = locator;
     _lastProgress = locator.progressPercent;
     if (mounted) setState(() {});
     _saveDebounce?.cancel();
@@ -472,11 +511,17 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   Future<void> _saveProgress(_TextLocator locator) async {
-    await widget.storage.updateProgress(
+    final manifest = await widget.storage.updateProgress(
       bookId: widget.book.id,
       progressPercent: locator.progressPercent,
       locator: locator.toJsonString(),
     );
+    for (final book in manifest.books) {
+      if (book.id == widget.book.id) {
+        _runtimeBook = book;
+        break;
+      }
+    }
     await widget.sync.broadcastLibrarySnapshot(reason: 'progress_updated');
   }
 
@@ -485,7 +530,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     await widget.storage.addBookmark(
       bookId: widget.book.id,
       label: 'Закладка ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
-      locator: locator?.toJsonString() ?? widget.book.currentLocator,
+      locator: locator?.toJsonString() ?? _book.currentLocator,
     );
     await widget.sync.broadcastLibrarySnapshot(reason: 'bookmark_added');
     if (!mounted) return;
@@ -548,11 +593,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isTxt = widget.book.format == 'txt';
+    final isTxt = _book.format == 'txt';
     final chunks = _textChunks;
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+        title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
           IconButton(
             tooltip: 'Добавить закладку',
@@ -562,7 +607,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         ],
       ),
       body: !isTxt
-          ? _UnsupportedReaderPlaceholder(book: widget.book)
+          ? _UnsupportedReaderPlaceholder(book: _book)
           : _loadError != null
               ? Center(
                   child: Padding(

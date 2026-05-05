@@ -166,6 +166,7 @@ class SyncService {
   final _manifestChanges = StreamController<LibraryManifest>.broadcast();
   final _downloadsByTransferId = <String, _DownloadSession>{};
   final _uploadLocks = <String>{};
+  final _cancelledTransfers = <String>{};
 
   Stream<LibraryManifest> get manifestChanges => _manifestChanges.stream;
 
@@ -500,6 +501,17 @@ class SyncService {
       ),
     );
 
+    unawaited(Future<void>.delayed(const Duration(seconds: 12), () async {
+      final current = _downloadsByTransferId[transferId];
+      if (current == null) return;
+      if (current.sourceDeviceId == null) {
+        await _failDownload(
+          current,
+          'Источник файла не ответил. Проверьте, что устройство с книгой онлайн, и нажмите скачать снова.',
+        );
+      }
+    }));
+
     final envelope = SyncEnvelope(
       type: 'book_file_requested',
       accountId: manifest.accountId,
@@ -515,6 +527,50 @@ class SyncService {
       },
     );
     return _sendEnvelope(envelope, logLabel: 'Запрошен файл: ${book.title}');
+  }
+
+  Future<void> cancelBookFileDownload(String bookId) async {
+    _DownloadSession? session;
+    for (final candidate in _downloadsByTransferId.values) {
+      if (candidate.bookId == bookId) {
+        session = candidate;
+        break;
+      }
+    }
+    if (session == null) return;
+    final manifest = await _storage.loadManifest();
+    final sourceDeviceId = session.sourceDeviceId;
+    _downloadsByTransferId.remove(session.transferId);
+    await _deletePartial(session);
+    _setDownloadSnapshot(
+      FileTransferSnapshot(
+        transferId: session.transferId,
+        bookId: session.bookId,
+        direction: 'download',
+        fileName: session.fileName,
+        peerDeviceId: sourceDeviceId ?? '',
+        statusText: 'Скачивание отменено',
+        active: false,
+        progressPercent: 0,
+        totalBytes: session.expectedBytes,
+      ),
+    );
+    if (sourceDeviceId != null) {
+      _sendEnvelope(
+        SyncEnvelope(
+          type: 'book_file_cancelled',
+          accountId: manifest.accountId,
+          deviceId: manifest.deviceId,
+          payload: {
+            'transferId': session.transferId,
+            'bookId': session.bookId,
+            'sourceDeviceId': sourceDeviceId,
+            'requestingDeviceId': manifest.deviceId,
+          },
+        ),
+      );
+    }
+    _appendLog('Скачивание отменено: ${session.fileName}');
   }
 
   Future<void> _handleIncomingEnvelope(SyncEnvelope envelope) async {
@@ -582,6 +638,9 @@ class SyncService {
         break;
       case 'book_file_error':
         await _handleBookFileError(envelope, local);
+        break;
+      case 'book_file_cancelled':
+        await _handleBookFileCancelled(envelope, local);
         break;
       default:
         _appendLog('Неизвестное событие: ${envelope.type}');
@@ -686,19 +745,42 @@ class SyncService {
     if (!await incomingDir.exists()) {
       await incomingDir.create(recursive: true);
     }
-    final tempFile = File(p.join(incomingDir.path, '$transferId.part'));
-    if (await tempFile.exists()) await tempFile.delete();
-    await tempFile.create(recursive: true);
+    final tempFile = File(p.join(incomingDir.path, '${session.bookId}.part'));
+    if (!await tempFile.exists()) await tempFile.create(recursive: true);
+
+    final chunkSize = (payload['chunkSize'] as num?)?.toInt() ?? _defaultChunkSize;
+    var resumeBytes = await tempFile.length();
+    if (resumeBytes > session.expectedBytes) {
+      await tempFile.writeAsBytes(const [], flush: true);
+      resumeBytes = 0;
+    }
+    final alignedResumeBytes = chunkSize <= 0 ? 0 : (resumeBytes ~/ chunkSize) * chunkSize;
+    if (alignedResumeBytes != resumeBytes) {
+      final raf = await tempFile.open(mode: FileMode.writeOnlyAppend);
+      try {
+        await raf.truncate(alignedResumeBytes);
+      } finally {
+        await raf.close();
+      }
+      resumeBytes = alignedResumeBytes;
+    }
 
     session
       ..sourceDeviceId = sourceDeviceId
       ..tempFile = tempFile
-      ..chunkSize = (payload['chunkSize'] as num?)?.toInt() ?? _defaultChunkSize;
+      ..chunkSize = chunkSize
+      ..receivedBytes = resumeBytes
+      ..expectedChunkIndex = chunkSize <= 0 ? 0 : resumeBytes ~/ chunkSize;
 
+    final resumeText = resumeBytes > 0
+        ? 'Продолжаем с ${_formatBytes(resumeBytes)}...'
+        : 'Источник найден, начинаем скачивание...';
     _setDownloadSnapshot(
       state.value.downloadForBook(session.bookId)!.copyWith(
-            statusText: 'Источник найден, начинаем скачивание...',
+            statusText: resumeText,
             peerDeviceId: sourceDeviceId,
+            transferredBytes: resumeBytes,
+            progressPercent: session.expectedBytes <= 0 ? 0 : (resumeBytes / session.expectedBytes) * 100,
             active: true,
             clearError: true,
           ),
@@ -715,6 +797,7 @@ class SyncService {
           'sourceDeviceId': sourceDeviceId,
           'requestingDeviceId': local.deviceId,
           'chunkSize': session.chunkSize,
+          'startChunkIndex': session.expectedChunkIndex,
         },
       ),
     );
@@ -740,6 +823,7 @@ class SyncService {
         bookId: bookId,
         requestingDeviceId: requestingDeviceId,
         chunkSize: (payload['chunkSize'] as num?)?.toInt() ?? _defaultChunkSize,
+        startChunkIndex: (payload['startChunkIndex'] as num?)?.toInt() ?? 0,
       );
     } finally {
       _uploadLocks.remove(transferId);
@@ -752,6 +836,7 @@ class SyncService {
     required String bookId,
     required String requestingDeviceId,
     required int chunkSize,
+    required int startChunkIndex,
   }) async {
     final book = _findBook(await _storage.loadManifest(), bookId);
     if (book == null || book.localPath == null) {
@@ -767,7 +852,10 @@ class SyncService {
     final size = await file.length();
     final safeChunkSize = chunkSize.clamp(64 * 1024, _defaultChunkSize).toInt();
     final totalChunks = (size / safeChunkSize).ceil();
+    final safeStartChunkIndex = startChunkIndex.clamp(0, totalChunks).toInt();
+    final startOffset = (safeStartChunkIndex * safeChunkSize).clamp(0, size).toInt();
     final uploadKey = 'upload:$transferId';
+    _cancelledTransfers.remove(transferId);
 
     _updateTransferByKey(
       uploadKey,
@@ -777,17 +865,24 @@ class SyncService {
         direction: 'upload',
         fileName: book.fileName,
         peerDeviceId: requestingDeviceId,
-        statusText: 'Отправка файла...',
+        statusText: startOffset > 0 ? 'Возобновляем отправку...' : 'Отправка файла...',
         active: true,
+        transferredBytes: startOffset,
+        progressPercent: size == 0 ? 100 : (startOffset / size) * 100,
         totalBytes: size,
       ),
     );
 
     final raf = await file.open(mode: FileMode.read);
-    var chunkIndex = 0;
-    var sentBytes = 0;
+    await raf.setPosition(startOffset);
+    var chunkIndex = safeStartChunkIndex;
+    var sentBytes = startOffset;
     try {
       while (true) {
+        if (_cancelledTransfers.contains(transferId)) {
+          _appendLog('Отправка отменена получателем: ${book.title}');
+          break;
+        }
         final data = await raf.read(safeChunkSize);
         if (data.isEmpty) break;
         sentBytes += data.length;
@@ -822,16 +917,19 @@ class SyncService {
         chunkIndex += 1;
         await Future<void>.delayed(const Duration(milliseconds: 4));
       }
+      final wasCancelled = _cancelledTransfers.remove(transferId);
       _updateTransferByKey(
         uploadKey,
         state.value.fileTransfers[uploadKey]!.copyWith(
-              progressPercent: 100,
-              transferredBytes: size,
-              statusText: 'Файл отправлен',
+              progressPercent: wasCancelled ? state.value.fileTransfers[uploadKey]!.progressPercent : 100,
+              transferredBytes: wasCancelled ? state.value.fileTransfers[uploadKey]!.transferredBytes : size,
+              statusText: wasCancelled ? 'Отправка отменена' : 'Файл отправлен',
               active: false,
             ),
       );
-      _appendLog('Файл отправлен: ${book.title}');
+      if (!wasCancelled) {
+        _appendLog('Файл отправлен: ${book.title}');
+      }
     } catch (error) {
       _updateTransferByKey(
         uploadKey,
@@ -924,6 +1022,7 @@ class SyncService {
       await _failDownload(
         session,
         'SHA-256 не совпадает: ожидали ${session.expectedSha256}, получили $actualSha',
+        deletePartial: true,
       );
       return;
     }
@@ -967,25 +1066,65 @@ class SyncService {
     await _failDownload(session, payload['message'] as String? ?? 'Ошибка передачи файла');
   }
 
-  Future<void> _failDownload(_DownloadSession session, String message) async {
-    try {
-      final tempFile = session.tempFile;
-      if (tempFile != null && await tempFile.exists()) await tempFile.delete();
-    } catch (_) {
-      // Best effort cleanup.
+  Future<void> _failDownload(
+    _DownloadSession session,
+    String message, {
+    bool deletePartial = false,
+  }) async {
+    if (deletePartial) {
+      await _deletePartial(session);
     }
     _downloadsByTransferId.remove(session.transferId);
     final existing = state.value.downloadForBook(session.bookId);
     if (existing != null) {
       _setDownloadSnapshot(
         existing.copyWith(
-          statusText: 'Ошибка скачивания',
+          statusText: deletePartial
+              ? 'Ошибка скачивания'
+              : 'Пауза/ошибка. Нажмите скачать ещё раз — продолжим, если возможно.',
           active: false,
           error: message,
         ),
       );
     }
     _appendLog('Ошибка скачивания ${session.fileName}: $message');
+  }
+
+  Future<void> _handleBookFileCancelled(
+    SyncEnvelope envelope,
+    LibraryManifest local,
+  ) async {
+    final payload = envelope.payload;
+    if (payload['sourceDeviceId'] != local.deviceId) return;
+    final transferId = payload['transferId'] as String?;
+    if (transferId == null) return;
+    _cancelledTransfers.add(transferId);
+    final uploadKey = 'upload:$transferId';
+    final existing = state.value.fileTransfers[uploadKey];
+    if (existing != null) {
+      _updateTransferByKey(
+        uploadKey,
+        existing.copyWith(
+          statusText: 'Получатель отменил скачивание',
+          active: false,
+        ),
+      );
+    }
+  }
+
+  Future<void> _deletePartial(_DownloadSession session) async {
+    try {
+      final tempFile = session.tempFile;
+      if (tempFile != null && await tempFile.exists()) await tempFile.delete();
+    } catch (_) {
+      // Best effort cleanup.
+    }
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 
   void _sendFileError(

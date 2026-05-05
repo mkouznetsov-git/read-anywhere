@@ -187,7 +187,7 @@ class StorageService {
     await saveManifest(manifest.copyWith(books: books));
   }
 
-  Future<void> updateProgress({
+  Future<LibraryManifest> updateProgress({
     required String bookId,
     required double progressPercent,
     required String locator,
@@ -203,7 +203,9 @@ class StorageService {
         updatedAt: DateTime.now().toUtc(),
       );
     }).toList();
-    await saveManifest(manifest.copyWith(books: updatedBooks));
+    final updated = manifest.copyWith(books: updatedBooks);
+    await saveManifest(updated);
+    return updated;
   }
 
   Future<void> addBookmark({
