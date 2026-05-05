@@ -353,11 +353,12 @@ class ReaderScreen extends StatefulWidget {
 
 class _ReaderScreenState extends State<ReaderScreen> {
   // Reader position must be content-based, not pixel-scroll based.
-  // TXT pages are rebuilt from the text and current viewport size, while the
-  // saved locator stores an anchor character index. This lets macOS/Android
+  // TXT pages are rebuilt from the text and current viewport size using
+  // TextPainter pagination, while the saved locator stores an anchor character index. This lets macOS/Android
   // return to the same text fragment even when their screens differ.
-  static const _minLogicalPageChars = 420;
-  static const _maxLogicalPageChars = 2600;
+  static const _minLogicalPageChars = 220;
+  static const _maxLogicalPageChars = 2200;
+  static const _readerTextStyle = TextStyle(fontSize: 18, height: 1.65);
 
   final _pageController = PageController();
   List<_TextChunk>? _textPages;
@@ -475,10 +476,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   List<_TextChunk> _pagesForConstraints(BoxConstraints constraints) {
     final raw = _rawText ?? '';
-    final width = constraints.maxWidth.isFinite ? constraints.maxWidth : 420.0;
-    final height = constraints.maxHeight.isFinite ? constraints.maxHeight : 640.0;
-    final targetChars = _estimatePageChars(width, height);
-    final signature = '${width.round()}x${height.round()}:$targetChars:${raw.length}';
+    final viewportWidth = constraints.maxWidth.isFinite ? constraints.maxWidth : 420.0;
+    final viewportHeight = constraints.maxHeight.isFinite ? constraints.maxHeight : 640.0;
+
+    // Keep this in sync with the Padding around page content in itemBuilder.
+    const horizontalPadding = 48.0;
+    const verticalPadding = 42.0;
+    final contentWidth = (viewportWidth - horizontalPadding).clamp(220.0, 1600.0).toDouble();
+    final contentHeight = (viewportHeight - verticalPadding).clamp(260.0, 1400.0).toDouble();
+    final signature =
+        '${contentWidth.round()}x${contentHeight.round()}:${raw.length}:txt-page-v3';
 
     if (_textPages != null && _pageLayoutSignature == signature) {
       return _textPages!;
@@ -486,7 +493,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
     final pages = raw.isEmpty
         ? [_TextChunk(text: '', startChar: 0, endChar: 0)]
-        : _splitTextIntoReaderChunks(raw, targetChars);
+        : _paginateTextForViewport(raw, contentWidth, contentHeight, _readerTextStyle);
     final safePages = pages.isEmpty
         ? [_TextChunk(text: '', startChar: 0, endChar: 0)]
         : pages;
@@ -503,21 +510,81 @@ class _ReaderScreenState extends State<ReaderScreen> {
     return safePages;
   }
 
-  int _estimatePageChars(double viewportWidth, double viewportHeight) {
-    const horizontalPadding = 48.0;
-    const verticalPadding = 48.0;
-    const fontSize = 18.0;
-    const lineHeight = 1.65;
-    // A conservative average for Latin/Cyrillic prose. We deliberately keep
-    // pages a bit shorter so a logical page fits on phones and does not need a
-    // nested scroll view that would trap vertical swipes.
-    const averageCharWidth = fontSize * 0.58;
-    final contentWidth = (viewportWidth - horizontalPadding).clamp(220.0, 1600.0);
-    final contentHeight = (viewportHeight - verticalPadding).clamp(260.0, 1400.0);
-    final charsPerLine = (contentWidth / averageCharWidth).floor().clamp(18, 180);
-    final linesPerPage = (contentHeight / (fontSize * lineHeight)).floor().clamp(8, 60);
-    final estimated = (charsPerLine * linesPerPage * 0.72).floor();
-    return estimated.clamp(_minLogicalPageChars, _maxLogicalPageChars).toInt();
+  List<_TextChunk> _paginateTextForViewport(
+    String text,
+    double contentWidth,
+    double contentHeight,
+    TextStyle style,
+  ) {
+    final normalized = _normalizeText(text);
+    if (normalized.isEmpty) return const [];
+
+    final pages = <_TextChunk>[];
+    var start = 0;
+
+    while (start < normalized.length) {
+      final remaining = normalized.length - start;
+      final hardHigh = start + remaining.clamp(_minLogicalPageChars, _maxLogicalPageChars).toInt();
+      var low = start + 1;
+      var high = hardHigh.clamp(start + 1, normalized.length).toInt();
+      var best = low;
+
+      // Binary-search the longest substring that fits into the visible page.
+      while (low <= high) {
+        final mid = low + ((high - low) >> 1);
+        if (_textFitsPage(normalized.substring(start, mid), contentWidth, contentHeight, style)) {
+          best = mid;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
+      }
+
+      // Prefer clean page breaks, but never skip text and never create a tiny page.
+      final minUsefulEnd = start + ((best - start) * 0.65).floor();
+      var end = best;
+      if (best < normalized.length) {
+        final paragraphBreak = normalized.lastIndexOf('\n\n', best);
+        final lineBreak = normalized.lastIndexOf('\n', best);
+        final spaceBreak = normalized.lastIndexOf(' ', best);
+        if (paragraphBreak > minUsefulEnd) {
+          end = paragraphBreak + 2;
+        } else if (lineBreak > minUsefulEnd) {
+          end = lineBreak + 1;
+        } else if (spaceBreak > minUsefulEnd) {
+          end = spaceBreak + 1;
+        }
+      }
+
+      // Safety fallback for very long unbreakable fragments.
+      if (end <= start) {
+        end = (start + _minLogicalPageChars).clamp(start + 1, normalized.length).toInt();
+      }
+
+      pages.add(_TextChunk(
+        text: normalized.substring(start, end),
+        startChar: start,
+        endChar: end,
+      ));
+      start = end;
+    }
+
+    return pages;
+  }
+
+  bool _textFitsPage(
+    String text,
+    double maxWidth,
+    double maxHeight,
+    TextStyle style,
+  ) {
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: style),
+      textDirection: TextDirection.ltr,
+      textAlign: TextAlign.left,
+      maxLines: null,
+    )..layout(maxWidth: maxWidth);
+    return painter.height <= maxHeight;
   }
 
   int _targetCharForBook(BookRecord book, int totalChars) {
@@ -526,7 +593,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final decoded = _tryDecodeLocatorJson(book.currentLocator);
     if (decoded != null) {
       final type = decoded['type'];
-      if (type == 'txt-page-v2') {
+      if (type == 'txt-page-v3' || type == 'txt-page-v2') {
         final anchorChar = ((decoded['anchorChar'] as num?)?.round() ??
                 (decoded['startChar'] as num?)?.round() ??
                 0)
@@ -683,9 +750,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
                                     padding: const EdgeInsets.fromLTRB(24, 18, 24, 24),
                                     child: Align(
                                       alignment: Alignment.topLeft,
-                                      child: SelectableText(
+                                      child: Text(
                                         pages[index].text,
-                                        style: const TextStyle(fontSize: 18, height: 1.65),
+                                        softWrap: true,
+                                        overflow: TextOverflow.clip,
+                                        style: _readerTextStyle,
                                       ),
                                     ),
                                   );
@@ -753,7 +822,7 @@ class _TextPageLocator {
   }
 
   String toJsonString() => jsonEncode({
-        'type': 'txt-page-v2',
+        'type': 'txt-page-v3',
         'pageIndex': pageIndex,
         'pageCount': pageCount,
         'anchorChar': startChar,
