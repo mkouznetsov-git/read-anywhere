@@ -111,6 +111,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # gh release can work without a checkout when --repo is passed,
+      # but checkout gives the job a normal repository context and makes
+      # local troubleshooting more predictable.
+      - name: Checkout
+        uses: actions/checkout@v6
+
       - name: Download Android release artifacts
         uses: actions/download-artifact@v6
         with:
@@ -180,10 +186,12 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           TITLE="ReadAnywhere ${TAG}"
+          REPO="${GITHUB_REPOSITORY}"
           mapfile -t ASSETS < <(find release-assets -maxdepth 3 -type f -print | sort)
 
           if [[ ${#ASSETS[@]} -eq 0 ]]; then
@@ -191,9 +199,9 @@ jobs:
             exit 1
           fi
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${ASSETS[@]}" --clobber
-            gh release edit "$TAG" --title "$TITLE" --notes-file RELEASE_NOTES.md
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --repo "$REPO" --clobber
+            gh release edit "$TAG" --repo "$REPO" --title "$TITLE" --notes-file RELEASE_NOTES.md
           else
-            gh release create "$TAG" "${ASSETS[@]}" --title "$TITLE" --notes-file RELEASE_NOTES.md
+            gh release create "$TAG" "${ASSETS[@]}" --repo "$REPO" --title "$TITLE" --notes-file RELEASE_NOTES.md
           fi

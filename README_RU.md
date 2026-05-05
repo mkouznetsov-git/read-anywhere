@@ -241,3 +241,7 @@ git push origin v0.1.0-test
 ```
 
 Workflow соберёт Android/macOS release-артефакты, создаст или обновит GitHub Release и прикрепит APK/AAB/DMG/PKG/ZIP вместе с SHA256SUMS. Подробности: `docs/sprint_04_2_cleanup_01_github_releases_ru.md`.
+
+## Hotfix: публикация GitHub Releases
+
+Если workflow запускается по тегу `v*`, job `Publish GitHub Release` теперь явно делает checkout и передаёт `--repo`, поэтому публикация release работает и при создании тега через веб-интерфейс GitHub.
