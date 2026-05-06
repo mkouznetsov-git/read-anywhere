@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 
-import 'package:crypto/crypto.dart';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:cryptography/cryptography.dart';
 
 class ReadAnywhereE2eCrypto {
@@ -172,7 +172,7 @@ class ReadAnywhereE2eCrypto {
       ciphertext,
       mac,
     ].join('\n');
-    return _base64UrlNoPadding(Hmac(sha256, keyBytes).convert(utf8.encode(input)).bytes);
+    return _base64UrlNoPadding(crypto.Hmac(crypto.sha256, keyBytes).convert(utf8.encode(input)).bytes);
   }
 
   static bool _constantTimeStringEquals(String a, String b) {
