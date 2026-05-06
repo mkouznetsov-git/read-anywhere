@@ -10,7 +10,7 @@ from typing import DefaultDict, Dict
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.1.3")
+app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.1.4")
 
 # In-memory only. The relay intentionally stores no books and writes nothing to
 # disk. Sprint 3 hotfix 2 keeps the latest *metadata snapshots* in RAM so a newly
@@ -56,6 +56,7 @@ async def start_pairing(request: Request) -> JSONResponse:
     account_id = str(payload.get("accountId") or "").strip()
     owner_device_id = str(payload.get("ownerDeviceId") or "").strip()
     owner_device_name = str(payload.get("ownerDeviceName") or "Устройство").strip()
+    account_encryption_key = str(payload.get("accountEncryptionKey") or "").strip()
     relay_url = str(payload.get("relayUrl") or "").strip()
     try:
         expires_seconds = int(payload.get("expiresSeconds") or PAIRING_TTL_SECONDS)
@@ -76,6 +77,7 @@ async def start_pairing(request: Request) -> JSONResponse:
             "accountId": account_id,
             "ownerDeviceId": owner_device_id,
             "ownerDeviceName": owner_device_name or "Устройство",
+            "accountEncryptionKey": account_encryption_key,
             "relayUrl": relay_url,
             "createdAt": time.time(),
             "expiresAt": expires_at,
@@ -114,6 +116,7 @@ async def claim_pairing(request: Request) -> JSONResponse:
         "relayUrl": record["relayUrl"],
         "ownerDeviceId": record["ownerDeviceId"],
         "ownerDeviceName": record["ownerDeviceName"],
+        "accountEncryptionKey": record.get("accountEncryptionKey", ""),
         "acceptedDeviceId": new_device_id,
         "acceptedDeviceName": new_device_name or "Устройство",
     })

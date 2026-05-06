@@ -12,6 +12,7 @@ import '../../models/book.dart';
 import '../../models/manifest.dart';
 import '../../models/sync_settings.dart';
 import '../storage_service.dart';
+import 'e2e_crypto.dart';
 import 'merge.dart';
 import 'relay_client.dart';
 
@@ -24,12 +25,16 @@ class PairingInvite {
     required this.relayUrl,
     required this.expiresAt,
     required this.inviteLink,
+    required this.ownerDeviceName,
+    required this.accountEncryptionKey,
   });
 
   final String code;
   final String relayUrl;
   final DateTime expiresAt;
   final String inviteLink;
+  final String ownerDeviceName;
+  final String accountEncryptionKey;
 
   String get displayCode => '${code.substring(0, 3)}-${code.substring(3)}';
 }
@@ -40,19 +45,23 @@ class PairingClaimResult {
     required this.relayUrl,
     required this.ownerDeviceId,
     required this.ownerDeviceName,
+    required this.accountEncryptionKey,
   });
 
   final String accountId;
   final String relayUrl;
   final String ownerDeviceId;
   final String ownerDeviceName;
+  final String accountEncryptionKey;
 }
 
 class _ParsedPairingInput {
-  const _ParsedPairingInput({required this.code, this.relayUrl});
+  const _ParsedPairingInput({required this.code, this.relayUrl, this.accountEncryptionKey, this.ownerDeviceName});
 
   final String code;
   final String? relayUrl;
+  final String? accountEncryptionKey;
+  final String? ownerDeviceName;
 }
 
 class FileTransferSnapshot {
@@ -268,16 +277,7 @@ class SyncService {
       },
     );
 
-    try {
-      client.send(envelope);
-      _appendLog('Отправлен snapshot: $reason');
-      _setState(state.value.copyWith(sentEvents: state.value.sentEvents + 1));
-      return true;
-    } catch (error) {
-      _appendLog('Не удалось отправить snapshot: $error');
-      _setState(state.value.copyWith(connected: false, statusText: 'Ошибка'));
-      return false;
-    }
+    return _sendEnvelope(envelope, logLabel: 'Отправлен E2E snapshot: $reason');
   }
 
   Future<bool> requestLibrarySnapshot({required String reason}) async {
@@ -307,6 +307,10 @@ class SyncService {
       'accountId': manifest.accountId,
       'ownerDeviceId': manifest.deviceId,
       'ownerDeviceName': manifest.deviceName,
+      // Transitional fallback for the 6-digit code path. QR/invite links carry
+      // this key client-to-client, so a relay only has to see it when the user
+      // chooses manual code entry instead of QR.
+      'accountEncryptionKey': manifest.accountEncryptionKey,
       'relayUrl': settings.effectiveRelayUrl,
       'expiresSeconds': ttl.inSeconds,
     });
@@ -330,6 +334,8 @@ class SyncService {
       queryParameters: {
         'relay': settings.effectiveRelayUrl,
         'code': code,
+        'deviceName': manifest.deviceName,
+        'key': manifest.accountEncryptionKey,
       },
     ).toString();
     _appendLog('Создан pairing-код ${code.substring(0, 3)}-${code.substring(3)}');
@@ -338,6 +344,8 @@ class SyncService {
       relayUrl: settings.effectiveRelayUrl,
       expiresAt: expiresAt,
       inviteLink: inviteLink,
+      ownerDeviceName: manifest.deviceName,
+      accountEncryptionKey: manifest.accountEncryptionKey,
     );
   }
 
@@ -363,7 +371,8 @@ class SyncService {
 
     final accountId = response['accountId']?.toString() ?? '';
     final ownerDeviceId = response['ownerDeviceId']?.toString() ?? '';
-    final ownerDeviceName = response['ownerDeviceName']?.toString() ?? 'Устройство';
+    final ownerDeviceName = response['ownerDeviceName']?.toString() ?? parsed.ownerDeviceName ?? 'Устройство';
+    final accountEncryptionKey = parsed.accountEncryptionKey ?? response['accountEncryptionKey']?.toString() ?? '';
     final returnedRelayUrl = response['relayUrl']?.toString() ?? relayUrl;
     if (accountId.isEmpty || ownerDeviceId.isEmpty) {
       throw StateError('Relay вернул неполные pairing-данные');
@@ -375,6 +384,7 @@ class SyncService {
     );
     await _storage.replaceAccountFromPairing(
       accountId: accountId,
+      accountEncryptionKey: accountEncryptionKey,
       ownerDeviceId: ownerDeviceId,
       ownerDeviceName: ownerDeviceName,
     );
@@ -386,6 +396,7 @@ class SyncService {
       relayUrl: returnedRelayUrl,
       ownerDeviceId: ownerDeviceId,
       ownerDeviceName: ownerDeviceName,
+      accountEncryptionKey: accountEncryptionKey,
     );
   }
 
@@ -444,10 +455,17 @@ class SyncService {
       final uri = Uri.parse(raw);
       final code = _normalizePairingCode(uri.queryParameters['code'] ?? '');
       final relay = uri.queryParameters['relay']?.trim();
+      final accountKey = uri.queryParameters['key']?.trim();
+      final ownerDeviceName = uri.queryParameters['deviceName']?.trim();
       if (code.length != 6) {
         throw ArgumentError('В приглашении нет корректного 6-значного кода');
       }
-      return _ParsedPairingInput(code: code, relayUrl: relay?.isEmpty == true ? null : relay);
+      return _ParsedPairingInput(
+        code: code,
+        relayUrl: relay?.isEmpty == true ? null : relay,
+        accountEncryptionKey: accountKey?.isEmpty == true ? null : accountKey,
+        ownerDeviceName: ownerDeviceName?.isEmpty == true ? null : ownerDeviceName,
+      );
     }
     final code = _normalizePairingCode(raw);
     if (code.length != 6) {
@@ -573,7 +591,7 @@ class SyncService {
       ),
     );
     if (sourceDeviceId != null) {
-      _sendEnvelope(
+      await _sendEnvelope(
         SyncEnvelope(
           type: 'book_file_cancelled',
           accountId: manifest.accountId,
@@ -642,33 +660,46 @@ class SyncService {
       return;
     }
 
-    switch (envelope.type) {
+    final decryptedPayload = await ReadAnywhereE2eCrypto.decryptPayload(
+      encryptedPayload: envelope.payload,
+      accountEncryptionKey: local.accountEncryptionKey,
+      eventType: envelope.type,
+    );
+    final decryptedEnvelope = SyncEnvelope(
+      type: envelope.type,
+      accountId: envelope.accountId,
+      deviceId: envelope.deviceId,
+      createdAt: envelope.createdAt,
+      payload: decryptedPayload,
+    );
+
+    switch (decryptedEnvelope.type) {
       case 'library_snapshot_requested':
-        await _handleLibrarySnapshotRequested(envelope, local);
+        await _handleLibrarySnapshotRequested(decryptedEnvelope, local);
         break;
       case 'library_snapshot':
-        await _handleLibrarySnapshot(envelope, local);
+        await _handleLibrarySnapshot(decryptedEnvelope, local);
         break;
       case 'book_file_requested':
-        await _handleBookFileRequested(envelope, local);
+        await _handleBookFileRequested(decryptedEnvelope, local);
         break;
       case 'book_file_offer':
-        await _handleBookFileOffer(envelope, local);
+        await _handleBookFileOffer(decryptedEnvelope, local);
         break;
       case 'book_file_accept':
-        unawaited(_handleBookFileAccept(envelope, local));
+        unawaited(_handleBookFileAccept(decryptedEnvelope, local));
         break;
       case 'book_file_chunk':
-        await _handleBookFileChunk(envelope, local);
+        await _handleBookFileChunk(decryptedEnvelope, local);
         break;
       case 'book_file_error':
-        await _handleBookFileError(envelope, local);
+        await _handleBookFileError(decryptedEnvelope, local);
         break;
       case 'book_file_cancelled':
-        await _handleBookFileCancelled(envelope, local);
+        await _handleBookFileCancelled(decryptedEnvelope, local);
         break;
       default:
-        _appendLog('Неизвестное событие: ${envelope.type}');
+        _appendLog('Неизвестное событие: ${decryptedEnvelope.type}');
     }
   }
 
@@ -726,7 +757,7 @@ class SyncService {
       _defaultChunkSize,
     );
 
-    _sendEnvelope(
+    await _sendEnvelope(
       SyncEnvelope(
         type: 'book_file_offer',
         accountId: local.accountId,
@@ -811,7 +842,7 @@ class SyncService {
           ),
     );
 
-    _sendEnvelope(
+    await _sendEnvelope(
       SyncEnvelope(
         type: 'book_file_accept',
         accountId: local.accountId,
@@ -865,12 +896,12 @@ class SyncService {
   }) async {
     final book = _findBook(await _storage.loadManifest(), bookId);
     if (book == null || book.localPath == null) {
-      _sendFileError(local, transferId, bookId, requestingDeviceId, 'Файл не найден у источника');
+      await _sendFileError(local, transferId, bookId, requestingDeviceId, 'Файл не найден у источника');
       return;
     }
     final file = File(book.localPath!);
     if (!await file.exists()) {
-      _sendFileError(local, transferId, bookId, requestingDeviceId, 'Локальный файл отсутствует');
+      await _sendFileError(local, transferId, bookId, requestingDeviceId, 'Локальный файл отсутствует');
       return;
     }
 
@@ -911,7 +942,7 @@ class SyncService {
         final data = await raf.read(safeChunkSize);
         if (data.isEmpty) break;
         sentBytes += data.length;
-        _sendEnvelope(
+        await _sendEnvelope(
           SyncEnvelope(
             type: 'book_file_chunk',
             accountId: local.accountId,
@@ -964,7 +995,7 @@ class SyncService {
               error: '$error',
             ),
       );
-      _sendFileError(local, transferId, bookId, requestingDeviceId, 'Ошибка отправки: $error');
+      await _sendFileError(local, transferId, bookId, requestingDeviceId, 'Ошибка отправки: $error');
     } finally {
       await raf.close();
     }
@@ -1143,14 +1174,14 @@ class SyncService {
     return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 
-  void _sendFileError(
+  Future<void> _sendFileError(
     LibraryManifest local,
     String transferId,
     String bookId,
     String requestingDeviceId,
     String message,
-  ) {
-    _sendEnvelope(
+  ) async {
+    await _sendEnvelope(
       SyncEnvelope(
         type: 'book_file_error',
         accountId: local.accountId,
@@ -1173,14 +1204,26 @@ class SyncService {
     return null;
   }
 
-  bool _sendEnvelope(SyncEnvelope envelope, {String? logLabel}) {
+  Future<bool> _sendEnvelope(SyncEnvelope envelope, {String? logLabel}) async {
     final client = _client;
     if (client == null || !state.value.connected) {
       _appendLog('Не отправлено ${envelope.type}: нет подключения к relay');
       return false;
     }
     try {
-      client.send(envelope);
+      final local = await _storage.loadManifest();
+      final encryptedPayload = await ReadAnywhereE2eCrypto.encryptPayload(
+        payload: envelope.payload,
+        accountEncryptionKey: local.accountEncryptionKey,
+        eventType: envelope.type,
+      );
+      client.send(SyncEnvelope(
+        type: envelope.type,
+        accountId: envelope.accountId,
+        deviceId: envelope.deviceId,
+        createdAt: envelope.createdAt,
+        payload: encryptedPayload,
+      ));
       if (logLabel != null && logLabel.isNotEmpty) {
         _appendLog(logLabel);
       }

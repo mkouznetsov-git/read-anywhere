@@ -67,6 +67,7 @@ class LibraryManifest {
     required this.accountId,
     required this.deviceId,
     this.deviceName = 'Моё устройство',
+    this.accountEncryptionKey = '',
     DateTime? updatedAt,
     List<BookRecord>? books,
     List<TrustedDeviceRecord>? trustedDevices,
@@ -77,6 +78,7 @@ class LibraryManifest {
   final String accountId;
   final String deviceId;
   final String deviceName;
+  final String accountEncryptionKey;
   final DateTime updatedAt;
   final List<BookRecord> books;
   final List<TrustedDeviceRecord> trustedDevices;
@@ -97,6 +99,7 @@ class LibraryManifest {
     String? accountId,
     String? deviceId,
     String? deviceName,
+    String? accountEncryptionKey,
     DateTime? updatedAt,
     List<BookRecord>? books,
     List<TrustedDeviceRecord>? trustedDevices,
@@ -105,6 +108,7 @@ class LibraryManifest {
       accountId: accountId ?? this.accountId,
       deviceId: deviceId ?? this.deviceId,
       deviceName: deviceName ?? this.deviceName,
+      accountEncryptionKey: accountEncryptionKey ?? this.accountEncryptionKey,
       updatedAt: updatedAt ?? DateTime.now().toUtc(),
       books: books ?? this.books,
       trustedDevices: trustedDevices ?? this.trustedDevices,
@@ -121,6 +125,8 @@ class LibraryManifest {
         'accountId': accountId,
         'deviceId': deviceId,
         'deviceName': deviceName,
+        if (includeLocalPaths) 'accountEncryptionKey': accountEncryptionKey,
+        'crypto': {'payload': 'readanywhere-e2e-v1'},
         'updatedAt': updatedAt.toIso8601String(),
         'trustedDevices': trustedDevices.map((d) => d.toJson()).toList(),
         'books': books
@@ -132,6 +138,7 @@ class LibraryManifest {
         accountId: json['accountId'] as String? ?? 'local-account',
         deviceId: json['deviceId'] as String? ?? 'local-device',
         deviceName: json['deviceName'] as String? ?? 'Моё устройство',
+        accountEncryptionKey: json['accountEncryptionKey'] as String? ?? '',
         updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
             DateTime.now().toUtc(),
         trustedDevices: ((json['trustedDevices'] as List?) ?? [])

@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -46,6 +47,7 @@ class StorageService {
       final deviceName = _defaultDeviceName();
       final manifest = LibraryManifest(
         accountId: 'account-${_uuid.v4()}',
+        accountEncryptionKey: _newAccountEncryptionKey(),
         deviceId: deviceId,
         deviceName: deviceName,
         trustedDevices: [
@@ -57,7 +59,10 @@ class StorageService {
     }
     final raw = await file.readAsString();
     final manifest = LibraryManifest.fromJson(jsonDecode(raw) as Map<String, dynamic>);
-    final migrated = _ensureCurrentDeviceTrusted(manifest);
+    final withKey = manifest.accountEncryptionKey.trim().isEmpty
+        ? manifest.copyWith(accountEncryptionKey: _newAccountEncryptionKey())
+        : manifest;
+    final migrated = _ensureCurrentDeviceTrusted(withKey);
     if (!identical(migrated, manifest)) {
       await saveManifest(migrated);
     }
@@ -145,10 +150,18 @@ class StorageService {
 
   Future<LibraryManifest> replaceAccountFromPairing({
     required String accountId,
+    required String accountEncryptionKey,
     required String ownerDeviceId,
     required String ownerDeviceName,
   }) async {
-    final manifest = await changeAccountId(accountId);
+    final current = await loadManifest();
+    await saveManifest(current.copyWith(
+      accountId: accountId,
+      accountEncryptionKey: accountEncryptionKey.trim().isEmpty
+          ? current.accountEncryptionKey
+          : accountEncryptionKey.trim(),
+    ));
+    final manifest = await loadManifest();
     final withOwner = await trustDevice(
       deviceId: ownerDeviceId,
       name: ownerDeviceName,
@@ -425,6 +438,13 @@ class StorageService {
         ),
       ],
     );
+  }
+
+
+  String _newAccountEncryptionKey() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(32, (_) => random.nextInt(256));
+    return base64UrlEncode(bytes).replaceAll('=', '');
   }
 
   String _defaultDeviceName() {

@@ -84,6 +84,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   bool _busy = false;
   bool _healthBusy = false;
   bool _pairingBusy = false;
+  bool _logExpanded = false;
   PairingInvite? _pairingInvite;
   StreamSubscription<LibraryManifest>? _syncSubscription;
 
@@ -497,6 +498,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   List<_TextChunk>? _textChunks;
   int _totalChars = 0;
   int _pendingRestoreIndex = 0;
+  int _pendingRestoreChar = 0;
   bool _restoringPosition = false;
   bool _didInitialRestore = false;
   String? _loadError;
@@ -573,9 +575,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
         _chunkKeys = List<GlobalKey>.generate(effectiveChunks.length, (_) => GlobalKey());
         _totalChars = totalChars;
         _pendingRestoreIndex = targetIndex;
+        _pendingRestoreChar = targetChar;
         _lastKnownLocator = targetChar >= totalChars && totalChars > 0
             ? _locatorForEnd()
-            : _locatorForChunkIndex(targetIndex);
+            : _locatorForAnchorChar(targetChar);
         _lastProgress = _lastKnownLocator?.progressPercent ?? 0;
         _didInitialRestore = false;
         _estimatedOffsets = null;
@@ -599,7 +602,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
           final chunks = _textChunks ?? const <_TextChunk>[];
           final restoreToEnd = _lastKnownLocator?.anchorChar == _totalChars && _totalChars > 0;
           final max = _scrollController.position.maxScrollExtent;
-          final estimatedOffset = restoreToEnd ? max : _estimateOffsetForIndex(_pendingRestoreIndex);
+          final estimatedOffset = restoreToEnd ? max : _estimateOffsetForChar(_pendingRestoreChar);
           _scrollController.jumpTo(estimatedOffset.clamp(0.0, max));
 
           // If the target item is now mounted, align it exactly to the top.
@@ -610,12 +613,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
               ? null
               : _chunkKeys[_pendingRestoreIndex].currentContext;
           if (!restoreToEnd && targetContext != null) {
-            await Scrollable.ensureVisible(
-              targetContext,
-              alignment: 0,
-              duration: Duration.zero,
-              alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
-            );
+            _alignAnchorCharToTop(_pendingRestoreChar);
           } else if (restoreToEnd) {
             _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
           }
@@ -639,7 +637,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final decoded = _tryDecodeLocatorJson(book.currentLocator);
     if (decoded != null) {
       final type = decoded['type'];
-      if (type == 'txt-top-anchor-v2' || type == 'txt-top-anchor-v1' || type == 'txt-anchor-v1') {
+      if (type == 'txt-top-anchor-v3' || type == 'txt-top-anchor-v2' || type == 'txt-top-anchor-v1' || type == 'txt-anchor-v1') {
         final anchorChar = ((decoded['anchorChar'] as num?)?.round() ?? 0)
             .clamp(0, totalChars)
             .toInt();
@@ -689,15 +687,97 @@ class _ReaderScreenState extends State<ReaderScreen> {
   _TextAnchorLocator? _currentLocator() {
     if (_totalChars <= 0) return null;
     if (_isAtBottom()) return _locatorForEnd();
-    final topIndex = _topVisibleChunkIndex();
-    if (topIndex != null) return _locatorForChunkIndex(topIndex);
-    return _lastKnownLocator ?? _locatorForChunkIndex(_pendingRestoreIndex);
+    final exact = _locatorForExactTop();
+    if (exact != null) return exact;
+    return _lastKnownLocator ?? _locatorForAnchorChar(_pendingRestoreChar);
   }
 
   bool _isAtBottom() {
     if (!_scrollController.hasClients) return false;
     final position = _scrollController.position;
     return position.maxScrollExtent <= 0 || position.extentAfter <= 8;
+  }
+
+
+  _TextAnchorLocator? _locatorForExactTop() {
+    final chunks = _textChunks;
+    if (chunks == null || chunks.isEmpty || !_scrollController.hasClients) return null;
+    final visible = _topVisibleChunkLocation();
+    if (visible == null) return null;
+    final chunk = chunks[visible.index];
+    final localChar = _charOffsetForVerticalOffset(chunk.text, visible.dyIntoChunk);
+    final anchorChar = (chunk.startChar + localChar).clamp(0, _totalChars).toInt();
+    final position = _scrollController.position;
+    return _TextAnchorLocator(
+      anchorChar: anchorChar,
+      totalChars: _totalChars,
+      chunkIndex: visible.index,
+      chunkCount: chunks.length,
+      scrollOffset: position.pixels,
+      maxScrollExtent: position.maxScrollExtent,
+      viewportWidth: _lastViewportWidth,
+    );
+  }
+
+  _VisibleChunk? _topVisibleChunkLocation() {
+    final chunks = _textChunks;
+    if (chunks == null || chunks.isEmpty) return null;
+    final listContext = _listKey.currentContext;
+    if (listContext == null) return null;
+    final listBox = listContext.findRenderObject() as RenderBox?;
+    if (listBox == null || !listBox.hasSize) return null;
+    final listTop = listBox.localToGlobal(Offset.zero).dy;
+    final listBottom = listTop + listBox.size.height;
+
+    _VisibleChunk? crossing;
+    _VisibleChunk? firstBelow;
+    for (var index = 0; index < _chunkKeys.length; index++) {
+      final context = _chunkKeys[index].currentContext;
+      if (context == null) continue;
+      final box = context.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize) continue;
+      final top = box.localToGlobal(Offset.zero).dy;
+      final bottom = top + box.size.height;
+      if (bottom <= listTop + 1 || top >= listBottom) continue;
+      if (top <= listTop + 1 && bottom > listTop + 1) {
+        final candidate = _VisibleChunk(index: index, dyIntoChunk: (listTop - top).clamp(0.0, box.size.height).toDouble());
+        if (crossing == null || candidate.dyIntoChunk < crossing.dyIntoChunk) crossing = candidate;
+      } else if (top > listTop + 1) {
+        final candidate = _VisibleChunk(index: index, dyIntoChunk: 0.0);
+        if (firstBelow == null || top < _globalTopForChunk(firstBelow.index)) firstBelow = candidate;
+      }
+    }
+    return crossing ?? firstBelow;
+  }
+
+  double _globalTopForChunk(int index) {
+    final context = index >= 0 && index < _chunkKeys.length ? _chunkKeys[index].currentContext : null;
+    final box = context?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return double.infinity;
+    return box.localToGlobal(Offset.zero).dy;
+  }
+
+  int _charOffsetForVerticalOffset(String text, double dy) {
+    final painter = _textPainterFor(text);
+    final safeDy = dy.clamp(0.0, painter.height <= 0 ? 0.0 : painter.height - 1);
+    final position = painter.getPositionForOffset(Offset(0, safeDy));
+    return position.offset.clamp(0, text.length).toInt();
+  }
+
+  double _verticalOffsetForChar(String text, int localChar) {
+    final painter = _textPainterFor(text);
+    final safeChar = localChar.clamp(0, text.length).toInt();
+    final caret = painter.getOffsetForCaret(TextPosition(offset: safeChar), Rect.zero);
+    return caret.dy.clamp(0.0, painter.height).toDouble();
+  }
+
+  TextPainter _textPainterFor(String text) {
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: _readerTextStyle),
+      textDirection: TextDirection.ltr,
+    );
+    painter.layout(maxWidth: _lastViewportWidth);
+    return painter;
   }
 
   int? _topVisibleChunkIndex() {
@@ -737,6 +817,23 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
 
     return crossingIndex ?? firstBelowIndex;
+  }
+
+
+  _TextAnchorLocator _locatorForAnchorChar(int anchorChar) {
+    final chunks = _textChunks ?? const <_TextChunk>[];
+    final safeAnchor = anchorChar.clamp(0, _totalChars).toInt();
+    final chunkIndex = chunks.isEmpty ? 0 : _chunkIndexForChar(chunks, safeAnchor);
+    final position = _scrollController.hasClients ? _scrollController.position : null;
+    return _TextAnchorLocator(
+      anchorChar: safeAnchor,
+      totalChars: _totalChars,
+      chunkIndex: chunkIndex,
+      chunkCount: chunks.length,
+      scrollOffset: position?.pixels,
+      maxScrollExtent: position?.maxScrollExtent,
+      viewportWidth: _lastViewportWidth,
+    );
   }
 
   _TextAnchorLocator _locatorForChunkIndex(int chunkIndex) {
@@ -819,6 +916,36 @@ class _ReaderScreenState extends State<ReaderScreen> {
     return offsets[safeIndex];
   }
 
+  double _estimateOffsetForChar(int anchorChar) {
+    final chunks = _textChunks ?? const <_TextChunk>[];
+    if (chunks.isEmpty || anchorChar <= 0) return 0;
+    final safeAnchor = anchorChar.clamp(0, _totalChars).toInt();
+    final index = _chunkIndexForChar(chunks, safeAnchor);
+    final localChar = (safeAnchor - chunks[index].startChar).clamp(0, chunks[index].text.length).toInt();
+    return _estimateOffsetForIndex(index) + _verticalOffsetForChar(chunks[index].text, localChar);
+  }
+
+  void _alignAnchorCharToTop(int anchorChar) {
+    if (!_scrollController.hasClients) return;
+    final chunks = _textChunks ?? const <_TextChunk>[];
+    if (chunks.isEmpty) return;
+    final safeAnchor = anchorChar.clamp(0, _totalChars).toInt();
+    final index = _chunkIndexForChar(chunks, safeAnchor);
+    final context = index >= 0 && index < _chunkKeys.length ? _chunkKeys[index].currentContext : null;
+    final listContext = _listKey.currentContext;
+    if (context == null || listContext == null) return;
+    final box = context.findRenderObject() as RenderBox?;
+    final listBox = listContext.findRenderObject() as RenderBox?;
+    if (box == null || listBox == null || !box.hasSize || !listBox.hasSize) return;
+    final chunkTop = box.localToGlobal(Offset.zero).dy;
+    final listTop = listBox.localToGlobal(Offset.zero).dy;
+    final localChar = (safeAnchor - chunks[index].startChar).clamp(0, chunks[index].text.length).toInt();
+    final dy = _verticalOffsetForChar(chunks[index].text, localChar);
+    final target = (_scrollController.offset + chunkTop + dy - listTop)
+        .clamp(0.0, _scrollController.position.maxScrollExtent);
+    _scrollController.jumpTo(target);
+  }
+
   List<double> _estimatedOffsetsForChunks() {
     final cached = _estimatedOffsets;
     if (cached != null && _estimatedWidth == _lastViewportWidth) return cached;
@@ -836,19 +963,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   double _estimatedHeightForText(String text) {
-    final fontSize = _readerTextStyle.fontSize ?? 18;
-    final lineHeight = fontSize * (_readerTextStyle.height ?? 1.65);
-    final charsPerLine = (_lastViewportWidth / (fontSize * 0.55)).clamp(18.0, 240.0);
-    var lines = 0;
-    final parts = text.split('\n');
-    for (final part in parts) {
-      if (part.isEmpty) {
-        lines += 1;
-      } else {
-        lines += (part.length / charsPerLine).ceil().clamp(1, 1000000).toInt();
-      }
-    }
-    return (lines * lineHeight) + _chunkBottomPadding;
+    return _textPainterFor(text).height + _chunkBottomPadding;
   }
 
   @override
@@ -933,6 +1048,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 }
 
+class _VisibleChunk {
+  const _VisibleChunk({required this.index, required this.dyIntoChunk});
+
+  final int index;
+  final double dyIntoChunk;
+}
+
 class _TextChunk {
   const _TextChunk({
     required this.text,
@@ -953,12 +1075,18 @@ class _TextAnchorLocator {
     required this.totalChars,
     required this.chunkIndex,
     required this.chunkCount,
+    this.scrollOffset,
+    this.maxScrollExtent,
+    this.viewportWidth,
   });
 
   final int anchorChar;
   final int totalChars;
   final int chunkIndex;
   final int chunkCount;
+  final double? scrollOffset;
+  final double? maxScrollExtent;
+  final double? viewportWidth;
 
   double get progressPercent {
     if (totalChars <= 0) return 0;
@@ -966,11 +1094,14 @@ class _TextAnchorLocator {
   }
 
   String toJsonString() => jsonEncode({
-        'type': 'txt-top-anchor-v1',
+        'type': 'txt-top-anchor-v3',
         'anchorChar': anchorChar,
         'totalChars': totalChars,
         'chunkIndex': chunkIndex,
         'chunkCount': chunkCount,
+        if (scrollOffset != null) 'scrollOffset': scrollOffset,
+        if (maxScrollExtent != null) 'maxScrollExtent': maxScrollExtent,
+        if (viewportWidth != null) 'viewportWidth': viewportWidth,
         'progressPercent': progressPercent,
         'updatedAt': DateTime.now().toUtc().toIso8601String(),
       });
@@ -1135,6 +1266,7 @@ class _SyncScreenState extends State<SyncScreen> {
   bool _busy = false;
   bool _healthBusy = false;
   bool _pairingBusy = false;
+  bool _logExpanded = false;
   PairingInvite? _pairingInvite;
 
   @override
@@ -1342,6 +1474,8 @@ class _SyncScreenState extends State<SyncScreen> {
               backgroundColor: Colors.white,
             ),
             const SizedBox(height: 12),
+            Text('Устройство: ${invite.ownerDeviceName}'),
+            const SizedBox(height: 4),
             Text('Код: ${invite.displayCode}'),
             const SizedBox(height: 4),
             Text(
@@ -1673,6 +1807,8 @@ class _SyncScreenState extends State<SyncScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
+                            Text('Устройство: ${_pairingInvite!.ownerDeviceName}'),
+                            const SizedBox(height: 6),
                             Text(
                               _pairingInvite!.displayCode,
                               style: Theme.of(context).textTheme.headlineMedium?.copyWith(
@@ -1812,14 +1948,31 @@ class _SyncScreenState extends State<SyncScreen> {
                   ],
                 ),
               ),
-              _SectionCard(
-                title: 'Журнал',
-                child: syncState.logLines.isEmpty
-                    ? const Text('Пока нет событий')
-                    : Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: syncState.logLines.map(Text.new).toList(),
+              Card(
+                child: ExpansionTile(
+                  initiallyExpanded: _logExpanded,
+                  onExpansionChanged: (value) => setState(() => _logExpanded = value),
+                  title: const Text('Журнал событий'),
+                  subtitle: Text(syncState.logLines.isEmpty
+                      ? 'Пока нет событий'
+                      : 'Событий: ${syncState.logLines.length}'),
+                  childrenPadding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
+                  children: [
+                    if (syncState.logLines.isEmpty)
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text('Пока нет событий'),
+                      )
+                    else
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: syncState.logLines.map(Text.new).toList(),
+                        ),
                       ),
+                  ],
+                ),
               ),
             ],
           );
