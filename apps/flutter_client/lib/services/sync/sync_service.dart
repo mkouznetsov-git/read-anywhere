@@ -185,6 +185,8 @@ class SyncService {
   final _downloadsByTransferId = <String, _DownloadSession>{};
   final _uploadLocks = <String>{};
   final _cancelledTransfers = <String>{};
+  final _seenSecureEventIds = <String, DateTime>{};
+  static const _replayWindow = Duration(hours: 24);
 
   Stream<LibraryManifest> get manifestChanges => _manifestChanges.stream;
 
@@ -660,10 +662,17 @@ class SyncService {
       return;
     }
 
+    if (!_acceptSecureEnvelope(envelope)) {
+      return;
+    }
+
     final decryptedPayload = await ReadAnywhereE2eCrypto.decryptPayload(
       encryptedPayload: envelope.payload,
       accountEncryptionKey: local.accountEncryptionKey,
       eventType: envelope.type,
+      accountId: envelope.accountId,
+      deviceId: envelope.deviceId,
+      createdAt: envelope.createdAt,
     );
     final decryptedEnvelope = SyncEnvelope(
       type: envelope.type,
@@ -701,6 +710,32 @@ class SyncService {
       default:
         _appendLog('Неизвестное событие: ${decryptedEnvelope.type}');
     }
+  }
+
+  bool _acceptSecureEnvelope(SyncEnvelope envelope) {
+    final eventId = ReadAnywhereE2eCrypto.encryptedEventId(envelope.payload);
+    if (eventId == null || eventId.isEmpty) {
+      // Legacy encrypted payload from older test builds. Accept during rollout.
+      return true;
+    }
+    final issuedAt = ReadAnywhereE2eCrypto.encryptedIssuedAt(envelope.payload);
+    final now = DateTime.now().toUtc();
+    if (issuedAt == null) {
+      _appendLog('Отклонено событие без issuedAt: ${envelope.type}');
+      return false;
+    }
+    if (issuedAt.isBefore(now.subtract(_replayWindow)) || issuedAt.isAfter(now.add(const Duration(minutes: 5)))) {
+      _appendLog('Отклонено устаревшее/будущее событие: ${envelope.type}');
+      return false;
+    }
+    _seenSecureEventIds.removeWhere((_, seenAt) => seenAt.isBefore(now.subtract(_replayWindow)));
+    final replayKey = '${envelope.accountId}:${envelope.deviceId}:$eventId';
+    if (_seenSecureEventIds.containsKey(replayKey)) {
+      _appendLog('Отклонён повтор события: ${envelope.type}');
+      return false;
+    }
+    _seenSecureEventIds[replayKey] = now;
+    return true;
   }
 
   Future<void> _handleLibrarySnapshotRequested(
@@ -1216,6 +1251,9 @@ class SyncService {
         payload: envelope.payload,
         accountEncryptionKey: local.accountEncryptionKey,
         eventType: envelope.type,
+        accountId: envelope.accountId,
+        deviceId: envelope.deviceId,
+        createdAt: envelope.createdAt,
       );
       client.send(SyncEnvelope(
         type: envelope.type,

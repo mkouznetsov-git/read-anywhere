@@ -10,7 +10,7 @@ from typing import DefaultDict, Dict
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 
-app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.1.4")
+app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.1.5")
 
 # In-memory only. The relay intentionally stores no books and writes nothing to
 # disk. Sprint 3 hotfix 2 keeps the latest *metadata snapshots* in RAM so a newly

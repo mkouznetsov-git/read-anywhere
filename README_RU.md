@@ -310,3 +310,7 @@ TXT-reader переведён на один обычный вертикальн�
 ## Sprint 8 — E2E и точный TXT anchor
 
 Добавлено MVP E2E-шифрование payload sync-событий и chunks файлов через общий ключ аккаунта `accountEncryptionKey`. QR-подключение теперь передаёт название устройства и ключ аккаунта, журнал событий скрыт под раскрывающейся секцией, TXT-reader сохраняет точный символ у верхней границы экрана (`txt-top-anchor-v3`).
+
+## Sprint 9
+
+Добавлены: стабильный line-based TXT-reader с одним scroll, видимая полоса прокрутки на Android, MVP-подпись E2E-событий с replay-защитой, первичная поддержка PDF через `pdfx`. Подробности: `docs/sprint_09_signed_events_pdf_stable_text_reader_ru.md`.
