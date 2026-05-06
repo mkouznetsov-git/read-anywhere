@@ -314,3 +314,8 @@ TXT-reader переведён на один обычный вертикальн�
 ## Sprint 9
 
 Добавлены: стабильный line-based TXT-reader с одним scroll, видимая полоса прокрутки на Android, MVP-подпись E2E-событий с replay-защитой, первичная поддержка PDF через `pdfx`. Подробности: `docs/sprint_09_signed_events_pdf_stable_text_reader_ru.md`.
+
+
+## Sprint 9 Hotfix 02
+
+Исправлен вызов API `pdfx`: `PdfController.jumpTo(...)` заменён на `jumpToPage(...)`. Добавлен compile smoke test, чтобы `flutter test` компилировал основной `main.dart` и ловил подобные ошибки до jobs упаковки.

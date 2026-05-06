@@ -970,7 +970,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
       _page = safePage;
     });
     if (safePage != _controller?.page) {
-      _controller?.jumpTo(safePage);
+      _controller?.jumpToPage(safePage);
     }
   }
 
