@@ -124,17 +124,29 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _downloadBook(BookRecord book) async {
+    if (!widget.sync.state.value.connected) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Нет подключения к relay.')),
+      );
+      return;
+    }
+
+    if (!widget.sync.state.value.hasOnlineStorageFor(book)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Хранилище книги не в сети')),
+      );
+      return;
+    }
+
     final started = await widget.sync.requestBookFile(book);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          started
-              ? 'Запросили файл у других устройств'
-              : 'Не удалось начать скачивание. Проверьте подключение к relay.',
-        ),
-      ),
-    );
+    if (!started) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Не удалось начать скачивание. Проверьте подключение к relay.')),
+      );
+    }
   }
 
   Future<void> _cancelBookDownload(BookRecord book) async {
@@ -271,7 +283,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         final transfer = syncState.downloadForBook(book.id);
                         return _BookCard(
                           book: book,
-                          currentDeviceId: manifest.deviceId,
                           transfer: transfer,
                           onDownload: !book.isDownloaded && transfer?.active != true
                               ? () => _downloadBook(book)
@@ -326,7 +337,6 @@ class _EmptyLibrary extends StatelessWidget {
 class _BookCard extends StatelessWidget {
   const _BookCard({
     required this.book,
-    required this.currentDeviceId,
     required this.onOpen,
     required this.onDownload,
     required this.onCancelDownload,
@@ -336,7 +346,6 @@ class _BookCard extends StatelessWidget {
   });
 
   final BookRecord book;
-  final String currentDeviceId;
   final VoidCallback? onOpen;
   final VoidCallback? onDownload;
   final VoidCallback? onCancelDownload;
@@ -346,21 +355,12 @@ class _BookCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final remoteCount = book.availableOnDeviceIds
-        .where((deviceId) => deviceId != currentDeviceId)
-        .length;
     final progressValue = (book.progressPercent.clamp(0, 100) / 100).toDouble();
     final progressText = book.progressPercent.clamp(0, 100).toStringAsFixed(1);
     final transfer = this.transfer;
     final isDownloading = transfer?.active == true;
     final hasDownloadError = transfer?.hasError == true;
     final showTransfer = transfer != null && !book.isDownloaded && (isDownloading || hasDownloadError);
-    final availabilityHint = book.isDownloaded
-        ? ''
-        : remoteCount > 0
-            ? 'Доступна на $remoteCount устройстве(ах)'
-            : 'Нет локальной копии';
-
     return Card(
       child: ListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
@@ -370,35 +370,11 @@ class _BookCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (!book.isDownloaded) ...[
-                Row(
-                  children: [
-                    Text(book.format.toUpperCase()),
-                    const SizedBox(width: 8),
-                    Icon(
-                      Icons.cloud_outlined,
-                      size: 15,
-                      color: Theme.of(context).colorScheme.secondary,
-                    ),
-                    const SizedBox(width: 4),
-                    Expanded(
-                      child: Text(
-                        availabilityHint,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-              ] else ...[
-                Text(
-                  book.format.toUpperCase(),
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-                const SizedBox(height: 8),
-              ],
+              Text(
+                book.format.toUpperCase(),
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 8),
               Row(
                 children: [
                   Expanded(
@@ -429,7 +405,7 @@ class _BookCard extends StatelessWidget {
                 const SizedBox(height: 4),
                 Text(
                   hasDownloadError
-                      ? '${transfer.statusText}: ${transfer.error}'
+                      ? (transfer.error ?? 'Ошибка скачивания')
                       : transfer.statusText,
                   style: Theme.of(context).textTheme.bodySmall,
                 ),

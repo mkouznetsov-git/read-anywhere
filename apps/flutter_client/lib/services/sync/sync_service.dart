@@ -120,6 +120,7 @@ class SyncStateSnapshot {
     this.receivedEvents = 0,
     this.logLines = const [],
     this.fileTransfers = const {},
+    this.onlinePeerDeviceIds = const [],
   });
 
   final bool connected;
@@ -129,6 +130,7 @@ class SyncStateSnapshot {
   final int receivedEvents;
   final List<String> logLines;
   final Map<String, FileTransferSnapshot> fileTransfers;
+  final List<String> onlinePeerDeviceIds;
 
   SyncStateSnapshot copyWith({
     bool? connected,
@@ -138,6 +140,7 @@ class SyncStateSnapshot {
     int? receivedEvents,
     List<String>? logLines,
     Map<String, FileTransferSnapshot>? fileTransfers,
+    List<String>? onlinePeerDeviceIds,
   }) {
     return SyncStateSnapshot(
       connected: connected ?? this.connected,
@@ -147,10 +150,16 @@ class SyncStateSnapshot {
       receivedEvents: receivedEvents ?? this.receivedEvents,
       logLines: logLines ?? this.logLines,
       fileTransfers: fileTransfers ?? this.fileTransfers,
+      onlinePeerDeviceIds: onlinePeerDeviceIds ?? this.onlinePeerDeviceIds,
     );
   }
 
   FileTransferSnapshot? downloadForBook(String bookId) => fileTransfers[bookId];
+
+  bool hasOnlineStorageFor(BookRecord book) {
+    final online = onlinePeerDeviceIds.toSet();
+    return book.availableOnDeviceIds.any(online.contains);
+  }
 }
 
 class SyncService {
@@ -219,7 +228,11 @@ class SyncService {
     if (state.value.connected) {
       _appendLog('Отключено');
     }
-    _setState(state.value.copyWith(connected: false, statusText: 'Не подключено'));
+    _setState(state.value.copyWith(
+      connected: false,
+      statusText: 'Не подключено',
+      onlinePeerDeviceIds: const [],
+    ));
   }
 
   Future<void> refreshMetadata({required String reason}) async {
@@ -511,7 +524,7 @@ class SyncService {
       if (current.sourceDeviceId == null) {
         await _failDownload(
           current,
-          'Источник файла не ответил. Проверьте, что устройство с книгой онлайн, и нажмите скачать снова.',
+          'Хранилище книги не в сети',
         );
       }
     }));
@@ -600,18 +613,26 @@ class SyncService {
           .map((item) => item.toString())
           .where((id) => id != local.deviceId)
           .toList();
+      _setState(state.value.copyWith(onlinePeerDeviceIds: peers));
       _appendLog('Relay peers online: ${peers.length}');
       await refreshMetadata(reason: 'peer_list');
       return;
     }
 
     if (envelope.type == 'peer_joined') {
+      final peers = {...state.value.onlinePeerDeviceIds, envelope.deviceId}.toList()..sort();
+      _setState(state.value.copyWith(onlinePeerDeviceIds: peers));
       _appendLog('Подключилось другое устройство: ${envelope.deviceId}');
       await refreshMetadata(reason: 'peer_joined');
       return;
     }
 
     if (envelope.type == 'peer_left') {
+      final peers = state.value.onlinePeerDeviceIds
+          .where((id) => id != envelope.deviceId)
+          .toList()
+        ..sort();
+      _setState(state.value.copyWith(onlinePeerDeviceIds: peers));
       _appendLog('Отключилось другое устройство: ${envelope.deviceId}');
       return;
     }
