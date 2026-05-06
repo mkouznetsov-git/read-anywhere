@@ -190,3 +190,27 @@ macOS DMG/PKG build
 - Долистать книгу до конца, проверить что прогресс становится 100.0%.
 - Закрыть и открыть книгу снова, проверить восстановление в конце.
 - Пролистать до середины на одном устройстве, дождаться sync, открыть на другом устройстве и проверить, что верхний фрагмент текста примерно совпадает.
+
+## Sprint 10 checks
+
+### Android live reader progress
+
+1. Open a long TXT or FB2 file on Android.
+2. Scroll continuously for several seconds.
+3. Verify that the bottom progress bar and percentage update while scrolling, before leaving the reader.
+4. Leave the reader and verify the same percentage is visible in the library list.
+
+### Remote-only PDF/FB2 download source detection
+
+1. Keep the source device online and connected to the same account/relay.
+2. Add a PDF or FB2 on the source device.
+3. On another device, wait for metadata sync.
+4. Tap the cloud icon.
+5. Verify that download starts. The app should show “Хранилище книги не в сети” only if no online source answers the file request timeout.
+
+### FB2 MVP reader
+
+1. Import a plain `.fb2` file.
+2. Open it and verify that title/paragraph text is readable.
+3. Scroll to a recognizable location, close, reopen, and verify position restore.
+4. Sync to another device and verify that the same approximate top line is restored there.

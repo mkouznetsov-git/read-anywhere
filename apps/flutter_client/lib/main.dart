@@ -134,14 +134,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
       return;
     }
 
-    if (!widget.sync.state.value.hasOnlineStorageFor(book)) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Хранилище книги не в сети')),
-      );
-      return;
-    }
-
     final started = await widget.sync.requestBookFile(book);
     if (!mounted) return;
     if (!started) {
@@ -482,6 +474,13 @@ class ReaderScreen extends StatelessWidget {
     switch (book.format.toLowerCase()) {
       case 'txt':
         return _TxtReaderScreen(book: book, storage: storage, sync: sync);
+      case 'fb2':
+        return _TxtReaderScreen(
+          book: book,
+          storage: storage,
+          sync: sync,
+          sourceKind: _TextSourceKind.fb2,
+        );
       case 'pdf':
         return _PdfReaderScreen(book: book, storage: storage, sync: sync);
       default:
@@ -493,16 +492,20 @@ class ReaderScreen extends StatelessWidget {
   }
 }
 
+enum _TextSourceKind { txt, fb2 }
+
 class _TxtReaderScreen extends StatefulWidget {
   const _TxtReaderScreen({
     required this.book,
     required this.storage,
     required this.sync,
+    this.sourceKind = _TextSourceKind.txt,
   });
 
   final BookRecord book;
   final StorageService storage;
   final SyncService sync;
+  final _TextSourceKind sourceKind;
 
   @override
   State<_TxtReaderScreen> createState() => _TxtReaderScreenState();
@@ -532,6 +535,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
   String? _loadError;
   Timer? _saveDebounce;
   Timer? _resizeDebounce;
+  Timer? _progressRedrawThrottle;
   double _lastProgress = 0;
   BookRecord? _runtimeBook;
   _TextAnchorLocator? _lastKnownLocator;
@@ -558,6 +562,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
   void dispose() {
     _resizeDebounce?.cancel();
     _saveDebounce?.cancel();
+    _progressRedrawThrottle?.cancel();
     final locator = _currentLocator() ?? _lastKnownLocator;
     if (locator != null) {
       unawaited(_saveProgress(locator));
@@ -580,7 +585,10 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
       final file = File(book.localPath!);
       if (!await file.exists()) throw StateError('Файл отсутствует: ${book.localPath}');
       final bytes = await file.readAsBytes();
-      final raw = _normalizeText(_decodeTextFile(bytes));
+      final decoded = _decodeTextFile(bytes);
+      final raw = widget.sourceKind == _TextSourceKind.fb2
+          ? _extractFb2Text(decoded)
+          : _normalizeText(decoded);
       final totalChars = raw.length;
       final targetChar = _targetCharForBook(book, totalChars);
       if (!mounted) return;
@@ -596,7 +604,8 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
       });
     } catch (error) {
       if (!mounted) return;
-      setState(() => _loadError = 'Не удалось открыть TXT: $error');
+      final label = widget.sourceKind == _TextSourceKind.fb2 ? 'FB2' : 'TXT';
+      setState(() => _loadError = 'Не удалось открыть $label: $error');
     }
   }
 
@@ -651,6 +660,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
     if (decoded != null) {
       final type = decoded['type'];
       if (type == 'txt-line-anchor-v1' ||
+          type == 'fb2-line-anchor-v1' ||
           type == 'txt-top-anchor-v3' ||
           type == 'txt-top-anchor-v2' ||
           type == 'txt-top-anchor-v1' ||
@@ -759,13 +769,19 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
     if (_restoringPosition || !_didInitialRestore) return;
     final locator = _currentLocator();
     if (locator == null) return;
-    final shouldRedraw = (locator.progressPercent - _lastProgress).abs() >= 0.02;
     _lastKnownLocator = locator;
     _lastProgress = locator.progressPercent;
-    if (shouldRedraw && mounted) setState(() {});
+    _scheduleProgressRedraw();
     _saveDebounce?.cancel();
     _saveDebounce = Timer(const Duration(milliseconds: 450), () {
       unawaited(_saveProgress(locator));
+    });
+  }
+
+  void _scheduleProgressRedraw() {
+    if (_progressRedrawThrottle?.isActive ?? false) return;
+    _progressRedrawThrottle = Timer(const Duration(milliseconds: 80), () {
+      if (mounted) setState(() {});
     });
   }
 
@@ -773,7 +789,9 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
     final manifest = await widget.storage.updateProgress(
       bookId: widget.book.id,
       progressPercent: locator.progressPercent,
-      locator: locator.toJsonString(),
+      locator: locator.toJsonString(
+        type: widget.sourceKind == _TextSourceKind.fb2 ? 'fb2-line-anchor-v1' : 'txt-line-anchor-v1',
+      ),
     );
     for (final book in manifest.books) {
       if (book.id == widget.book.id) {
@@ -789,7 +807,10 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
     await widget.storage.addBookmark(
       bookId: widget.book.id,
       label: 'Закладка ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
-      locator: locator?.toJsonString() ?? _book.currentLocator,
+      locator: locator?.toJsonString(
+            type: widget.sourceKind == _TextSourceKind.fb2 ? 'fb2-line-anchor-v1' : 'txt-line-anchor-v1',
+          ) ??
+          _book.currentLocator,
     );
     await widget.sync.broadcastLibrarySnapshot(reason: 'bookmark_added');
     if (!mounted) return;
@@ -1077,8 +1098,8 @@ class _TextAnchorLocator {
     return ((anchorChar / totalChars) * 100).clamp(0.0, 100.0).toDouble();
   }
 
-  String toJsonString() => jsonEncode({
-        'type': 'txt-line-anchor-v1',
+  String toJsonString({String type = 'txt-line-anchor-v1'}) => jsonEncode({
+        'type': type,
         'anchorChar': anchorChar,
         'totalChars': totalChars,
         'lineIndex': lineIndex,
@@ -1170,6 +1191,53 @@ String _decodeTextFile(List<int> bytes) {
 }
 
 String _normalizeText(String text) => text.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+
+String _extractFb2Text(String xmlText) {
+  var text = _normalizeText(xmlText);
+  text = text.replaceAll(RegExp(r'<\?xml[^>]*>', caseSensitive: false), '');
+  text = text.replaceAll(RegExp(r'<binary\b[^>]*>.*?</binary>', caseSensitive: false, dotAll: true), '');
+  text = text.replaceAll(RegExp(r'<description\b[^>]*>.*?</description>', caseSensitive: false, dotAll: true), '');
+  text = text.replaceAll(RegExp(r'<empty-line\s*/?>', caseSensitive: false), '\n\n');
+  text = text.replaceAll(RegExp(r'</(p|v|subtitle|title|section|poem|stanza)>', caseSensitive: false), '\n');
+  text = text.replaceAll(RegExp(r'<(p|v|subtitle|title)\b[^>]*>', caseSensitive: false), '');
+  text = text.replaceAll(RegExp(r'<[^>]+>', dotAll: true), '');
+  text = _decodeXmlEntities(text);
+  text = text
+      .split('\n')
+      .map((line) => line.replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trimRight())
+      .join('\n');
+  text = text.replaceAll(RegExp(r'\n{4,}'), '\n\n\n').trim();
+  return text.isEmpty ? 'Не удалось извлечь текст из FB2.' : text;
+}
+
+String _decodeXmlEntities(String text) {
+  return text.replaceAllMapped(RegExp(r'&(#x?[0-9a-fA-F]+|[a-zA-Z]+);'), (match) {
+    final entity = match.group(1)!;
+    switch (entity) {
+      case 'amp':
+        return '&';
+      case 'lt':
+        return '<';
+      case 'gt':
+        return '>';
+      case 'quot':
+        return '"';
+      case 'apos':
+        return "'";
+      case 'nbsp':
+        return ' ';
+    }
+    if (entity.startsWith('#x') || entity.startsWith('#X')) {
+      final value = int.tryParse(entity.substring(2), radix: 16);
+      return value == null ? match.group(0)! : String.fromCharCode(value);
+    }
+    if (entity.startsWith('#')) {
+      final value = int.tryParse(entity.substring(1));
+      return value == null ? match.group(0)! : String.fromCharCode(value);
+    }
+    return match.group(0)!;
+  });
+}
 
 String _decodeWindows1251(List<int> bytes) {
   const table = <int>[
