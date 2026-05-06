@@ -128,4 +128,78 @@ void main() {
     expect(merged.trustedDevices.map((d) => d.deviceId).toSet(), {'a', 'b'});
   });
 
+
+
+  test('merge keeps deterministic alphabetical library order', () {
+    final zebra = BookRecord(
+      id: 'z',
+      title: 'Zebra',
+      fileName: 'zebra.txt',
+      format: 'txt',
+      sizeBytes: 10,
+      contentSha256: 'z',
+      updatedAt: DateTime.utc(2030),
+    );
+    final alpha = BookRecord(
+      id: 'a',
+      title: 'Alpha',
+      fileName: 'alpha.txt',
+      format: 'txt',
+      sizeBytes: 10,
+      contentSha256: 'a',
+      updatedAt: DateTime.utc(2020),
+    );
+
+    final merged = mergeManifests(
+      LibraryManifest(accountId: 'acc', deviceId: 'a', books: [zebra]),
+      LibraryManifest(accountId: 'acc', deviceId: 'b', books: [alpha]),
+    );
+
+    expect(merged.visibleBooks.map((b) => b.title), ['Alpha', 'Zebra']);
+  });
+
+  test('deleted book tombstone hides book from visible library', () {
+    final localBook = BookRecord(
+      id: 'book-1',
+      title: 'Book',
+      fileName: 'book.txt',
+      format: 'txt',
+      sizeBytes: 10,
+      contentSha256: 'book-1',
+      localPath: '/local/book.txt',
+      availableOnDeviceIds: const ['a'],
+    );
+    final remoteBook = localBook.copyWith(
+      clearLocalPath: true,
+      availableOnDeviceIds: const [],
+      deletedAt: DateTime.utc(2030),
+      updatedAt: DateTime.utc(2030),
+    );
+
+    final merged = mergeManifests(
+      LibraryManifest(accountId: 'acc', deviceId: 'a', books: [localBook]),
+      LibraryManifest(accountId: 'acc', deviceId: 'b', books: [remoteBook]),
+    );
+
+    expect(merged.books.single.isDeleted, isTrue);
+    expect(merged.visibleBooks, isEmpty);
+  });
+
+  test('deleted trusted device is hidden from active devices', () {
+    final removed = TrustedDeviceRecord(
+      deviceId: 'old-device',
+      name: 'Old phone',
+      deletedAt: DateTime.utc(2030),
+    );
+    final current = TrustedDeviceRecord(deviceId: 'a', name: 'Mac', role: 'owner');
+
+    final manifest = LibraryManifest(
+      accountId: 'acc',
+      deviceId: 'a',
+      trustedDevices: [removed, current],
+    );
+
+    expect(manifest.activeTrustedDevices.map((d) => d.deviceId), ['a']);
+  });
+
 }

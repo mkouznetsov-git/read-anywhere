@@ -7,6 +7,7 @@ class TrustedDeviceRecord {
     this.role = 'device',
     DateTime? addedAt,
     DateTime? lastSeenAt,
+    this.deletedAt,
   })  : addedAt = addedAt ?? DateTime.now().toUtc(),
         lastSeenAt = lastSeenAt ?? DateTime.now().toUtc();
 
@@ -15,6 +16,9 @@ class TrustedDeviceRecord {
   final String role;
   final DateTime addedAt;
   final DateTime lastSeenAt;
+  final DateTime? deletedAt;
+
+  bool get isDeleted => deletedAt != null;
 
   TrustedDeviceRecord copyWith({
     String? deviceId,
@@ -22,6 +26,8 @@ class TrustedDeviceRecord {
     String? role,
     DateTime? addedAt,
     DateTime? lastSeenAt,
+    DateTime? deletedAt,
+    bool clearDeletedAt = false,
   }) {
     return TrustedDeviceRecord(
       deviceId: deviceId ?? this.deviceId,
@@ -29,6 +35,7 @@ class TrustedDeviceRecord {
       role: role ?? this.role,
       addedAt: addedAt ?? this.addedAt,
       lastSeenAt: lastSeenAt ?? this.lastSeenAt,
+      deletedAt: clearDeletedAt ? null : (deletedAt ?? this.deletedAt),
     );
   }
 
@@ -38,6 +45,7 @@ class TrustedDeviceRecord {
         'role': role,
         'addedAt': addedAt.toIso8601String(),
         'lastSeenAt': lastSeenAt.toIso8601String(),
+        'deletedAt': deletedAt?.toIso8601String(),
       };
 
   factory TrustedDeviceRecord.fromJson(Map<String, dynamic> json) => TrustedDeviceRecord(
@@ -48,6 +56,9 @@ class TrustedDeviceRecord {
             DateTime.now().toUtc(),
         lastSeenAt: DateTime.tryParse(json['lastSeenAt'] as String? ?? '') ??
             DateTime.now().toUtc(),
+        deletedAt: json['deletedAt'] == null
+            ? null
+            : DateTime.tryParse(json['deletedAt'] as String),
       );
 }
 
@@ -69,6 +80,18 @@ class LibraryManifest {
   final DateTime updatedAt;
   final List<BookRecord> books;
   final List<TrustedDeviceRecord> trustedDevices;
+
+  List<BookRecord> get visibleBooks => sortBooksForLibrary(books);
+  List<TrustedDeviceRecord> get activeTrustedDevices => trustedDevices
+      .where((device) => !device.isDeleted)
+      .toList()
+    ..sort((a, b) {
+      final ownerCompare = (b.role == 'owner' ? 1 : 0).compareTo(a.role == 'owner' ? 1 : 0);
+      if (ownerCompare != 0) return ownerCompare;
+      final currentCompare = (b.deviceId == deviceId ? 1 : 0).compareTo(a.deviceId == deviceId ? 1 : 0);
+      if (currentCompare != 0) return currentCompare;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
 
   LibraryManifest copyWith({
     String? accountId,

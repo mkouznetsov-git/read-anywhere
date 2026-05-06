@@ -244,7 +244,7 @@ class SyncService {
     final client = _client;
     if (client == null || !state.value.connected) return false;
 
-    final manifest = await _storage.loadManifest();
+    final manifest = await _storage.touchCurrentDevice();
     final envelope = SyncEnvelope(
       type: 'library_snapshot',
       accountId: manifest.accountId,
@@ -471,6 +471,10 @@ class SyncService {
     final client = _client;
     if (client == null || !state.value.connected) {
       _appendLog('Нельзя скачать ${book.title}: нет подключения к relay');
+      return false;
+    }
+    if (book.isDeleted) {
+      _appendLog('${book.title} удалена из библиотеки');
       return false;
     }
     if (book.isDownloaded) {
@@ -1143,7 +1147,7 @@ class SyncService {
 
   BookRecord? _findBook(LibraryManifest manifest, String bookId) {
     for (final book in manifest.books) {
-      if (book.id == bookId) return book;
+      if (book.id == bookId && !book.isDeleted) return book;
     }
     return null;
   }

@@ -90,6 +90,7 @@ class BookRecord {
     this.currentLocator = '',
     this.progressVersion = 0,
     this.updatedByDeviceId = 'local-device',
+    this.deletedAt,
     List<String>? availableOnDeviceIds,
     List<BookmarkRecord>? bookmarks,
   })  : addedAt = addedAt ?? DateTime.now().toUtc(),
@@ -114,10 +115,12 @@ class BookRecord {
   final String currentLocator;
   final int progressVersion;
   final String updatedByDeviceId;
+  final DateTime? deletedAt;
   final List<String> availableOnDeviceIds;
   final List<BookmarkRecord> bookmarks;
 
-  bool get isDownloaded => localPath != null && localPath!.isNotEmpty;
+  bool get isDeleted => deletedAt != null;
+  bool get isDownloaded => !isDeleted && localPath != null && localPath!.isNotEmpty;
 
   BookDownloadStatus get downloadStatus =>
       isDownloaded ? BookDownloadStatus.downloaded : BookDownloadStatus.remoteOnly;
@@ -131,11 +134,14 @@ class BookRecord {
     int? sizeBytes,
     String? contentSha256,
     String? localPath,
+    bool clearLocalPath = false,
     DateTime? updatedAt,
     double? progressPercent,
     String? currentLocator,
     int? progressVersion,
     String? updatedByDeviceId,
+    DateTime? deletedAt,
+    bool clearDeletedAt = false,
     List<String>? availableOnDeviceIds,
     List<BookmarkRecord>? bookmarks,
   }) {
@@ -146,13 +152,14 @@ class BookRecord {
       format: format ?? this.format,
       sizeBytes: sizeBytes ?? this.sizeBytes,
       contentSha256: contentSha256 ?? this.contentSha256,
-      localPath: localPath ?? this.localPath,
+      localPath: clearLocalPath ? null : (localPath ?? this.localPath),
       addedAt: addedAt,
       updatedAt: updatedAt ?? DateTime.now().toUtc(),
       progressPercent: progressPercent ?? this.progressPercent,
       currentLocator: currentLocator ?? this.currentLocator,
       progressVersion: progressVersion ?? this.progressVersion,
       updatedByDeviceId: updatedByDeviceId ?? this.updatedByDeviceId,
+      deletedAt: clearDeletedAt ? null : (deletedAt ?? this.deletedAt),
       availableOnDeviceIds: availableOnDeviceIds ?? this.availableOnDeviceIds,
       bookmarks: bookmarks ?? this.bookmarks,
     );
@@ -172,6 +179,7 @@ class BookRecord {
         'currentLocator': currentLocator,
         'progressVersion': progressVersion,
         'updatedByDeviceId': updatedByDeviceId,
+        'deletedAt': deletedAt?.toIso8601String(),
         'availableOnDeviceIds': availableOnDeviceIds,
         'bookmarks': bookmarks.map((b) => b.toJson()).toList(),
       };
@@ -192,6 +200,9 @@ class BookRecord {
         currentLocator: json['currentLocator'] as String? ?? '',
         progressVersion: (json['progressVersion'] as num?)?.toInt() ?? 0,
         updatedByDeviceId: json['updatedByDeviceId'] as String? ?? 'unknown',
+        deletedAt: json['deletedAt'] == null
+            ? null
+            : DateTime.tryParse(json['deletedAt'] as String),
         availableOnDeviceIds: ((json['availableOnDeviceIds'] as List?) ?? [])
             .map((item) => item.toString())
             .toList(),
@@ -199,6 +210,21 @@ class BookRecord {
             .map((item) => BookmarkRecord.fromJson(item as Map<String, dynamic>))
             .toList(),
       );
+}
+
+
+int compareBooksForLibrary(BookRecord a, BookRecord b) {
+  final titleCompare = a.title.toLowerCase().compareTo(b.title.toLowerCase());
+  if (titleCompare != 0) return titleCompare;
+  final authorlessFileCompare = a.fileName.toLowerCase().compareTo(b.fileName.toLowerCase());
+  if (authorlessFileCompare != 0) return authorlessFileCompare;
+  final addedCompare = a.addedAt.compareTo(b.addedAt);
+  if (addedCompare != 0) return addedCompare;
+  return a.id.compareTo(b.id);
+}
+
+List<BookRecord> sortBooksForLibrary(Iterable<BookRecord> books) {
+  return books.where((book) => !book.isDeleted).toList()..sort(compareBooksForLibrary);
 }
 
 List<String> _uniqueStrings(List<String> items) {

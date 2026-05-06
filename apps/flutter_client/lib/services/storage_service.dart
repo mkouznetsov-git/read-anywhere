@@ -67,7 +67,7 @@ class StorageService {
   Future<void> saveManifest(LibraryManifest manifest) async {
     final file = await manifestFile();
     const encoder = JsonEncoder.withIndent('  ');
-    await file.writeAsString(encoder.convert(manifest.toJson()), flush: true);
+    await file.writeAsString(encoder.convert(_normalizeManifest(manifest).toJson()), flush: true);
   }
 
   Future<SyncSettings> loadSyncSettings() async {
@@ -124,10 +124,12 @@ class StorageService {
     final devices = [...manifest.trustedDevices];
     final index = devices.indexWhere((d) => d.deviceId == normalizedId);
     if (index >= 0) {
-      devices[index] = devices[index].copyWith(
+      final existing = devices[index];
+      devices[index] = existing.copyWith(
         name: normalizedName,
-        role: devices[index].role == 'owner' ? 'owner' : role,
+        role: existing.role == 'owner' ? 'owner' : role,
         lastSeenAt: DateTime.now().toUtc(),
+        clearDeletedAt: true,
       );
     } else {
       devices.add(TrustedDeviceRecord(
@@ -136,7 +138,6 @@ class StorageService {
         role: role,
       ));
     }
-    devices.sort((a, b) => a.name.compareTo(b.name));
     final updated = manifest.copyWith(trustedDevices: devices);
     await saveManifest(updated);
     return updated;
@@ -160,6 +161,51 @@ class StorageService {
     );
   }
 
+
+
+  Future<LibraryManifest> removeTrustedDevice(String deviceId) async {
+    final manifest = await loadManifest();
+    if (deviceId == manifest.deviceId) {
+      throw ArgumentError('Нельзя удалить текущее устройство из доверенных');
+    }
+    final now = DateTime.now().toUtc();
+    final devices = manifest.trustedDevices.map((device) {
+      if (device.deviceId != deviceId) return device;
+      return device.copyWith(deletedAt: now, lastSeenAt: now);
+    }).toList();
+    final updated = manifest.copyWith(trustedDevices: devices);
+    await saveManifest(updated);
+    return updated;
+  }
+
+  Future<LibraryManifest> pruneDeletedTrustedDevices() async {
+    final manifest = await loadManifest();
+    final kept = manifest.trustedDevices.where((device) {
+      if (device.deviceId == manifest.deviceId) return true;
+      return !device.isDeleted;
+    }).toList();
+    final updated = manifest.copyWith(trustedDevices: kept);
+    await saveManifest(updated);
+    return updated;
+  }
+
+
+  Future<LibraryManifest> touchCurrentDevice() async {
+    final manifest = await loadManifest();
+    final now = DateTime.now().toUtc();
+    final devices = manifest.trustedDevices.map((device) {
+      if (device.deviceId != manifest.deviceId) return device;
+      return device.copyWith(
+        name: manifest.deviceName,
+        lastSeenAt: now,
+        clearDeletedAt: true,
+      );
+    }).toList();
+    final updated = manifest.copyWith(trustedDevices: devices);
+    await saveManifest(updated);
+    return updated;
+  }
+
   Future<void> upsertBook(BookRecord book) async {
     final manifest = await loadManifest();
     final books = [...manifest.books];
@@ -179,6 +225,7 @@ class StorageService {
         contentSha256: book.contentSha256,
         localPath: book.localPath,
         updatedAt: DateTime.now().toUtc(),
+        clearDeletedAt: true,
         availableOnDeviceIds: availableOn,
       );
     } else {
@@ -231,6 +278,59 @@ class StorageService {
 
 
 
+
+  Future<LibraryManifest> removeLocalBookCopy(String bookId) async {
+    final manifest = await loadManifest();
+    var found = false;
+    final updatedBooks = <BookRecord>[];
+    for (final book in manifest.books) {
+      if (book.id != bookId) {
+        updatedBooks.add(book);
+        continue;
+      }
+      found = true;
+      await _deleteLocalBookFileIfSafe(book.localPath);
+      final availableOn = book.availableOnDeviceIds
+          .where((deviceId) => deviceId != manifest.deviceId)
+          .toList()
+        ..sort();
+      updatedBooks.add(book.copyWith(
+        clearLocalPath: true,
+        availableOnDeviceIds: availableOn,
+        updatedAt: DateTime.now().toUtc(),
+      ));
+    }
+    if (!found) throw StateError('Книга не найдена в manifest: $bookId');
+    final updated = manifest.copyWith(books: updatedBooks);
+    await saveManifest(updated);
+    return updated;
+  }
+
+  Future<LibraryManifest> deleteBookFromLibrary(String bookId) async {
+    final manifest = await loadManifest();
+    var found = false;
+    final now = DateTime.now().toUtc();
+    final updatedBooks = <BookRecord>[];
+    for (final book in manifest.books) {
+      if (book.id != bookId) {
+        updatedBooks.add(book);
+        continue;
+      }
+      found = true;
+      await _deleteLocalBookFileIfSafe(book.localPath);
+      updatedBooks.add(book.copyWith(
+        clearLocalPath: true,
+        availableOnDeviceIds: const [],
+        deletedAt: now,
+        updatedAt: now,
+      ));
+    }
+    if (!found) throw StateError('Книга не найдена в manifest: $bookId');
+    final updated = manifest.copyWith(books: updatedBooks);
+    await saveManifest(updated);
+    return updated;
+  }
+
   Future<LibraryManifest> markBookDownloaded({
     required String bookId,
     required String localPath,
@@ -248,6 +348,7 @@ class StorageService {
       return book.copyWith(
         localPath: localPath,
         availableOnDeviceIds: availableOn,
+        clearDeletedAt: true,
         updatedAt: DateTime.now().toUtc(),
       );
     }).toList();
@@ -260,9 +361,60 @@ class StorageService {
   }
 
 
+
+  LibraryManifest _normalizeManifest(LibraryManifest manifest) {
+    final books = [...manifest.books]..sort((a, b) {
+      if (a.isDeleted != b.isDeleted) return a.isDeleted ? 1 : -1;
+      return compareBooksForLibrary(a, b);
+    });
+    final devices = <String, TrustedDeviceRecord>{};
+    for (final device in manifest.trustedDevices) {
+      final existing = devices[device.deviceId];
+      if (existing == null) {
+        devices[device.deviceId] = device;
+        continue;
+      }
+      final existingMarker = existing.deletedAt ?? existing.lastSeenAt;
+      final deviceMarker = device.deletedAt ?? device.lastSeenAt;
+      if (deviceMarker.isAfter(existingMarker)) devices[device.deviceId] = device;
+    }
+    final sortedDevices = devices.values.toList()
+      ..sort((a, b) {
+        if (a.isDeleted != b.isDeleted) return a.isDeleted ? 1 : -1;
+        final ownerCompare = (b.role == 'owner' ? 1 : 0).compareTo(a.role == 'owner' ? 1 : 0);
+        if (ownerCompare != 0) return ownerCompare;
+        final currentCompare = (b.deviceId == manifest.deviceId ? 1 : 0).compareTo(a.deviceId == manifest.deviceId ? 1 : 0);
+        if (currentCompare != 0) return currentCompare;
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+    return manifest.copyWith(books: books, trustedDevices: sortedDevices);
+  }
+
+  Future<void> _deleteLocalBookFileIfSafe(String? localPath) async {
+    if (localPath == null || localPath.trim().isEmpty) return;
+    try {
+      final file = File(localPath);
+      if (await file.exists()) await file.delete();
+    } catch (_) {
+      // Deleting the manifest entry must not fail just because the file was
+      // already removed or the OS denied cleanup. The next import/download will
+      // rewrite the local copy.
+    }
+  }
+
   LibraryManifest _ensureCurrentDeviceTrusted(LibraryManifest manifest) {
-    final hasCurrent = manifest.trustedDevices.any((d) => d.deviceId == manifest.deviceId);
-    if (hasCurrent) return manifest;
+    final devices = [...manifest.trustedDevices];
+    final index = devices.indexWhere((d) => d.deviceId == manifest.deviceId);
+    if (index >= 0) {
+      final current = devices[index];
+      if (!current.isDeleted && current.name == manifest.deviceName) return manifest;
+      devices[index] = current.copyWith(
+        name: manifest.deviceName,
+        lastSeenAt: DateTime.now().toUtc(),
+        clearDeletedAt: true,
+      );
+      return manifest.copyWith(trustedDevices: devices);
+    }
     return manifest.copyWith(
       trustedDevices: [
         ...manifest.trustedDevices,

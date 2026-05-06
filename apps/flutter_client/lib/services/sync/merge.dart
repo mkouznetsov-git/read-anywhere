@@ -25,6 +25,7 @@ LibraryManifest mergeManifests(LibraryManifest local, LibraryManifest remote) {
         currentLocator: remoteBook.currentLocator,
         progressVersion: remoteBook.progressVersion,
         updatedByDeviceId: remoteBook.updatedByDeviceId,
+        deletedAt: remoteBook.deletedAt,
         availableOnDeviceIds: remoteBook.availableOnDeviceIds,
         bookmarks: remoteBook.bookmarks,
       );
@@ -37,11 +38,15 @@ LibraryManifest mergeManifests(LibraryManifest local, LibraryManifest remote) {
     updatedAt: DateTime.now().toUtc(),
     trustedDevices: _mergeTrustedDevices(local.trustedDevices, remote.trustedDevices),
     books: mergedById.values.toList()
-      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt)),
+      ..sort((a, b) {
+        if (a.isDeleted != b.isDeleted) return a.isDeleted ? 1 : -1;
+        return compareBooksForLibrary(a, b);
+      }),
   );
 }
 
 BookRecord _mergeBook(BookRecord local, BookRecord remote) {
+  final deletedWinner = _deletedWinner(local, remote);
   final progressWinner = _progressCompare(local, remote) >= 0 ? local : remote;
   final bookmarks = _mergeBookmarks(local.bookmarks, remote.bookmarks);
   final availableOn = <String>{
@@ -63,10 +68,20 @@ BookRecord _mergeBook(BookRecord local, BookRecord remote) {
     currentLocator: progressWinner.currentLocator,
     progressVersion: progressWinner.progressVersion,
     updatedByDeviceId: progressWinner.updatedByDeviceId,
-    availableOnDeviceIds: availableOn,
+    deletedAt: deletedWinner?.deletedAt,
+    clearDeletedAt: deletedWinner == null,
+    availableOnDeviceIds: deletedWinner == null ? availableOn : const [],
     bookmarks: bookmarks,
     updatedAt: DateTime.now().toUtc(),
   );
+}
+
+
+BookRecord? _deletedWinner(BookRecord local, BookRecord remote) {
+  final candidates = [local, remote].where((book) => book.deletedAt != null).toList();
+  if (candidates.isEmpty) return null;
+  candidates.sort((a, b) => a.deletedAt!.compareTo(b.deletedAt!));
+  return candidates.last;
 }
 
 int _progressCompare(BookRecord a, BookRecord b) {
@@ -100,9 +115,19 @@ List<TrustedDeviceRecord> _mergeTrustedDevices(
   final byId = <String, TrustedDeviceRecord>{};
   for (final device in [...local, ...remote]) {
     final existing = byId[device.deviceId];
-    if (existing == null || device.lastSeenAt.isAfter(existing.lastSeenAt)) {
+    if (existing == null) {
       byId[device.deviceId] = device;
+      continue;
     }
+    final existingMarker = existing.deletedAt ?? existing.lastSeenAt;
+    final deviceMarker = device.deletedAt ?? device.lastSeenAt;
+    if (deviceMarker.isAfter(existingMarker)) byId[device.deviceId] = device;
   }
-  return byId.values.toList()..sort((a, b) => a.name.compareTo(b.name));
+  return byId.values.toList()
+    ..sort((a, b) {
+      if (a.isDeleted != b.isDeleted) return a.isDeleted ? 1 : -1;
+      final ownerCompare = (b.role == 'owner' ? 1 : 0).compareTo(a.role == 'owner' ? 1 : 0);
+      if (ownerCompare != 0) return ownerCompare;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
 }

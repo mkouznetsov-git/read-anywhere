@@ -142,10 +142,77 @@ class _LibraryScreenState extends State<LibraryScreen> {
     await widget.sync.cancelBookFileDownload(book.id);
   }
 
+
+  Future<void> _removeLocalCopy(BookRecord book) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Удалить файл с этого устройства?'),
+        content: Text(
+          'Книга «${book.title}» останется в библиотеке аккаунта, но файл будет удалён с этого устройства. Позже её можно будет скачать снова с другого устройства.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Удалить файл'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await widget.storage.removeLocalBookCopy(book.id);
+      await widget.sync.broadcastLibrarySnapshot(reason: 'local_copy_removed');
+      await _reload();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Не удалось удалить файл: $error')),
+      );
+    }
+  }
+
+  Future<void> _deleteFromLibrary(BookRecord book) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Удалить книгу из библиотеки?'),
+        content: Text(
+          'Книга «${book.title}» исчезнет из библиотеки аккаунта на всех устройствах после синхронизации. Локальный файл на этом устройстве будет удалён.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Удалить из библиотеки'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await widget.storage.deleteBookFromLibrary(book.id);
+      await widget.sync.broadcastLibrarySnapshot(reason: 'book_deleted');
+      await _reload();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Не удалось удалить книгу: $error')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final manifest = _manifest;
-    final books = manifest?.books ?? [];
+    final books = manifest?.visibleBooks ?? [];
 
     return Scaffold(
       appBar: AppBar(
@@ -213,6 +280,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           onCancelDownload: transfer?.active == true
                               ? () => _cancelBookDownload(book)
                               : null,
+                          onRemoveLocalCopy: book.isDownloaded
+                              ? () => _removeLocalCopy(book)
+                              : null,
+                          onDeleteFromLibrary: () => _deleteFromLibrary(book),
                           onOpen: book.isDownloaded
                               ? () async {
                                   await Navigator.of(context).push(
@@ -260,6 +331,8 @@ class _BookCard extends StatelessWidget {
     required this.onOpen,
     required this.onDownload,
     required this.onCancelDownload,
+    required this.onRemoveLocalCopy,
+    required this.onDeleteFromLibrary,
     required this.transfer,
   });
 
@@ -268,6 +341,8 @@ class _BookCard extends StatelessWidget {
   final VoidCallback? onOpen;
   final VoidCallback? onDownload;
   final VoidCallback? onCancelDownload;
+  final VoidCallback? onRemoveLocalCopy;
+  final VoidCallback onDeleteFromLibrary;
   final FileTransferSnapshot? transfer;
 
   @override
@@ -363,23 +438,55 @@ class _BookCard extends StatelessWidget {
             ],
           ),
         ),
-        trailing: isDownloading
-            ? IconButton(
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isDownloading)
+              IconButton(
                 tooltip: 'Отменить скачивание',
                 onPressed: onCancelDownload,
                 icon: const Icon(Icons.cancel_outlined),
               )
-            : IconButton(
+            else
+              IconButton(
                 tooltip: book.isDownloaded ? 'Читать' : 'Скачать на это устройство',
                 onPressed: book.isDownloaded ? onOpen : onDownload,
                 icon: Icon(book.isDownloaded
                     ? Icons.menu_book_rounded
                     : Icons.cloud_download_outlined),
               ),
+            PopupMenuButton<_BookAction>(
+              tooltip: 'Действия с книгой',
+              onSelected: (action) {
+                switch (action) {
+                  case _BookAction.removeLocalCopy:
+                    onRemoveLocalCopy?.call();
+                    break;
+                  case _BookAction.deleteFromLibrary:
+                    onDeleteFromLibrary();
+                    break;
+                }
+              },
+              itemBuilder: (context) => [
+                if (book.isDownloaded)
+                  const PopupMenuItem(
+                    value: _BookAction.removeLocalCopy,
+                    child: Text('Удалить файл с этого устройства'),
+                  ),
+                const PopupMenuItem(
+                  value: _BookAction.deleteFromLibrary,
+                  child: Text('Удалить из библиотеки'),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
 }
+
+enum _BookAction { removeLocalCopy, deleteFromLibrary }
 
 class ReaderScreen extends StatefulWidget {
   const ReaderScreen({
@@ -1227,12 +1334,66 @@ class _SyncScreenState extends State<SyncScreen> {
     );
   }
 
+
+  Future<void> _removeTrustedDevice(TrustedDeviceRecord device) async {
+    final manifest = _manifest;
+    if (manifest == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Удалить устройство?'),
+        content: Text(
+          'Устройство «${device.name}» будет скрыто из списка доверенных. Если оно подключится заново через QR-код/код, запись появится снова.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Удалить'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      final updated = await widget.storage.removeTrustedDevice(device.deviceId);
+      await widget.sync.broadcastLibrarySnapshot(reason: 'trusted_device_removed');
+      if (!mounted) return;
+      setState(() => _manifest = updated);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Не удалось удалить устройство: $error')),
+      );
+    }
+  }
+
+  Future<void> _pruneTrustedDevices() async {
+    try {
+      final updated = await widget.storage.pruneDeletedTrustedDevices();
+      if (!mounted) return;
+      setState(() => _manifest = updated);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Список устройств очищен')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Не удалось очистить список: $error')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final manifest = _manifest;
     if (manifest == null || _settings == null) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
+    final hiddenTrustedDevices = manifest.trustedDevices.where((device) => device.isDeleted).length;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Синхронизация')),
@@ -1467,18 +1628,38 @@ class _SyncScreenState extends State<SyncScreen> {
               ),
               _SectionCard(
                 title: 'Доверенные устройства',
-                child: manifest.trustedDevices.isEmpty
+                child: manifest.activeTrustedDevices.isEmpty
                     ? const Text('Пока только текущее устройство')
                     : Column(
-                        children: manifest.trustedDevices.map((device) {
-                          final isCurrent = device.deviceId == manifest.deviceId;
-                          return ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            leading: Icon(isCurrent ? Icons.phone_iphone_rounded : Icons.devices_rounded),
-                            title: Text('${device.name}${isCurrent ? ' • это устройство' : ''}'),
-                            subtitle: Text('${device.role} • ${device.deviceId}'),
-                          );
-                        }).toList(),
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Удалённые устройства скрываются из списка и синхронизируются как отозванные. Текущее устройство удалить нельзя.${hiddenTrustedDevices > 0 ? ' Скрытых записей: $hiddenTrustedDevices.' : ''}',
+                          ),
+                          const SizedBox(height: 8),
+                          ...manifest.activeTrustedDevices.map((device) {
+                            final isCurrent = device.deviceId == manifest.deviceId;
+                            return ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(isCurrent ? Icons.phone_iphone_rounded : Icons.devices_rounded),
+                              title: Text('${device.name}${isCurrent ? ' • это устройство' : ''}'),
+                              subtitle: Text('${device.role} • ${device.deviceId}'),
+                              trailing: isCurrent
+                                  ? null
+                                  : IconButton(
+                                      tooltip: 'Удалить устройство из списка',
+                                      icon: const Icon(Icons.delete_outline_rounded),
+                                      onPressed: () => _removeTrustedDevice(device),
+                                    ),
+                            );
+                          }),
+                          const SizedBox(height: 8),
+                          OutlinedButton.icon(
+                            onPressed: _pruneTrustedDevices,
+                            icon: const Icon(Icons.cleaning_services_outlined),
+                            label: const Text('Очистить скрытые записи'),
+                          ),
+                        ],
                       ),
               ),
               _SectionCard(

@@ -89,6 +89,7 @@ class BookImportService {
             contentSha256: sha,
             localPath: destinationPath,
             availableOnDeviceIds: availableOn,
+            clearDeletedAt: true,
             updatedAt: DateTime.now().toUtc(),
           );
     await _storage.upsertBook(book);
