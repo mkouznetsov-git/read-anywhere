@@ -978,6 +978,11 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     }
   }
 
+  double _progressForBlock(int blockIndex, int blockCount) => _Fb2Locator(
+        blockIndex: blockIndex.clamp(0, blockCount <= 0 ? 0 : blockCount - 1).toInt(),
+        blockCount: blockCount,
+      ).progressPercent;
+
   int _targetBlockForBook(BookRecord book, int blockCount) {
     if (blockCount <= 0) return 0;
     try {
