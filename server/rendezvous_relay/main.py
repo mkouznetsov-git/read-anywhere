@@ -9,8 +9,9 @@ from typing import DefaultDict, Dict
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
+from starlette.websockets import WebSocketState
 
-app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.1.5")
+app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.1.6")
 
 # In-memory only. The relay intentionally stores no books and writes nothing to
 # disk. Sprint 3 hotfix 2 keeps the latest *metadata snapshots* in RAM so a newly
@@ -274,9 +275,30 @@ async def _send_text_safely(
     message: str,
     account_id: str | None = None,
 ) -> None:
+    # Disconnects are expected during reconnects, mobile app backgrounding and
+    # Tailscale/Funnel network changes. Do not let a stale peer make the relay
+    # print a full ASGI traceback while broadcasting peer_left/snapshot events.
     try:
+        if peer.client_state == WebSocketState.DISCONNECTED:
+            raise WebSocketDisconnect(code=1005)
         await peer.send_text(message)
-    except RuntimeError:
+    except Exception as exc:  # Starlette/uvicorn/websockets use different disconnect exceptions.
+        name = exc.__class__.__name__
+        module = exc.__class__.__module__
+        is_disconnect = (
+            isinstance(exc, (RuntimeError, WebSocketDisconnect))
+            or name in {
+                'ClientDisconnected',
+                'ConnectionClosed',
+                'ConnectionClosedOK',
+                'ConnectionClosedError',
+            }
+            or 'websockets.' in module
+        )
+        if not is_disconnect:
+            raise
         if account_id is not None:
             async with _lock:
-                _rooms[account_id].pop(peer, None)
+                room = _rooms.get(account_id)
+                if room is not None:
+                    room.pop(peer, None)

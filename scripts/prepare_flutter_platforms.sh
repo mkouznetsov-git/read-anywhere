@@ -71,4 +71,32 @@ if [[ -f "$IOS_PLIST" && -x /usr/libexec/PlistBuddy ]]; then
     /usr/libexec/PlistBuddy -c "Set :NSCameraUsageDescription ReadAnywhere uses the camera to scan pairing QR codes." "$IOS_PLIST" || true
 fi
 
+
+
+# ReadAnywhere custom app icon. flutter create regenerates platform folders, so copy
+# the committed icon set after platform generation.
+ICON_ROOT="$ROOT_DIR/assets/app_icon"
+if [[ -d "$ICON_ROOT/android" ]]; then
+  for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+    src="$ICON_ROOT/android/ic_launcher_${density}.png"
+    dst="android/app/src/main/res/mipmap-${density}/ic_launcher.png"
+    if [[ -f "$src" && -d "$(dirname "$dst")" ]]; then
+      cp "$src" "$dst"
+    fi
+  done
+fi
+
+if [[ -d "$ICON_ROOT/macos" ]]; then
+  MACOS_ICON_SET="macos/Runner/Assets.xcassets/AppIcon.appiconset"
+  if [[ -d "$MACOS_ICON_SET" ]]; then
+    for size in 16 32 64 128 256 512 1024; do
+      src="$ICON_ROOT/macos/app_icon_${size}.png"
+      dst="$MACOS_ICON_SET/app_icon_${size}.png"
+      if [[ -f "$src" ]]; then
+        cp "$src" "$dst"
+      fi
+    done
+  fi
+fi
+
 echo "Flutter platform preparation complete."

@@ -1666,6 +1666,7 @@ String? _attr(String attrs, String name) {
   return singleQuoted == null ? null : _decodeXmlEntities(singleQuoted.group(1) ?? '').trim();
 }
 
+
 class _PdfReaderScreen extends StatefulWidget {
   const _PdfReaderScreen({required this.book, required this.storage, required this.sync});
 
@@ -1769,18 +1770,41 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
     });
   }
 
-  Future<void> _savePage(int page) async {
+  String _pdfLocatorJson(int page) {
     final pages = _pages > 0 ? _pages : (_controller?.pagesCount ?? 0);
-    final progress = pages <= 1 ? 0.0 : (((page - 1) / (pages - 1)) * 100).clamp(0.0, 100.0).toDouble();
-    final locator = jsonEncode({
+    final progress = _pdfProgress(page);
+    return jsonEncode({
       'type': 'pdf-page-v1',
       'page': page,
       'pages': pages,
       'progressPercent': progress,
       'updatedAt': DateTime.now().toUtc().toIso8601String(),
     });
-    await widget.storage.updateProgress(bookId: widget.book.id, progressPercent: progress, locator: locator);
+  }
+
+  double _pdfProgress(int page) {
+    final pages = _pages > 0 ? _pages : (_controller?.pagesCount ?? 0);
+    return pages <= 1 ? 0.0 : (((page - 1) / (pages - 1)) * 100).clamp(0.0, 100.0).toDouble();
+  }
+
+  Future<void> _savePage(int page) async {
+    await widget.storage.updateProgress(
+      bookId: widget.book.id,
+      progressPercent: _pdfProgress(page),
+      locator: _pdfLocatorJson(page),
+    );
     await widget.sync.broadcastLibrarySnapshot(reason: 'pdf_progress_updated');
+  }
+
+  Future<void> _addBookmark() async {
+    await widget.storage.addBookmark(
+      bookId: widget.book.id,
+      label: 'Закладка PDF, стр. $_page ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
+      locator: _pdfLocatorJson(_page),
+    );
+    await widget.sync.broadcastLibrarySnapshot(reason: 'bookmark_added');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Закладка добавлена')));
   }
 
   @override
@@ -1797,14 +1821,31 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                   onPressed: () => setState(() => _fullScreen = true),
                   icon: const Icon(Icons.fullscreen_rounded),
                 ),
+                IconButton(
+                  tooltip: 'Добавить закладку',
+                  onPressed: controller != null ? _addBookmark : null,
+                  icon: const Icon(Icons.bookmark_add_outlined),
+                ),
               ],
             ),
       floatingActionButton: _fullScreen
-          ? FloatingActionButton.small(
-              heroTag: 'pdf-exit-fullscreen-${widget.book.id}',
-              tooltip: 'Выйти из полного экрана',
-              onPressed: () => setState(() => _fullScreen = false),
-              child: const Icon(Icons.fullscreen_exit_rounded),
+          ? Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FloatingActionButton.small(
+                  heroTag: 'pdf-bookmark-${widget.book.id}',
+                  tooltip: 'Добавить закладку',
+                  onPressed: controller != null ? _addBookmark : null,
+                  child: const Icon(Icons.bookmark_add_outlined),
+                ),
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                  heroTag: 'pdf-exit-fullscreen-${widget.book.id}',
+                  tooltip: 'Выйти из полного экрана',
+                  onPressed: () => setState(() => _fullScreen = false),
+                  child: const Icon(Icons.fullscreen_exit_rounded),
+                ),
+              ],
             )
           : null,
       body: _loadError != null

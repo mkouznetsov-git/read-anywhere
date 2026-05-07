@@ -335,3 +335,7 @@ TXT-reader переведён на один обычный вертикальн�
 ## Sprint 12 update
 
 Добавлены стабильный FB2 progress locator `fb2-unit-anchor-v1`, выделение/копирование текста TXT/FB2, копирование FB2-изображений как data URI, открытие внешних FB2-ссылок в браузере и fullscreen для TXT/FB2/PDF.
+
+## Sprint 12 Hotfix 01
+
+Исправлен relay-лог при штатных WebSocket disconnect/reconnect, добавлены PDF-закладки и новая тёплая иконка приложения ReadAnywhere. См. `docs/sprint_12_hotfix_01_relay_bookmarks_icon_ru.md`.
