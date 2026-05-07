@@ -339,3 +339,7 @@ TXT-reader переведён на один обычный вертикальн�
 ## Sprint 12 Hotfix 01
 
 Исправлен relay-лог при штатных WebSocket disconnect/reconnect, добавлены PDF-закладки и новая тёплая иконка приложения ReadAnywhere. См. `docs/sprint_12_hotfix_01_relay_bookmarks_icon_ru.md`.
+
+## Sprint 13 hotfix
+
+Исправлены FB2-locator и восстановление позиции чтения: FB2 теперь сохраняет `fb2-unit-anchor-v2` с `blockIndex + unitInBlock`, а не только абсолютный индекс. Для FB2-scroll добавлен `itemExtentBuilder`, чтобы уменьшить скачки scrollbar на macOS. Передача файлов стала использовать chunks 2 MiB и показывает примерную скорость MB/s.

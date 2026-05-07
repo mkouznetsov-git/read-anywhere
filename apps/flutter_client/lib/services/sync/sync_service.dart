@@ -17,7 +17,7 @@ import 'merge.dart';
 import 'relay_client.dart';
 
 const _uuid = Uuid();
-const _defaultChunkSize = 1024 * 1024; // Larger chunks: faster over relay, still JSON/base64-safe for MVP.
+const _defaultChunkSize = 2 * 1024 * 1024; // Sprint 13: fewer encrypted JSON frames for faster MVP relay transfers.
 
 class PairingInvite {
   const PairingInvite({
@@ -1084,6 +1084,7 @@ class SyncService {
     await raf.setPosition(startOffset);
     var chunkIndex = safeStartChunkIndex;
     var sentBytes = startOffset;
+    final transferStartedAt = DateTime.now();
     try {
       while (true) {
         if (_cancelledTransfers.contains(transferId)) {
@@ -1113,12 +1114,14 @@ class SyncService {
           ),
         );
         final progress = size == 0 ? 100.0 : (sentBytes / size) * 100;
+        final elapsed = DateTime.now().difference(transferStartedAt).inMilliseconds.clamp(1, 1 << 31);
+        final mbps = ((sentBytes - startOffset) / (1024 * 1024)) / (elapsed / 1000.0);
         _updateTransferByKey(
           uploadKey,
           state.value.fileTransfers[uploadKey]!.copyWith(
                 progressPercent: progress.clamp(0, 100).toDouble(),
                 transferredBytes: sentBytes,
-                statusText: 'Отправка: ${progress.clamp(0, 100).toStringAsFixed(1)}%',
+                statusText: 'Отправка: ${progress.clamp(0, 100).toStringAsFixed(1)}% • ${mbps.toStringAsFixed(1)} MB/s',
               ),
         );
         chunkIndex += 1;
@@ -1193,9 +1196,11 @@ class SyncService {
 
       final totalBytes = session.expectedBytes;
       final progress = totalBytes <= 0 ? 0.0 : (session.receivedBytes / totalBytes) * 100;
+      final elapsed = DateTime.now().difference(session.startedAt).inMilliseconds.clamp(1, 1 << 31);
+      final mbps = (session.receivedBytes / (1024 * 1024)) / (elapsed / 1000.0);
       _setDownloadSnapshot(
         state.value.downloadForBook(session.bookId)!.copyWith(
-              statusText: 'Скачивание: ${progress.clamp(0, 100).toStringAsFixed(1)}%',
+              statusText: 'Скачивание: ${progress.clamp(0, 100).toStringAsFixed(1)}% • ${mbps.toStringAsFixed(1)} MB/s',
               progressPercent: progress.clamp(0, 100).toDouble(),
               transferredBytes: session.receivedBytes,
               totalBytes: totalBytes,
@@ -1449,4 +1454,5 @@ class _DownloadSession {
   int expectedChunkIndex = 0;
   int receivedBytes = 0;
   int? totalChunks;
+  final DateTime startedAt = DateTime.now();
 }

@@ -944,10 +944,9 @@ class _Fb2ReaderScreen extends StatefulWidget {
 }
 
 class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
-  // FB2 reader v2: the progress anchor is no longer derived from render boxes.
-  // We build deterministic fixed-height render units, calculate offsets ourselves,
-  // and save the first unit touching the top of the viewport. This repeats the
-  // stable TXT approach while preserving FB2 images and links.
+  // FB2 reader v3: deterministic render units with exact extents.
+  // The saved locator is blockIndex + unitInBlock, so reopening does not depend
+  // on platform-specific scroll metrics or old absolute unit indices.
   static const _fontSize = 18.0;
   static const _heightFactor = 1.55;
   static const _lineExtent = _fontSize * _heightFactor;
@@ -970,6 +969,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
   List<_Fb2RenderUnit>? _units;
   List<double> _unitOffsets = const [];
   double _lastUsableWidth = 0;
+  _Fb2UnitLocator? _lastKnownLocator;
   String? _loadError;
   Timer? _saveDebounce;
   Timer? _layoutDebounce;
@@ -995,7 +995,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     _layoutDebounce?.cancel();
     _saveDebounce?.cancel();
     _progressRedrawThrottle?.cancel();
-    final locator = _currentLocator();
+    final locator = _currentLocator() ?? _lastKnownLocator;
     if (locator != null) unawaited(_saveProgress(locator));
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
@@ -1040,22 +1040,23 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     final usableWidth = (maxWidth - (_horizontalReaderPadding * 2)).clamp(180.0, 2000.0).toDouble();
     if (_units != null && (usableWidth - _lastUsableWidth).abs() < 8) return;
 
-    final current = _currentLocator()?.unitIndex ?? _pendingUnitIndex;
+    final current = _currentLocator() ?? _lastKnownLocator;
+    final built = _buildFb2RenderUnits(document, usableWidth);
+    final units = built.isEmpty ? [_Fb2RenderUnit.text(const [_Fb2LineSegment('')], 0, 0, false)] : built;
+    final target = _didInitialRestore && current != null
+        ? _targetUnitForLocator(current, units)
+        : _targetUnitForBook(_book, units);
+
     _layoutDebounce?.cancel();
-    _layoutDebounce = Timer(const Duration(milliseconds: 90), () {
-      if (!mounted) return;
-      final built = _buildFb2RenderUnits(document, usableWidth);
-      final units = built.isEmpty ? [_Fb2RenderUnit.text(const [_Fb2LineSegment('')], 0, false)] : built;
-      final target = _targetUnitForBook(_book, units);
-      setState(() {
-        _units = units;
-        _unitOffsets = _buildFb2UnitOffsets(units);
-        _lastUsableWidth = usableWidth;
-        _pendingUnitIndex = _didInitialRestore ? current.clamp(0, units.length - 1).toInt() : target;
-        _progress = _Fb2UnitLocator(unitIndex: _pendingUnitIndex, unitCount: units.length).progressPercent;
-      });
-      _scheduleRestoreScroll();
+    setState(() {
+      _units = units;
+      _unitOffsets = _buildFb2UnitOffsets(units);
+      _lastUsableWidth = usableWidth;
+      _pendingUnitIndex = target.clamp(0, units.length - 1).toInt();
+      _lastKnownLocator = _locatorForUnit(_pendingUnitIndex);
+      _progress = _lastKnownLocator?.progressPercent ?? 0;
     });
+    _scheduleRestoreScroll();
   }
 
   int _targetUnitForBook(BookRecord book, List<_Fb2RenderUnit> units) {
@@ -1064,6 +1065,15 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
       final decoded = jsonDecode(book.currentLocator);
       if (decoded is Map) {
         final type = decoded['type'];
+        if (type == 'fb2-unit-anchor-v2') {
+          final blockIndex = (decoded['blockIndex'] as num?)?.round();
+          final unitInBlock = (decoded['unitInBlock'] as num?)?.round();
+          if (blockIndex != null && unitInBlock != null) {
+            final idx = units.indexWhere((unit) => unit.blockIndex == blockIndex && unit.unitInBlock == unitInBlock);
+            if (idx >= 0) return idx;
+          }
+          return ((decoded['unitIndex'] as num?)?.round() ?? 0).clamp(0, units.length - 1).toInt();
+        }
         if (type == 'fb2-unit-anchor-v1') {
           return ((decoded['unitIndex'] as num?)?.round() ?? 0).clamp(0, units.length - 1).toInt();
         }
@@ -1082,23 +1092,39 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     return ((progress / 100.0) * (units.length - 1)).round().clamp(0, units.length - 1).toInt();
   }
 
+  int _targetUnitForLocator(_Fb2UnitLocator locator, List<_Fb2RenderUnit> units) {
+    final idx = units.indexWhere((unit) => unit.blockIndex == locator.blockIndex && unit.unitInBlock == locator.unitInBlock);
+    if (idx >= 0) return idx;
+    return locator.unitIndex.clamp(0, units.length - 1).toInt();
+  }
+
   void _scheduleRestoreScroll() {
     final units = _units;
     if (units == null || units.isEmpty) return;
     _restoringPosition = true;
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       try {
-        for (var attempt = 0; attempt < 16; attempt++) {
+        final target = _offsetForUnit(_pendingUnitIndex);
+        var jumped = false;
+        for (var attempt = 0; attempt < 20; attempt++) {
           await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 16 : 35));
           if (!mounted || !_scrollController.hasClients) continue;
-          final target = _offsetForUnit(_pendingUnitIndex);
-          _scrollController.jumpTo(target.clamp(0.0, _scrollController.position.maxScrollExtent));
-          final locator = _currentLocator();
-          _progress = locator?.progressPercent ?? _progress;
-          _didInitialRestore = true;
-          if (mounted) setState(() {});
+          final position = _scrollController.position;
+          if (!position.hasContentDimensions) continue;
+          final max = position.maxScrollExtent;
+          if (target > max + 4 && attempt < 12) continue;
+          _scrollController.jumpTo(target.clamp(0.0, max));
+          jumped = true;
           break;
         }
+        if (!jumped && mounted && _scrollController.hasClients) {
+          _scrollController.jumpTo(_offsetForUnit(_pendingUnitIndex).clamp(0.0, _scrollController.position.maxScrollExtent));
+        }
+        final locator = _currentLocator() ?? _locatorForUnit(_pendingUnitIndex);
+        _lastKnownLocator = locator;
+        _progress = locator?.progressPercent ?? _progress;
+        _didInitialRestore = true;
+        if (mounted) setState(() {});
       } finally {
         _restoringPosition = false;
       }
@@ -1109,13 +1135,26 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     final units = _units;
     if (units == null || units.isEmpty) return null;
     if (!_scrollController.hasClients) {
-      return _Fb2UnitLocator(unitIndex: _pendingUnitIndex.clamp(0, units.length - 1).toInt(), unitCount: units.length);
+      return _locatorForUnit(_pendingUnitIndex.clamp(0, units.length - 1).toInt());
     }
     if (_scrollController.position.maxScrollExtent <= 0 || _scrollController.position.extentAfter <= 8) {
-      return _Fb2UnitLocator(unitIndex: units.length - 1, unitCount: units.length);
+      return _locatorForUnit(units.length - 1);
     }
     final unitIndex = _unitIndexForOffset(_scrollController.offset).clamp(0, units.length - 1).toInt();
-    return _Fb2UnitLocator(unitIndex: unitIndex, unitCount: units.length);
+    return _locatorForUnit(unitIndex);
+  }
+
+  _Fb2UnitLocator? _locatorForUnit(int unitIndex) {
+    final units = _units;
+    if (units == null || units.isEmpty) return null;
+    final safe = unitIndex.clamp(0, units.length - 1).toInt();
+    final unit = units[safe];
+    return _Fb2UnitLocator(
+      unitIndex: safe,
+      unitCount: units.length,
+      blockIndex: unit.blockIndex,
+      unitInBlock: unit.unitInBlock,
+    );
   }
 
   int _unitIndexForOffset(double offset) {
@@ -1145,6 +1184,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     if (_restoringPosition || !_didInitialRestore || !_scrollController.hasClients) return;
     final locator = _currentLocator();
     if (locator == null) return;
+    _lastKnownLocator = locator;
     _progress = locator.progressPercent;
     if (!(_progressRedrawThrottle?.isActive ?? false)) {
       _progressRedrawThrottle = Timer(const Duration(milliseconds: 80), () {
@@ -1158,6 +1198,8 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
   }
 
   Future<void> _saveProgress(_Fb2UnitLocator locator) async {
+    _lastKnownLocator = locator;
+    _progress = locator.progressPercent;
     final manifest = await widget.storage.updateProgress(
       bookId: widget.book.id,
       progressPercent: locator.progressPercent,
@@ -1265,33 +1307,29 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
                           if (currentUnits == null) {
                             return const Center(child: CircularProgressIndicator());
                           }
-                          return SelectionArea(
-                            child: Scrollbar(
+                          return Scrollbar(
+                            controller: _scrollController,
+                            thumbVisibility: true,
+                            interactive: true,
+                            child: ListView.builder(
                               controller: _scrollController,
-                              thumbVisibility: true,
-                              interactive: true,
-                              child: ListView.builder(
-                                controller: _scrollController,
-                                padding: const EdgeInsets.fromLTRB(
-                                  _horizontalReaderPadding,
-                                  _topPadding,
-                                  _horizontalReaderPadding,
-                                  _bottomPadding,
-                                ),
-                                cacheExtent: _lineExtent * 80,
-                                itemCount: currentUnits.length,
-                                itemBuilder: (context, index) {
-                                  final unit = currentUnits[index];
-                                  return SizedBox(
-                                    height: unit.extent,
-                                    child: _Fb2UnitView(
-                                      unit: unit,
-                                      onOpenLink: _openExternalLink,
-                                      onCopyImage: _copyImageDataUri,
-                                    ),
-                                  );
-                                },
+                              padding: const EdgeInsets.fromLTRB(
+                                _horizontalReaderPadding,
+                                _topPadding,
+                                _horizontalReaderPadding,
+                                _bottomPadding,
                               ),
+                              cacheExtent: _lineExtent * 120,
+                              itemExtentBuilder: (index, dimensions) => currentUnits[index].extent,
+                              itemCount: currentUnits.length,
+                              itemBuilder: (context, index) {
+                                final unit = currentUnits[index];
+                                return _Fb2UnitView(
+                                  unit: unit,
+                                  onOpenLink: _openExternalLink,
+                                  onCopyImage: _copyImageDataUri,
+                                );
+                              },
                             ),
                           );
                         },
@@ -1359,11 +1397,8 @@ class _Fb2UnitView extends StatelessWidget {
         : _Fb2ReaderScreenState._textStyle;
     return Align(
       alignment: Alignment.centerLeft,
-      child: RichText(
-        maxLines: 1,
-        overflow: TextOverflow.clip,
-        softWrap: false,
-        text: TextSpan(
+      child: SelectableText.rich(
+        TextSpan(
           style: style,
           children: unit.segments.map((segment) {
             final href = segment.href;
@@ -1375,6 +1410,7 @@ class _Fb2UnitView extends StatelessWidget {
             );
           }).toList(),
         ),
+        maxLines: 1,
       ),
     );
   }
@@ -1387,11 +1423,11 @@ class _Fb2LineSegment {
 }
 
 class _Fb2RenderUnit {
-  const _Fb2RenderUnit.text(this.segments, this.blockIndex, this.isTitle)
+  const _Fb2RenderUnit.text(this.segments, this.blockIndex, this.unitInBlock, this.isTitle)
       : imageBytes = null,
         extent = isTitle ? _Fb2ReaderScreenState._titleExtent : _Fb2ReaderScreenState._lineExtent;
 
-  const _Fb2RenderUnit.image(this.imageBytes, this.blockIndex)
+  const _Fb2RenderUnit.image(this.imageBytes, this.blockIndex, this.unitInBlock)
       : segments = const [],
         isTitle = false,
         extent = _Fb2ReaderScreenState._imageExtent;
@@ -1399,14 +1435,23 @@ class _Fb2RenderUnit {
   final List<_Fb2LineSegment> segments;
   final Uint8List? imageBytes;
   final int blockIndex;
+  final int unitInBlock;
   final bool isTitle;
   final double extent;
 }
 
 class _Fb2UnitLocator {
-  const _Fb2UnitLocator({required this.unitIndex, required this.unitCount});
+  const _Fb2UnitLocator({
+    required this.unitIndex,
+    required this.unitCount,
+    required this.blockIndex,
+    required this.unitInBlock,
+  });
+
   final int unitIndex;
   final int unitCount;
+  final int blockIndex;
+  final int unitInBlock;
 
   double get progressPercent {
     if (unitCount <= 1) return unitCount == 1 && unitIndex > 0 ? 100 : 0;
@@ -1414,9 +1459,11 @@ class _Fb2UnitLocator {
   }
 
   String toJsonString() => jsonEncode({
-        'type': 'fb2-unit-anchor-v1',
+        'type': 'fb2-unit-anchor-v2',
         'unitIndex': unitIndex,
         'unitCount': unitCount,
+        'blockIndex': blockIndex,
+        'unitInBlock': unitInBlock,
         'progressPercent': progressPercent,
         'updatedAt': DateTime.now().toUtc().toIso8601String(),
       });
@@ -1430,7 +1477,7 @@ List<_Fb2RenderUnit> _buildFb2RenderUnits(_Fb2Document document, double usableWi
     switch (block.kind) {
       case _Fb2BlockKind.image:
         final bytes = block.imageBytes;
-        if (bytes != null && bytes.isNotEmpty) units.add(_Fb2RenderUnit.image(bytes, blockIndex));
+        if (bytes != null && bytes.isNotEmpty) units.add(_Fb2RenderUnit.image(bytes, blockIndex, 0));
         break;
       case _Fb2BlockKind.title:
         units.addAll(_wrapFb2Segments([_Fb2LineSegment(block.plainText)], blockIndex, true, charsPerLine));
@@ -1448,11 +1495,15 @@ List<_Fb2RenderUnit> _wrapFb2Segments(List<_Fb2LineSegment> source, int blockInd
   final result = <_Fb2RenderUnit>[];
   final current = <_Fb2LineSegment>[];
   var currentLen = 0;
+  var unitInBlock = 0;
 
   void flush() {
     if (current.isEmpty) return;
     final normalized = current.where((segment) => segment.text.isNotEmpty).toList();
-    if (normalized.isNotEmpty) result.add(_Fb2RenderUnit.text(List.unmodifiable(normalized), blockIndex, isTitle));
+    if (normalized.isNotEmpty) {
+      result.add(_Fb2RenderUnit.text(List.unmodifiable(normalized), blockIndex, unitInBlock, isTitle));
+      unitInBlock += 1;
+    }
     current.clear();
     currentLen = 0;
   }

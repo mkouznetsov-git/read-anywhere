@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketState
 
-app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.1.6")
+app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.1.7")
 
 # In-memory only. The relay intentionally stores no books and writes nothing to
 # disk. Sprint 3 hotfix 2 keeps the latest *metadata snapshots* in RAM so a newly
@@ -21,7 +21,7 @@ _rooms: DefaultDict[str, Dict[WebSocket, str]] = defaultdict(dict)
 _snapshot_cache: DefaultDict[str, Dict[str, str]] = defaultdict(dict)
 _pairing_codes: Dict[str, dict] = {}
 _lock = asyncio.Lock()
-MAX_MESSAGE_BYTES = 1024 * 1024 * 8  # 8 MB; production should use binary chunks.
+MAX_MESSAGE_BYTES = 1024 * 1024 * 16  # 16 MB; large E2E JSON/base64 chunks for MVP file transfer.
 MAX_CACHED_SNAPSHOT_BYTES = 1024 * 1024  # metadata only; book chunks are never cached.
 PAIRING_TTL_SECONDS = 5 * 60
 
