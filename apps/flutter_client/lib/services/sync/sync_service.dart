@@ -17,7 +17,7 @@ import 'merge.dart';
 import 'relay_client.dart';
 
 const _uuid = Uuid();
-const _defaultChunkSize = 2 * 1024 * 1024; // Sprint 13: fewer encrypted JSON frames for faster MVP relay transfers.
+const _defaultChunkSize = 512 * 1024; // Sprint 14: smaller ACKed chunks are more stable on mobile/Funnel WebSockets.
 
 class PairingInvite {
   const PairingInvite({
@@ -183,6 +183,7 @@ class SyncService {
   StreamSubscription<void>? _incomingSubscription;
   final _manifestChanges = StreamController<LibraryManifest>.broadcast();
   final _downloadsByTransferId = <String, _DownloadSession>{};
+  final _uploadAckWaiters = <String, Completer<void>>{};
   final _uploadLocks = <String>{};
   final _cancelledTransfers = <String>{};
   final _seenSecureEventIds = <String, DateTime>{};
@@ -654,32 +655,50 @@ class SyncService {
       ),
     );
 
-    unawaited(Future<void>.delayed(const Duration(seconds: 12), () async {
+    // Requests can be lost exactly while a mobile client or Tailscale Funnel is
+    // reconnecting. Send the same idempotent request a few times until an offer
+    // is received, then fail with a clear reason instead of hanging silently.
+    Future<bool> sendRequest({String? label}) => _sendEnvelope(
+          SyncEnvelope(
+            type: 'book_file_requested',
+            accountId: manifest.accountId,
+            deviceId: manifest.deviceId,
+            payload: {
+              'transferId': transferId,
+              'bookId': book.id,
+              'requestingDeviceId': manifest.deviceId,
+              'fileName': book.fileName,
+              'expectedSha256': book.contentSha256,
+              'expectedSizeBytes': book.sizeBytes,
+              'preferredChunkSize': _defaultChunkSize,
+            },
+          ),
+          logLabel: label,
+        );
+
+    for (final delay in const [Duration(seconds: 5), Duration(seconds: 12)]) {
+      unawaited(Future<void>.delayed(delay, () async {
+        final current = _downloadsByTransferId[transferId];
+        if (current == null || current.sourceDeviceId != null) return;
+        _setDownloadSnapshot(
+          state.value.downloadForBook(current.bookId)!.copyWith(
+                statusText: 'Повторяем поиск источника...',
+                active: true,
+              ),
+        );
+        await sendRequest();
+      }));
+    }
+
+    unawaited(Future<void>.delayed(const Duration(seconds: 30), () async {
       final current = _downloadsByTransferId[transferId];
       if (current == null) return;
       if (current.sourceDeviceId == null) {
-        await _failDownload(
-          current,
-          'Хранилище книги не в сети',
-        );
+        await _failDownload(current, 'Источник не найден: устройство с книгой не ответило');
       }
     }));
 
-    final envelope = SyncEnvelope(
-      type: 'book_file_requested',
-      accountId: manifest.accountId,
-      deviceId: manifest.deviceId,
-      payload: {
-        'transferId': transferId,
-        'bookId': book.id,
-        'requestingDeviceId': manifest.deviceId,
-        'fileName': book.fileName,
-        'expectedSha256': book.contentSha256,
-        'expectedSizeBytes': book.sizeBytes,
-        'preferredChunkSize': _defaultChunkSize,
-      },
-    );
-    return _sendEnvelope(envelope, logLabel: 'Запрошен файл: ${book.title}');
+    return sendRequest(label: 'Запрошен файл: ${book.title}');
   }
 
   Future<void> cancelBookFileDownload(String bookId) async {
@@ -816,6 +835,9 @@ class SyncService {
         break;
       case 'book_file_chunk':
         await _handleBookFileChunk(decryptedEnvelope, local);
+        break;
+      case 'book_file_chunk_ack':
+        await _handleBookFileChunkAck(decryptedEnvelope, local);
         break;
       case 'book_file_error':
         await _handleBookFileError(decryptedEnvelope, local);
@@ -1008,6 +1030,7 @@ class SyncService {
         },
       ),
     );
+    _resetDownloadWatchdog(session);
     _appendLog('Принят источник файла: $sourceDeviceId');
   }
 
@@ -1084,6 +1107,7 @@ class SyncService {
     await raf.setPosition(startOffset);
     var chunkIndex = safeStartChunkIndex;
     var sentBytes = startOffset;
+    var failed = false;
     final transferStartedAt = DateTime.now();
     try {
       while (true) {
@@ -1094,7 +1118,10 @@ class SyncService {
         final data = await raf.read(safeChunkSize);
         if (data.isEmpty) break;
         sentBytes += data.length;
-        await _sendEnvelope(
+        final ackKey = _ackKey(transferId, chunkIndex);
+        final ackCompleter = Completer<void>();
+        _uploadAckWaiters[ackKey] = ackCompleter;
+        final sent = await _sendEnvelope(
           SyncEnvelope(
             type: 'book_file_chunk',
             accountId: local.accountId,
@@ -1113,6 +1140,20 @@ class SyncService {
             },
           ),
         );
+        if (!sent) {
+          failed = true;
+          _uploadAckWaiters.remove(ackKey);
+          await _sendFileError(local, transferId, bookId, requestingDeviceId, 'Не удалось отправить chunk $chunkIndex');
+          break;
+        }
+        try {
+          await ackCompleter.future.timeout(const Duration(seconds: 15));
+        } on TimeoutException {
+          failed = true;
+          _uploadAckWaiters.remove(ackKey);
+          await _sendFileError(local, transferId, bookId, requestingDeviceId, 'Получатель не подтвердил chunk $chunkIndex');
+          break;
+        }
         final progress = size == 0 ? 100.0 : (sentBytes / size) * 100;
         final elapsed = DateTime.now().difference(transferStartedAt).inMilliseconds.clamp(1, 1 << 31);
         final mbps = ((sentBytes - startOffset) / (1024 * 1024)) / (elapsed / 1000.0);
@@ -1130,16 +1171,21 @@ class SyncService {
         }
       }
       final wasCancelled = _cancelledTransfers.remove(transferId);
+      final existingTransfer = state.value.fileTransfers[uploadKey]!;
       _updateTransferByKey(
         uploadKey,
-        state.value.fileTransfers[uploadKey]!.copyWith(
-              progressPercent: wasCancelled ? state.value.fileTransfers[uploadKey]!.progressPercent : 100,
-              transferredBytes: wasCancelled ? state.value.fileTransfers[uploadKey]!.transferredBytes : size,
-              statusText: wasCancelled ? 'Отправка отменена' : 'Файл отправлен',
+        existingTransfer.copyWith(
+              progressPercent: (wasCancelled || failed) ? existingTransfer.progressPercent : 100,
+              transferredBytes: (wasCancelled || failed) ? existingTransfer.transferredBytes : size,
+              statusText: wasCancelled
+                  ? 'Отправка отменена'
+                  : failed
+                      ? 'Отправка прервана'
+                      : 'Файл отправлен',
               active: false,
             ),
       );
-      if (!wasCancelled) {
+      if (!wasCancelled && !failed) {
         _appendLog('Файл отправлен: ${book.title}');
       }
     } catch (error) {
@@ -1208,8 +1254,26 @@ class SyncService {
             ),
       );
 
+      _resetDownloadWatchdog(session);
+      await _sendEnvelope(
+        SyncEnvelope(
+          type: 'book_file_chunk_ack',
+          accountId: local.accountId,
+          deviceId: local.deviceId,
+          payload: {
+            'transferId': transferId,
+            'bookId': session.bookId,
+            'sourceDeviceId': session.sourceDeviceId,
+            'requestingDeviceId': local.deviceId,
+            'chunkIndex': chunkIndex,
+            'receivedBytes': session.receivedBytes,
+          },
+        ),
+      );
+
       final totalChunks = session.totalChunks;
       if (totalChunks != null && session.expectedChunkIndex >= totalChunks) {
+        session.watchdog?.cancel();
         await _finalizeDownload(session);
       }
     } catch (error) {
@@ -1258,6 +1322,33 @@ class SyncService {
     await broadcastLibrarySnapshot(reason: 'book_file_downloaded');
   }
 
+
+  Future<void> _handleBookFileChunkAck(
+    SyncEnvelope envelope,
+    LibraryManifest local,
+  ) async {
+    final payload = envelope.payload;
+    if (payload['sourceDeviceId'] != local.deviceId) return;
+    final transferId = payload['transferId'] as String?;
+    final chunkIndex = (payload['chunkIndex'] as num?)?.toInt();
+    if (transferId == null || chunkIndex == null) return;
+    final completer = _uploadAckWaiters.remove(_ackKey(transferId, chunkIndex));
+    if (completer != null && !completer.isCompleted) {
+      completer.complete();
+    }
+  }
+
+  String _ackKey(String transferId, int chunkIndex) => '$transferId:$chunkIndex';
+
+  void _resetDownloadWatchdog(_DownloadSession session) {
+    session.watchdog?.cancel();
+    session.watchdog = Timer(const Duration(seconds: 25), () {
+      final current = _downloadsByTransferId[session.transferId];
+      if (current == null || current.sourceDeviceId == null) return;
+      unawaited(_failDownload(current, 'Источник перестал отвечать во время скачивания'));
+    });
+  }
+
   Future<void> _handleBookFileError(
     SyncEnvelope envelope,
     LibraryManifest local,
@@ -1276,6 +1367,7 @@ class SyncService {
     String message, {
     bool deletePartial = false,
   }) async {
+    session.watchdog?.cancel();
     if (deletePartial) {
       await _deletePartial(session);
     }
@@ -1454,5 +1546,6 @@ class _DownloadSession {
   int expectedChunkIndex = 0;
   int receivedBytes = 0;
   int? totalChunks;
+  Timer? watchdog;
   final DateTime startedAt = DateTime.now();
 }

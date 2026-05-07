@@ -1061,35 +1061,53 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
 
   int _targetUnitForBook(BookRecord book, List<_Fb2RenderUnit> units) {
     if (units.isEmpty) return 0;
+    final progress = book.progressPercent.clamp(0.0, 100.0).toDouble();
+    int byProgress() => ((progress / 100.0) * (units.length - 1)).round().clamp(0, units.length - 1).toInt();
+
     try {
       final decoded = jsonDecode(book.currentLocator);
       if (decoded is Map) {
         final type = decoded['type'];
-        if (type == 'fb2-unit-anchor-v2') {
+        final locatorProgress = (decoded['progressPercent'] as num?)?.toDouble();
+        // If manifest.progressPercent and currentLocator disagree, trust the
+        // progress field. This recovers old states where FB2 saved a newer
+        // percentage but kept an older locator, causing reopen at e.g. 4.3%.
+        if (locatorProgress != null && (locatorProgress - progress).abs() > 0.75) {
+          return byProgress();
+        }
+
+        if (type == 'fb2-unit-anchor-v3' || type == 'fb2-unit-anchor-v2') {
+          final unitIndex = (decoded['unitIndex'] as num?)?.round();
+          final unitCount = (decoded['unitCount'] as num?)?.round();
+          if (unitIndex != null && unitCount != null && unitCount > 0) {
+            final ratioDiff = ((unitCount - units.length).abs() / units.length).abs();
+            if (ratioDiff < 0.04) {
+              return unitIndex.clamp(0, units.length - 1).toInt();
+            }
+          }
           final blockIndex = (decoded['blockIndex'] as num?)?.round();
           final unitInBlock = (decoded['unitInBlock'] as num?)?.round();
           if (blockIndex != null && unitInBlock != null) {
             final idx = units.indexWhere((unit) => unit.blockIndex == blockIndex && unit.unitInBlock == unitInBlock);
             if (idx >= 0) return idx;
           }
-          return ((decoded['unitIndex'] as num?)?.round() ?? 0).clamp(0, units.length - 1).toInt();
+          return byProgress();
         }
         if (type == 'fb2-unit-anchor-v1') {
-          return ((decoded['unitIndex'] as num?)?.round() ?? 0).clamp(0, units.length - 1).toInt();
+          return ((decoded['unitIndex'] as num?)?.round() ?? byProgress()).clamp(0, units.length - 1).toInt();
         }
         if (type == 'fb2-block-anchor-v1') {
           final blockIndex = ((decoded['blockIndex'] as num?)?.round() ?? 0).clamp(0, 1000000).toInt();
           final idx = units.indexWhere((unit) => unit.blockIndex >= blockIndex);
-          return (idx < 0 ? units.length - 1 : idx).clamp(0, units.length - 1).toInt();
+          return (idx < 0 ? byProgress() : idx).clamp(0, units.length - 1).toInt();
         }
         if (type == 'fb2-line-anchor-v1') {
-          final lineIndex = ((decoded['lineIndex'] as num?)?.round() ?? 0).clamp(0, units.length - 1).toInt();
+          final lineIndex = ((decoded['lineIndex'] as num?)?.round() ?? byProgress()).clamp(0, units.length - 1).toInt();
           return lineIndex;
         }
       }
     } catch (_) {}
-    final progress = book.progressPercent.clamp(0.0, 100.0).toDouble();
-    return ((progress / 100.0) * (units.length - 1)).round().clamp(0, units.length - 1).toInt();
+    return byProgress();
   }
 
   int _targetUnitForLocator(_Fb2UnitLocator locator, List<_Fb2RenderUnit> units) {
@@ -1154,6 +1172,9 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
       unitCount: units.length,
       blockIndex: unit.blockIndex,
       unitInBlock: unit.unitInBlock,
+      scrollOffset: _scrollController.hasClients ? _scrollController.offset : null,
+      totalExtent: _unitOffsets.isEmpty ? null : (_unitOffsets.last + units.last.extent + _bottomPadding),
+      usableWidth: _lastUsableWidth,
     );
   }
 
@@ -1366,28 +1387,31 @@ class _Fb2UnitView extends StatelessWidget {
   Widget build(BuildContext context) {
     if (unit.imageBytes != null) {
       final bytes = unit.imageBytes!;
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        child: Stack(
-          children: [
-            Center(
-              child: Image.memory(
-                bytes,
-                fit: BoxFit.contain,
-                height: _Fb2ReaderScreenState._imageExtent - 16,
-                errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined),
+      return SizedBox(
+        height: unit.extent,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Stack(
+            children: [
+              Center(
+                child: Image.memory(
+                  bytes,
+                  fit: BoxFit.contain,
+                  height: _Fb2ReaderScreenState._imageExtent - 16,
+                  errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined),
+                ),
               ),
-            ),
-            Positioned(
-              right: 0,
-              top: 0,
-              child: IconButton.filledTonal(
-                tooltip: 'Копировать изображение',
-                onPressed: () => onCopyImage(bytes),
-                icon: const Icon(Icons.copy_rounded, size: 18),
+              Positioned(
+                right: 0,
+                top: 0,
+                child: IconButton.filledTonal(
+                  tooltip: 'Копировать изображение',
+                  onPressed: () => onCopyImage(bytes),
+                  icon: const Icon(Icons.copy_rounded, size: 18),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       );
     }
@@ -1395,22 +1419,25 @@ class _Fb2UnitView extends StatelessWidget {
     final style = unit.isTitle
         ? const TextStyle(fontSize: 19, height: 1.45, fontWeight: FontWeight.w700, color: Color(0xFF2F261F))
         : _Fb2ReaderScreenState._textStyle;
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: SelectableText.rich(
-        TextSpan(
-          style: style,
-          children: unit.segments.map((segment) {
-            final href = segment.href;
-            if (href == null || href.isEmpty) return TextSpan(text: segment.text);
-            return TextSpan(
-              text: segment.text,
-              style: _Fb2ReaderScreenState._linkStyle,
-              recognizer: TapGestureRecognizer()..onTap = () => onOpenLink(href),
-            );
-          }).toList(),
+    return SizedBox(
+      height: unit.extent,
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: SelectableText.rich(
+          TextSpan(
+            style: style,
+            children: unit.segments.map((segment) {
+              final href = segment.href;
+              if (href == null || href.isEmpty) return TextSpan(text: segment.text);
+              return TextSpan(
+                text: segment.text,
+                style: _Fb2ReaderScreenState._linkStyle,
+                recognizer: TapGestureRecognizer()..onTap = () => onOpenLink(href),
+              );
+            }).toList(),
+          ),
+          maxLines: 1,
         ),
-        maxLines: 1,
       ),
     );
   }
@@ -1446,12 +1473,18 @@ class _Fb2UnitLocator {
     required this.unitCount,
     required this.blockIndex,
     required this.unitInBlock,
+    this.scrollOffset,
+    this.totalExtent,
+    this.usableWidth,
   });
 
   final int unitIndex;
   final int unitCount;
   final int blockIndex;
   final int unitInBlock;
+  final double? scrollOffset;
+  final double? totalExtent;
+  final double? usableWidth;
 
   double get progressPercent {
     if (unitCount <= 1) return unitCount == 1 && unitIndex > 0 ? 100 : 0;
@@ -1459,11 +1492,14 @@ class _Fb2UnitLocator {
   }
 
   String toJsonString() => jsonEncode({
-        'type': 'fb2-unit-anchor-v2',
+        'type': 'fb2-unit-anchor-v3',
         'unitIndex': unitIndex,
         'unitCount': unitCount,
         'blockIndex': blockIndex,
         'unitInBlock': unitInBlock,
+        'scrollOffset': scrollOffset,
+        'totalExtent': totalExtent,
+        'usableWidth': usableWidth,
         'progressPercent': progressPercent,
         'updatedAt': DateTime.now().toUtc().toIso8601String(),
       });
