@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:pdfx/pdfx.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'models/book.dart';
 import 'models/manifest.dart';
@@ -876,31 +877,33 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
                           if (currentLines == null) {
                             return const Center(child: CircularProgressIndicator());
                           }
-                          return Scrollbar(
-                            controller: _scrollController,
-                            thumbVisibility: true,
-                            interactive: true,
-                            child: ListView.builder(
+                          return SelectionArea(
+                            child: Scrollbar(
                               controller: _scrollController,
-                              padding: const EdgeInsets.fromLTRB(
-                                _horizontalReaderPadding,
-                                _topPadding,
-                                _horizontalReaderPadding,
-                                _bottomPadding,
+                              thumbVisibility: true,
+                              interactive: true,
+                              child: ListView.builder(
+                                controller: _scrollController,
+                                padding: const EdgeInsets.fromLTRB(
+                                  _horizontalReaderPadding,
+                                  _topPadding,
+                                  _horizontalReaderPadding,
+                                  _bottomPadding,
+                                ),
+                                itemExtent: _lineExtent,
+                                cacheExtent: _lineExtent * 60,
+                                itemCount: currentLines.length,
+                                itemBuilder: (context, index) {
+                                  final line = currentLines[index];
+                                  return Text(
+                                    line.text,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.clip,
+                                    softWrap: false,
+                                    style: _readerTextStyle,
+                                  );
+                                },
                               ),
-                              itemExtent: _lineExtent,
-                              cacheExtent: _lineExtent * 60,
-                              itemCount: currentLines.length,
-                              itemBuilder: (context, index) {
-                                final line = currentLines[index];
-                                return Text(
-                                  line.text,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.clip,
-                                  softWrap: false,
-                                  style: _readerTextStyle,
-                                );
-                              },
                             ),
                           );
                         },
@@ -928,6 +931,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
 }
 
 
+
 class _Fb2ReaderScreen extends StatefulWidget {
   const _Fb2ReaderScreen({required this.book, required this.storage, required this.sync});
 
@@ -940,16 +944,39 @@ class _Fb2ReaderScreen extends StatefulWidget {
 }
 
 class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
+  // FB2 reader v2: the progress anchor is no longer derived from render boxes.
+  // We build deterministic fixed-height render units, calculate offsets ourselves,
+  // and save the first unit touching the top of the viewport. This repeats the
+  // stable TXT approach while preserving FB2 images and links.
+  static const _fontSize = 18.0;
+  static const _heightFactor = 1.55;
+  static const _lineExtent = _fontSize * _heightFactor;
+  static const _titleExtent = 38.0;
+  static const _imageExtent = 300.0;
+  static const _horizontalReaderPadding = 22.0;
+  static const _topPadding = 18.0;
+  static const _bottomPadding = 28.0;
+  static const _textStyle = TextStyle(fontSize: _fontSize, height: _heightFactor, color: Color(0xFF2F261F));
+  static const _linkStyle = TextStyle(
+    fontSize: _fontSize,
+    height: _heightFactor,
+    color: Color(0xFF7A4E1D),
+    decoration: TextDecoration.underline,
+  );
+
   final _scrollController = ScrollController();
   BookRecord? _runtimeBook;
   _Fb2Document? _document;
+  List<_Fb2RenderUnit>? _units;
+  List<double> _unitOffsets = const [];
+  double _lastUsableWidth = 0;
   String? _loadError;
   Timer? _saveDebounce;
+  Timer? _layoutDebounce;
   Timer? _progressRedrawThrottle;
-  final _fb2ViewportKey = GlobalKey();
-  List<GlobalKey> _blockKeys = const [];
   double _progress = 0;
-  int _targetBlockIndex = 0;
+  int _pendingUnitIndex = 0;
+  bool _restoringPosition = false;
   bool _didInitialRestore = false;
   bool _fullScreen = false;
 
@@ -965,6 +992,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
 
   @override
   void dispose() {
+    _layoutDebounce?.cancel();
     _saveDebounce?.cancel();
     _progressRedrawThrottle?.cancel();
     final locator = _currentLocator();
@@ -995,140 +1023,141 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     try {
       final xml = _decodeTextFile(await file.readAsBytes());
       final document = _parseFb2Document(xml);
-      final target = _targetBlockForBook(book, document.blocks.length);
       if (!mounted) return;
       setState(() {
         _runtimeBook = book;
         _document = document;
-        _blockKeys = List<GlobalKey>.generate(document.blocks.length, (_) => GlobalKey());
-        _targetBlockIndex = target;
-        _progress = _progressForBlock(target, document.blocks.length);
         _loadError = null;
       });
-      _scheduleInitialRestore();
     } catch (error) {
       if (mounted) setState(() => _loadError = 'Не удалось открыть FB2: $error');
     }
   }
 
-  double _progressForBlock(int blockIndex, int blockCount) => _Fb2Locator(
-        blockIndex: blockIndex.clamp(0, blockCount <= 0 ? 0 : blockCount - 1).toInt(),
-        blockCount: blockCount,
-      ).progressPercent;
+  void _ensureUnitsForWidth(double maxWidth) {
+    final document = _document;
+    if (document == null) return;
+    final usableWidth = (maxWidth - (_horizontalReaderPadding * 2)).clamp(180.0, 2000.0).toDouble();
+    if (_units != null && (usableWidth - _lastUsableWidth).abs() < 8) return;
 
-  int _targetBlockForBook(BookRecord book, int blockCount) {
-    if (blockCount <= 0) return 0;
-    try {
-      final decoded = jsonDecode(book.currentLocator);
-      if (decoded is Map && decoded['type'] == 'fb2-block-anchor-v1') {
-        return ((decoded['blockIndex'] as num?)?.round() ?? 0).clamp(0, blockCount - 1).toInt();
-      }
-      if (decoded is Map && decoded['type'] == 'fb2-line-anchor-v1') {
-        final lineIndex = ((decoded['lineIndex'] as num?)?.round() ?? 0).clamp(0, blockCount - 1).toInt();
-        return lineIndex;
-      }
-    } catch (_) {}
-    return ((book.progressPercent.clamp(0.0, 100.0) / 100.0) * (blockCount - 1))
-        .round()
-        .clamp(0, blockCount - 1)
-        .toInt();
+    final current = _currentLocator()?.unitIndex ?? _pendingUnitIndex;
+    _layoutDebounce?.cancel();
+    _layoutDebounce = Timer(const Duration(milliseconds: 90), () {
+      if (!mounted) return;
+      final built = _buildFb2RenderUnits(document, usableWidth);
+      final units = built.isEmpty ? [_Fb2RenderUnit.text(const [_Fb2LineSegment('')], 0, false)] : built;
+      final target = _targetUnitForBook(_book, units);
+      setState(() {
+        _units = units;
+        _unitOffsets = _buildFb2UnitOffsets(units);
+        _lastUsableWidth = usableWidth;
+        _pendingUnitIndex = _didInitialRestore ? current.clamp(0, units.length - 1).toInt() : target;
+        _progress = _Fb2UnitLocator(unitIndex: _pendingUnitIndex, unitCount: units.length).progressPercent;
+      });
+      _scheduleRestoreScroll();
+    });
   }
 
-  void _scheduleInitialRestore() {
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      for (var attempt = 0; attempt < 12; attempt++) {
-        await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 24 : 40));
-        if (!mounted || !_scrollController.hasClients) continue;
-        final document = _document;
-        if (document == null || document.blocks.isEmpty) return;
-        final approx = (_targetBlockIndex / document.blocks.length) * _scrollController.position.maxScrollExtent;
-        _scrollController.jumpTo(approx.clamp(0.0, _scrollController.position.maxScrollExtent));
-        await Future<void>.delayed(const Duration(milliseconds: 40));
-        final targetContext = _targetBlockIndex >= 0 && _targetBlockIndex < _blockKeys.length
-            ? _blockKeys[_targetBlockIndex].currentContext
-            : null;
-        if (targetContext != null && mounted) {
-          await Scrollable.ensureVisible(
-            targetContext,
-            alignment: 0,
-            duration: Duration.zero,
-          );
+  int _targetUnitForBook(BookRecord book, List<_Fb2RenderUnit> units) {
+    if (units.isEmpty) return 0;
+    try {
+      final decoded = jsonDecode(book.currentLocator);
+      if (decoded is Map) {
+        final type = decoded['type'];
+        if (type == 'fb2-unit-anchor-v1') {
+          return ((decoded['unitIndex'] as num?)?.round() ?? 0).clamp(0, units.length - 1).toInt();
         }
-        _didInitialRestore = true;
-        if (mounted) setState(() {});
-        return;
+        if (type == 'fb2-block-anchor-v1') {
+          final blockIndex = ((decoded['blockIndex'] as num?)?.round() ?? 0).clamp(0, 1000000).toInt();
+          final idx = units.indexWhere((unit) => unit.blockIndex >= blockIndex);
+          return (idx < 0 ? units.length - 1 : idx).clamp(0, units.length - 1).toInt();
+        }
+        if (type == 'fb2-line-anchor-v1') {
+          final lineIndex = ((decoded['lineIndex'] as num?)?.round() ?? 0).clamp(0, units.length - 1).toInt();
+          return lineIndex;
+        }
+      }
+    } catch (_) {}
+    final progress = book.progressPercent.clamp(0.0, 100.0).toDouble();
+    return ((progress / 100.0) * (units.length - 1)).round().clamp(0, units.length - 1).toInt();
+  }
+
+  void _scheduleRestoreScroll() {
+    final units = _units;
+    if (units == null || units.isEmpty) return;
+    _restoringPosition = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      try {
+        for (var attempt = 0; attempt < 16; attempt++) {
+          await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 16 : 35));
+          if (!mounted || !_scrollController.hasClients) continue;
+          final target = _offsetForUnit(_pendingUnitIndex);
+          _scrollController.jumpTo(target.clamp(0.0, _scrollController.position.maxScrollExtent));
+          final locator = _currentLocator();
+          _progress = locator?.progressPercent ?? _progress;
+          _didInitialRestore = true;
+          if (mounted) setState(() {});
+          break;
+        }
+      } finally {
+        _restoringPosition = false;
       }
     });
   }
 
+  _Fb2UnitLocator? _currentLocator() {
+    final units = _units;
+    if (units == null || units.isEmpty) return null;
+    if (!_scrollController.hasClients) {
+      return _Fb2UnitLocator(unitIndex: _pendingUnitIndex.clamp(0, units.length - 1).toInt(), unitCount: units.length);
+    }
+    if (_scrollController.position.maxScrollExtent <= 0 || _scrollController.position.extentAfter <= 8) {
+      return _Fb2UnitLocator(unitIndex: units.length - 1, unitCount: units.length);
+    }
+    final unitIndex = _unitIndexForOffset(_scrollController.offset).clamp(0, units.length - 1).toInt();
+    return _Fb2UnitLocator(unitIndex: unitIndex, unitCount: units.length);
+  }
+
+  int _unitIndexForOffset(double offset) {
+    final offsets = _unitOffsets;
+    final units = _units;
+    if (offsets.isEmpty || units == null || units.isEmpty) return 0;
+    var lo = 0;
+    var hi = offsets.length - 1;
+    while (lo <= hi) {
+      final mid = (lo + hi) >> 1;
+      if (offsets[mid] <= offset) {
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return hi.clamp(0, units.length - 1).toInt();
+  }
+
+  double _offsetForUnit(int unitIndex) {
+    if (_unitOffsets.isEmpty) return 0;
+    final safe = unitIndex.clamp(0, _unitOffsets.length - 1).toInt();
+    return _unitOffsets[safe];
+  }
+
   void _onScroll() {
-    if (!_didInitialRestore || !_scrollController.hasClients) return;
+    if (_restoringPosition || !_didInitialRestore || !_scrollController.hasClients) return;
     final locator = _currentLocator();
     if (locator == null) return;
     _progress = locator.progressPercent;
     if (!(_progressRedrawThrottle?.isActive ?? false)) {
-      _progressRedrawThrottle = Timer(const Duration(milliseconds: 90), () {
+      _progressRedrawThrottle = Timer(const Duration(milliseconds: 80), () {
         if (mounted) setState(() {});
       });
     }
     _saveDebounce?.cancel();
-    _saveDebounce = Timer(const Duration(milliseconds: 600), () {
+    _saveDebounce = Timer(const Duration(milliseconds: 450), () {
       unawaited(_saveProgress(locator));
     });
   }
 
-  _Fb2Locator? _currentLocator() {
-    final document = _document;
-    if (document == null || document.blocks.isEmpty) return null;
-    if (!_scrollController.hasClients) {
-      return _Fb2Locator(blockIndex: _targetBlockIndex, blockCount: document.blocks.length);
-    }
-    if (_scrollController.position.maxScrollExtent <= 0 || _scrollController.position.extentAfter <= 8) {
-      return _Fb2Locator(blockIndex: document.blocks.length - 1, blockCount: document.blocks.length);
-    }
-    final topIndex = _topVisibleFb2BlockIndex(document.blocks.length);
-    return _Fb2Locator(blockIndex: topIndex, blockCount: document.blocks.length);
-  }
-
-  int _topVisibleFb2BlockIndex(int blockCount) {
-    if (blockCount <= 0) return 0;
-    final viewportContext = _fb2ViewportKey.currentContext;
-    if (viewportContext != null) {
-      final viewportBox = viewportContext.findRenderObject();
-      if (viewportBox is RenderBox && viewportBox.hasSize) {
-        final viewportTop = viewportBox.localToGlobal(Offset.zero).dy;
-        final viewportBottom = viewportTop + viewportBox.size.height;
-        int? firstBelowTop;
-        double firstBelowDistance = double.infinity;
-
-        for (var i = 0; i < _blockKeys.length; i++) {
-          final context = _blockKeys[i].currentContext;
-          if (context == null) continue;
-          final render = context.findRenderObject();
-          if (render is! RenderBox || !render.hasSize) continue;
-          final top = render.localToGlobal(Offset.zero).dy;
-          final bottom = top + render.size.height;
-          if (bottom <= viewportTop + 1 || top >= viewportBottom) continue;
-          if (top <= viewportTop + 2 && bottom > viewportTop + 2) {
-            return i.clamp(0, blockCount - 1).toInt();
-          }
-          final distance = (top - viewportTop).abs();
-          if (top >= viewportTop && distance < firstBelowDistance) {
-            firstBelowDistance = distance;
-            firstBelowTop = i;
-          }
-        }
-        if (firstBelowTop != null) return firstBelowTop.clamp(0, blockCount - 1).toInt();
-      }
-    }
-
-    final max = _scrollController.position.maxScrollExtent;
-    final ratio = max <= 0 ? 0.0 : (_scrollController.offset / max).clamp(0.0, 1.0);
-    return (ratio * (blockCount - 1)).round().clamp(0, blockCount - 1).toInt();
-  }
-
-
-  Future<void> _saveProgress(_Fb2Locator locator) async {
+  Future<void> _saveProgress(_Fb2UnitLocator locator) async {
     final manifest = await widget.storage.updateProgress(
       bookId: widget.book.id,
       progressPercent: locator.progressPercent,
@@ -1155,9 +1184,30 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Закладка добавлена')));
   }
 
+  Future<void> _copyImageDataUri(Uint8List bytes) async {
+    final encoded = base64Encode(bytes);
+    await Clipboard.setData(ClipboardData(text: 'data:image/*;base64,$encoded'));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Изображение скопировано как data URI')));
+  }
+
+  Future<void> _openExternalLink(String href) async {
+    final uri = Uri.tryParse(href.trim());
+    if (uri == null || !uri.hasScheme) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Внутренняя ссылка: $href')));
+      return;
+    }
+    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось открыть ссылку: $href')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final document = _document;
+    final units = _units;
     return Scaffold(
       appBar: _fullScreen
           ? null
@@ -1171,7 +1221,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
                 ),
                 IconButton(
                   tooltip: 'Добавить закладку',
-                  onPressed: document != null ? _addBookmark : null,
+                  onPressed: units != null ? _addBookmark : null,
                   icon: const Icon(Icons.bookmark_add_outlined),
                 ),
               ],
@@ -1183,7 +1233,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
                 FloatingActionButton.small(
                   heroTag: 'fb2-bookmark-${widget.book.id}',
                   tooltip: 'Добавить закладку',
-                  onPressed: document != null ? _addBookmark : null,
+                  onPressed: units != null ? _addBookmark : null,
                   child: const Icon(Icons.bookmark_add_outlined),
                 ),
                 const SizedBox(height: 8),
@@ -1208,22 +1258,43 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
               : Column(
                   children: [
                     Expanded(
-                      child: KeyedSubtree(
-                        key: _fb2ViewportKey,
-                        child: Scrollbar(
-                          controller: _scrollController,
-                          thumbVisibility: true,
-                          interactive: true,
-                          child: ListView.builder(
-                            controller: _scrollController,
-                            padding: const EdgeInsets.fromLTRB(22, 18, 22, 28),
-                            itemCount: document.blocks.length,
-                            itemBuilder: (context, index) => KeyedSubtree(
-                              key: index < _blockKeys.length ? _blockKeys[index] : null,
-                              child: _Fb2BlockView(block: document.blocks[index]),
+                      child: LayoutBuilder(
+                        builder: (context, constraints) {
+                          _ensureUnitsForWidth(constraints.maxWidth);
+                          final currentUnits = _units;
+                          if (currentUnits == null) {
+                            return const Center(child: CircularProgressIndicator());
+                          }
+                          return SelectionArea(
+                            child: Scrollbar(
+                              controller: _scrollController,
+                              thumbVisibility: true,
+                              interactive: true,
+                              child: ListView.builder(
+                                controller: _scrollController,
+                                padding: const EdgeInsets.fromLTRB(
+                                  _horizontalReaderPadding,
+                                  _topPadding,
+                                  _horizontalReaderPadding,
+                                  _bottomPadding,
+                                ),
+                                cacheExtent: _lineExtent * 80,
+                                itemCount: currentUnits.length,
+                                itemBuilder: (context, index) {
+                                  final unit = currentUnits[index];
+                                  return SizedBox(
+                                    height: unit.extent,
+                                    child: _Fb2UnitView(
+                                      unit: unit,
+                                      onOpenLink: _openExternalLink,
+                                      onCopyImage: _copyImageDataUri,
+                                    ),
+                                  );
+                                },
+                              ),
                             ),
-                          ),
-                        ),
+                          );
+                        },
                       ),
                     ),
                     if (!_fullScreen)
@@ -1245,57 +1316,184 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
   }
 }
 
-class _Fb2BlockView extends StatelessWidget {
-  const _Fb2BlockView({required this.block});
 
-  final _Fb2Block block;
+class _Fb2UnitView extends StatelessWidget {
+  const _Fb2UnitView({required this.unit, required this.onOpenLink, required this.onCopyImage});
+
+  final _Fb2RenderUnit unit;
+  final ValueChanged<String> onOpenLink;
+  final ValueChanged<Uint8List> onCopyImage;
 
   @override
   Widget build(BuildContext context) {
+    if (unit.imageBytes != null) {
+      final bytes = unit.imageBytes!;
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Stack(
+          children: [
+            Center(
+              child: Image.memory(
+                bytes,
+                fit: BoxFit.contain,
+                height: _Fb2ReaderScreenState._imageExtent - 16,
+                errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined),
+              ),
+            ),
+            Positioned(
+              right: 0,
+              top: 0,
+              child: IconButton.filledTonal(
+                tooltip: 'Копировать изображение',
+                onPressed: () => onCopyImage(bytes),
+                icon: const Icon(Icons.copy_rounded, size: 18),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final style = unit.isTitle
+        ? const TextStyle(fontSize: 19, height: 1.45, fontWeight: FontWeight.w700, color: Color(0xFF2F261F))
+        : _Fb2ReaderScreenState._textStyle;
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: RichText(
+        maxLines: 1,
+        overflow: TextOverflow.clip,
+        softWrap: false,
+        text: TextSpan(
+          style: style,
+          children: unit.segments.map((segment) {
+            final href = segment.href;
+            if (href == null || href.isEmpty) return TextSpan(text: segment.text);
+            return TextSpan(
+              text: segment.text,
+              style: _Fb2ReaderScreenState._linkStyle,
+              recognizer: TapGestureRecognizer()..onTap = () => onOpenLink(href),
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+}
+
+class _Fb2LineSegment {
+  const _Fb2LineSegment(this.text, {this.href});
+  final String text;
+  final String? href;
+}
+
+class _Fb2RenderUnit {
+  const _Fb2RenderUnit.text(this.segments, this.blockIndex, this.isTitle)
+      : imageBytes = null,
+        extent = isTitle ? _Fb2ReaderScreenState._titleExtent : _Fb2ReaderScreenState._lineExtent;
+
+  const _Fb2RenderUnit.image(this.imageBytes, this.blockIndex)
+      : segments = const [],
+        isTitle = false,
+        extent = _Fb2ReaderScreenState._imageExtent;
+
+  final List<_Fb2LineSegment> segments;
+  final Uint8List? imageBytes;
+  final int blockIndex;
+  final bool isTitle;
+  final double extent;
+}
+
+class _Fb2UnitLocator {
+  const _Fb2UnitLocator({required this.unitIndex, required this.unitCount});
+  final int unitIndex;
+  final int unitCount;
+
+  double get progressPercent {
+    if (unitCount <= 1) return unitCount == 1 && unitIndex > 0 ? 100 : 0;
+    return ((unitIndex / (unitCount - 1)) * 100).clamp(0.0, 100.0).toDouble();
+  }
+
+  String toJsonString() => jsonEncode({
+        'type': 'fb2-unit-anchor-v1',
+        'unitIndex': unitIndex,
+        'unitCount': unitCount,
+        'progressPercent': progressPercent,
+        'updatedAt': DateTime.now().toUtc().toIso8601String(),
+      });
+}
+
+List<_Fb2RenderUnit> _buildFb2RenderUnits(_Fb2Document document, double usableWidth) {
+  final units = <_Fb2RenderUnit>[];
+  final charsPerLine = (usableWidth / (_Fb2ReaderScreenState._fontSize * 0.56)).floor().clamp(24, 140).toInt();
+  for (var blockIndex = 0; blockIndex < document.blocks.length; blockIndex++) {
+    final block = document.blocks[blockIndex];
     switch (block.kind) {
       case _Fb2BlockKind.image:
         final bytes = block.imageBytes;
-        if (bytes == null || bytes.isEmpty) return const SizedBox.shrink();
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 420),
-              child: Image.memory(bytes, fit: BoxFit.contain, errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined)),
-            ),
-          ),
-        );
+        if (bytes != null && bytes.isNotEmpty) units.add(_Fb2RenderUnit.image(bytes, blockIndex));
+        break;
       case _Fb2BlockKind.title:
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(0, 18, 0, 8),
-          child: Text(
-            block.plainText,
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
-          ),
-        );
+        units.addAll(_wrapFb2Segments([_Fb2LineSegment(block.plainText)], blockIndex, true, charsPerLine));
+        break;
       case _Fb2BlockKind.paragraph:
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 10),
-          child: RichText(
-            text: TextSpan(
-              style: const TextStyle(fontSize: 18, height: 1.55, color: Color(0xFF2F261F)),
-              children: block.inlines.map((inline) {
-                final href = inline.href;
-                if (href == null || href.isEmpty) return TextSpan(text: inline.text);
-                return TextSpan(
-                  text: inline.text,
-                  style: const TextStyle(decoration: TextDecoration.underline, color: Color(0xFF7A4E1D)),
-                  recognizer: TapGestureRecognizer()
-                    ..onTap = () {
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ссылка: $href')));
-                    },
-                );
-              }).toList(),
-            ),
-          ),
-        );
+        final segments = block.inlines.map((inline) => _Fb2LineSegment(inline.text, href: inline.href)).toList();
+        units.addAll(_wrapFb2Segments(segments, blockIndex, false, charsPerLine));
+        break;
     }
   }
+  return units;
+}
+
+List<_Fb2RenderUnit> _wrapFb2Segments(List<_Fb2LineSegment> source, int blockIndex, bool isTitle, int charsPerLine) {
+  final result = <_Fb2RenderUnit>[];
+  final current = <_Fb2LineSegment>[];
+  var currentLen = 0;
+
+  void flush() {
+    if (current.isEmpty) return;
+    final normalized = current.where((segment) => segment.text.isNotEmpty).toList();
+    if (normalized.isNotEmpty) result.add(_Fb2RenderUnit.text(List.unmodifiable(normalized), blockIndex, isTitle));
+    current.clear();
+    currentLen = 0;
+  }
+
+  for (final segment in source) {
+    var text = segment.text.replaceAll(RegExp(r'\s+'), ' ');
+    while (text.isNotEmpty) {
+      final remaining = charsPerLine - currentLen;
+      if (remaining <= 0) {
+        flush();
+        continue;
+      }
+      if (text.length <= remaining) {
+        current.add(_Fb2LineSegment(text, href: segment.href));
+        currentLen += text.length;
+        text = '';
+      } else {
+        var cut = text.lastIndexOf(' ', remaining);
+        if (cut <= 0 || cut < remaining * 0.45) cut = remaining;
+        final part = text.substring(0, cut).trimRight();
+        if (part.isNotEmpty) {
+          current.add(_Fb2LineSegment(part, href: segment.href));
+          currentLen += part.length;
+        }
+        flush();
+        text = text.substring(cut).trimLeft();
+      }
+    }
+  }
+  flush();
+  return result;
+}
+
+List<double> _buildFb2UnitOffsets(List<_Fb2RenderUnit> units) {
+  final offsets = <double>[];
+  var offset = _Fb2ReaderScreenState._topPadding;
+  for (final unit in units) {
+    offsets.add(offset);
+    offset += unit.extent;
+  }
+  return offsets;
 }
 
 enum _Fb2BlockKind { paragraph, title, image }
@@ -1486,6 +1684,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
   int _pages = 0;
   String? _loadError;
   Timer? _saveDebounce;
+  bool _fullScreen = false;
 
   BookRecord get _book => _runtimeBook ?? widget.book;
 
@@ -1588,9 +1787,26 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
   Widget build(BuildContext context) {
     final controller = _controller;
     return Scaffold(
-      appBar: AppBar(
-        title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-      ),
+      appBar: _fullScreen
+          ? null
+          : AppBar(
+              title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+              actions: [
+                IconButton(
+                  tooltip: 'Полный экран',
+                  onPressed: () => setState(() => _fullScreen = true),
+                  icon: const Icon(Icons.fullscreen_rounded),
+                ),
+              ],
+            ),
+      floatingActionButton: _fullScreen
+          ? FloatingActionButton.small(
+              heroTag: 'pdf-exit-fullscreen-${widget.book.id}',
+              tooltip: 'Выйти из полного экрана',
+              onPressed: () => setState(() => _fullScreen = false),
+              child: const Icon(Icons.fullscreen_exit_rounded),
+            )
+          : null,
       body: _loadError != null
           ? Center(
               child: Padding(
@@ -1611,22 +1827,23 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                         onPageChanged: _onPageChanged,
                       ),
                     ),
-                    SafeArea(
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: LinearProgressIndicator(
-                                value: _pages <= 1 ? 0 : ((_page - 1) / (_pages - 1)).clamp(0.0, 1.0).toDouble(),
+                    if (!_fullScreen)
+                      SafeArea(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: LinearProgressIndicator(
+                                  value: _pages <= 1 ? 0 : ((_page - 1) / (_pages - 1)).clamp(0.0, 1.0).toDouble(),
+                                ),
                               ),
-                            ),
-                            const SizedBox(width: 12),
-                            Text(_pages > 0 ? '$_page / $_pages' : '$_page'),
-                          ],
+                              const SizedBox(width: 12),
+                              Text(_pages > 0 ? '$_page / $_pages' : '$_page'),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
                   ],
                 ),
     );

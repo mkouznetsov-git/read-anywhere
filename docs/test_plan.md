@@ -222,3 +222,13 @@ macOS DMG/PKG build
 - При выключенном relay на старте приложения статус не должен прыгать между `Подключено` и `Relay недоступен`.
 - FB2: при прокрутке прогресс должен монотонно меняться по верхнему видимому блоку.
 - TXT/FB2: включить полноэкранный режим, убедиться, что скрыты панели и доступны только книга, scrollbar, закладка и выход из fullscreen.
+
+## Sprint 12 checks
+
+- FB2 progress does not jump randomly while scrolling.
+- FB2 progress shown in reader matches the library progress after closing the book.
+- FB2 position restores to the same logical unit after reopening.
+- FB2 external links open in the default browser/application.
+- TXT and FB2 text can be selected/copied.
+- FB2 images can be copied as data URI.
+- Fullscreen mode is available for TXT, FB2 and PDF.
