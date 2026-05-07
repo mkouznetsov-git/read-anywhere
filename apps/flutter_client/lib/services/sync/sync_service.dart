@@ -17,7 +17,7 @@ import 'merge.dart';
 import 'relay_client.dart';
 
 const _uuid = Uuid();
-const _defaultChunkSize = 256 * 1024; // JSON/base64-safe for the MVP relay.
+const _defaultChunkSize = 1024 * 1024; // Larger chunks: faster over relay, still JSON/base64-safe for MVP.
 
 class PairingInvite {
   const PairingInvite({
@@ -188,10 +188,20 @@ class SyncService {
   final _seenSecureEventIds = <String, DateTime>{};
   static const _replayWindow = Duration(hours: 24);
 
+  Timer? _reconnectTimer;
+  bool _manualDisconnect = true;
+  bool _reconnectInProgress = false;
+  int _reconnectAttempt = 0;
+  String? _lastRelayUrl;
+
   Stream<LibraryManifest> get manifestChanges => _manifestChanges.stream;
 
   Future<void> connect({required String relayUrl}) async {
-    await disconnect();
+    _manualDisconnect = false;
+    _lastRelayUrl = relayUrl;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    await disconnect(manual: false);
     _setState(
       state.value.copyWith(
         connected: false,
@@ -215,12 +225,21 @@ class SyncService {
         .listen(
       (_) {},
       onError: (error) {
-        _appendLog('Ошибка relay: $error');
-        _setState(state.value.copyWith(connected: false, statusText: 'Ошибка'));
+        unawaited(_handleRelayDisconnected(error));
       },
     );
 
-    await client.connect();
+    try {
+      await client.connect();
+    } catch (error) {
+      await disconnect(manual: false);
+      if (!_reconnectInProgress) {
+        _appendLog('Relay недоступен. Автопереподключение включено.');
+        _scheduleReconnect();
+      }
+      rethrow;
+    }
+    _reconnectAttempt = 0;
     _appendLog('Подключено к $relayUrl');
     _setState(
       state.value.copyWith(connected: true, statusText: 'Подключено'),
@@ -230,20 +249,73 @@ class SyncService {
     _scheduleStartupMetadataRefresh(client);
   }
 
-  Future<void> disconnect() async {
+  Future<void> disconnect({bool manual = true}) async {
+    if (manual) {
+      _manualDisconnect = true;
+      _reconnectTimer?.cancel();
+      _reconnectTimer = null;
+    }
     await _incomingSubscription?.cancel();
     _incomingSubscription = null;
     final client = _client;
     _client = null;
     await client?.dispose();
-    if (state.value.connected) {
+    if (manual && state.value.connected) {
       _appendLog('Отключено');
     }
     _setState(state.value.copyWith(
       connected: false,
-      statusText: 'Не подключено',
+      statusText: manual ? 'Не подключено' : 'Relay недоступен. Переподключаемся...',
       onlinePeerDeviceIds: const [],
     ));
+  }
+
+  Future<void> _handleRelayDisconnected(Object error) async {
+    if (_manualDisconnect) return;
+    await disconnect(manual: false);
+    if (_reconnectAttempt == 0) {
+      _appendLog('Relay недоступен. Автопереподключение включено.');
+    }
+    _scheduleReconnect();
+  }
+
+  void _scheduleReconnect() {
+    if (_manualDisconnect || _reconnectInProgress) return;
+    final relayUrl = _lastRelayUrl;
+    if (relayUrl == null || relayUrl.trim().isEmpty) return;
+    _reconnectTimer?.cancel();
+    final seconds = _reconnectDelaySeconds(_reconnectAttempt);
+    _setState(state.value.copyWith(
+      connected: false,
+      statusText: 'Relay недоступен. Повтор через ${seconds}с',
+      relayUrl: relayUrl,
+    ));
+    _reconnectTimer = Timer(Duration(seconds: seconds), () {
+      unawaited(_attemptReconnect(relayUrl));
+    });
+  }
+
+  int _reconnectDelaySeconds(int attempt) {
+    const delays = [2, 4, 8, 15, 30, 60];
+    return delays[attempt.clamp(0, delays.length - 1).toInt()];
+  }
+
+  Future<void> _attemptReconnect(String relayUrl) async {
+    if (_manualDisconnect || _reconnectInProgress) return;
+    _reconnectInProgress = true;
+    try {
+      _reconnectAttempt += 1;
+      await connect(relayUrl: relayUrl);
+      _appendLog('Автопереподключение выполнено');
+    } catch (_) {
+      // Не пишем каждую неудачную попытку в журнал: иначе он быстро
+      // превращается в шум при выключенном hub/relay. Текущий статус
+      // виден по иконке и строке состояния.
+      _reconnectInProgress = false;
+      _scheduleReconnect();
+      return;
+    }
+    _reconnectInProgress = false;
   }
 
   Future<void> refreshMetadata({required String reason}) async {
@@ -380,7 +452,7 @@ class SyncService {
       throw StateError('Relay вернул неполные pairing-данные');
     }
 
-    await disconnect();
+    await disconnect(manual: false);
     await _storage.saveSyncSettings(
       _settingsForClaimedRelayUrl(returnedRelayUrl, fallbackSettings).copyWith(autoConnect: true),
     );
@@ -941,7 +1013,7 @@ class SyncService {
     }
 
     final size = await file.length();
-    final safeChunkSize = chunkSize.clamp(64 * 1024, _defaultChunkSize).toInt();
+    final safeChunkSize = chunkSize.clamp(128 * 1024, _defaultChunkSize).toInt();
     final totalChunks = (size / safeChunkSize).ceil();
     final safeStartChunkIndex = startChunkIndex.clamp(0, totalChunks).toInt();
     final startOffset = (safeStartChunkIndex * safeChunkSize).clamp(0, size).toInt();
@@ -1006,7 +1078,9 @@ class SyncService {
               ),
         );
         chunkIndex += 1;
-        await Future<void>.delayed(const Duration(milliseconds: 4));
+        if (chunkIndex % 4 == 0) {
+          await Future<void>.delayed(Duration.zero);
+        }
       }
       final wasCancelled = _cancelledTransfers.remove(transferId);
       _updateTransferByKey(
@@ -1269,7 +1343,7 @@ class SyncService {
       return true;
     } catch (error) {
       _appendLog('Не удалось отправить ${envelope.type}: $error');
-      _setState(state.value.copyWith(connected: false, statusText: 'Ошибка'));
+      unawaited(_handleRelayDisconnected(error));
       return false;
     }
   }
@@ -1301,7 +1375,8 @@ class SyncService {
   }
 
   Future<void> dispose() async {
-    await disconnect();
+    await disconnect(manual: true);
+    _reconnectTimer?.cancel();
     await _manifestChanges.close();
     state.dispose();
   }

@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -475,12 +477,7 @@ class ReaderScreen extends StatelessWidget {
       case 'txt':
         return _TxtReaderScreen(book: book, storage: storage, sync: sync);
       case 'fb2':
-        return _TxtReaderScreen(
-          book: book,
-          storage: storage,
-          sync: sync,
-          sourceKind: _TextSourceKind.fb2,
-        );
+        return _Fb2ReaderScreen(book: book, storage: storage, sync: sync);
       case 'pdf':
         return _PdfReaderScreen(book: book, storage: storage, sync: sync);
       default:
@@ -899,6 +896,457 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
                 ),
     );
   }
+}
+
+
+class _Fb2ReaderScreen extends StatefulWidget {
+  const _Fb2ReaderScreen({required this.book, required this.storage, required this.sync});
+
+  final BookRecord book;
+  final StorageService storage;
+  final SyncService sync;
+
+  @override
+  State<_Fb2ReaderScreen> createState() => _Fb2ReaderScreenState();
+}
+
+class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
+  final _scrollController = ScrollController();
+  BookRecord? _runtimeBook;
+  _Fb2Document? _document;
+  String? _loadError;
+  Timer? _saveDebounce;
+  Timer? _progressRedrawThrottle;
+  double _progress = 0;
+  int _targetBlockIndex = 0;
+  bool _didInitialRestore = false;
+
+  BookRecord get _book => _runtimeBook ?? widget.book;
+
+  @override
+  void initState() {
+    super.initState();
+    _progress = widget.book.progressPercent;
+    _scrollController.addListener(_onScroll);
+    unawaited(_load());
+  }
+
+  @override
+  void dispose() {
+    _saveDebounce?.cancel();
+    _progressRedrawThrottle?.cancel();
+    final locator = _currentLocator();
+    if (locator != null) unawaited(_saveProgress(locator));
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final manifest = await widget.storage.loadManifest();
+    var book = widget.book;
+    for (final candidate in manifest.books) {
+      if (candidate.id == widget.book.id) {
+        book = candidate;
+        break;
+      }
+    }
+    if (book.localPath == null) {
+      if (mounted) setState(() => _loadError = 'Файл FB2 не скачан на это устройство');
+      return;
+    }
+    final file = File(book.localPath!);
+    if (!await file.exists()) {
+      if (mounted) setState(() => _loadError = 'Файл FB2 отсутствует: ${book.localPath}');
+      return;
+    }
+    try {
+      final xml = _decodeTextFile(await file.readAsBytes());
+      final document = _parseFb2Document(xml);
+      final target = _targetBlockForBook(book, document.blocks.length);
+      if (!mounted) return;
+      setState(() {
+        _runtimeBook = book;
+        _document = document;
+        _targetBlockIndex = target;
+        _progress = _progressForBlock(target, document.blocks.length);
+        _loadError = null;
+      });
+      _scheduleInitialRestore();
+    } catch (error) {
+      if (mounted) setState(() => _loadError = 'Не удалось открыть FB2: $error');
+    }
+  }
+
+  int _targetBlockForBook(BookRecord book, int blockCount) {
+    if (blockCount <= 0) return 0;
+    try {
+      final decoded = jsonDecode(book.currentLocator);
+      if (decoded is Map && decoded['type'] == 'fb2-block-anchor-v1') {
+        return ((decoded['blockIndex'] as num?)?.round() ?? 0).clamp(0, blockCount - 1).toInt();
+      }
+      if (decoded is Map && decoded['type'] == 'fb2-line-anchor-v1') {
+        final lineIndex = ((decoded['lineIndex'] as num?)?.round() ?? 0).clamp(0, blockCount - 1).toInt();
+        return lineIndex;
+      }
+    } catch (_) {}
+    return ((book.progressPercent.clamp(0.0, 100.0) / 100.0) * (blockCount - 1))
+        .round()
+        .clamp(0, blockCount - 1)
+        .toInt();
+  }
+
+  void _scheduleInitialRestore() {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      for (var attempt = 0; attempt < 12; attempt++) {
+        await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 24 : 40));
+        if (!mounted || !_scrollController.hasClients) continue;
+        final document = _document;
+        if (document == null || document.blocks.isEmpty) return;
+        final approx = (_targetBlockIndex / document.blocks.length) * _scrollController.position.maxScrollExtent;
+        _scrollController.jumpTo(approx.clamp(0.0, _scrollController.position.maxScrollExtent));
+        _didInitialRestore = true;
+        if (mounted) setState(() {});
+        return;
+      }
+    });
+  }
+
+  void _onScroll() {
+    if (!_didInitialRestore || !_scrollController.hasClients) return;
+    final locator = _currentLocator();
+    if (locator == null) return;
+    _progress = locator.progressPercent;
+    if (!(_progressRedrawThrottle?.isActive ?? false)) {
+      _progressRedrawThrottle = Timer(const Duration(milliseconds: 90), () {
+        if (mounted) setState(() {});
+      });
+    }
+    _saveDebounce?.cancel();
+    _saveDebounce = Timer(const Duration(milliseconds: 600), () {
+      unawaited(_saveProgress(locator));
+    });
+  }
+
+  _Fb2Locator? _currentLocator() {
+    final document = _document;
+    if (document == null || document.blocks.isEmpty) return null;
+    if (!_scrollController.hasClients) {
+      return _Fb2Locator(blockIndex: _targetBlockIndex, blockCount: document.blocks.length);
+    }
+    final max = _scrollController.position.maxScrollExtent;
+    if (max <= 0 || _scrollController.position.extentAfter <= 8) {
+      return _Fb2Locator(blockIndex: document.blocks.length - 1, blockCount: document.blocks.length);
+    }
+    final ratio = (_scrollController.offset / max).clamp(0.0, 1.0);
+    final index = (ratio * (document.blocks.length - 1)).round().clamp(0, document.blocks.length - 1).toInt();
+    return _Fb2Locator(blockIndex: index, blockCount: document.blocks.length);
+  }
+
+  Future<void> _saveProgress(_Fb2Locator locator) async {
+    final manifest = await widget.storage.updateProgress(
+      bookId: widget.book.id,
+      progressPercent: locator.progressPercent,
+      locator: locator.toJsonString(),
+    );
+    for (final book in manifest.books) {
+      if (book.id == widget.book.id) {
+        _runtimeBook = book;
+        break;
+      }
+    }
+    await widget.sync.broadcastLibrarySnapshot(reason: 'progress_updated');
+  }
+
+  Future<void> _addBookmark() async {
+    final locator = _currentLocator();
+    await widget.storage.addBookmark(
+      bookId: widget.book.id,
+      label: 'Закладка ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
+      locator: locator?.toJsonString() ?? _book.currentLocator,
+    );
+    await widget.sync.broadcastLibrarySnapshot(reason: 'bookmark_added');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Закладка добавлена')));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final document = _document;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+        actions: [
+          IconButton(
+            tooltip: 'Добавить закладку',
+            onPressed: document != null ? _addBookmark : null,
+            icon: const Icon(Icons.bookmark_add_outlined),
+          ),
+        ],
+      ),
+      body: _loadError != null
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(28),
+                child: Text(_loadError!, textAlign: TextAlign.center),
+              ),
+            )
+          : document == null
+              ? const Center(child: CircularProgressIndicator())
+              : Column(
+                  children: [
+                    Expanded(
+                      child: Scrollbar(
+                        controller: _scrollController,
+                        thumbVisibility: true,
+                        interactive: true,
+                        child: ListView.builder(
+                          controller: _scrollController,
+                          padding: const EdgeInsets.fromLTRB(22, 18, 22, 28),
+                          itemCount: document.blocks.length,
+                          itemBuilder: (context, index) => _Fb2BlockView(block: document.blocks[index]),
+                        ),
+                      ),
+                    ),
+                    SafeArea(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
+                        child: Row(
+                          children: [
+                            Expanded(child: LinearProgressIndicator(value: _progress.clamp(0, 100) / 100)),
+                            const SizedBox(width: 12),
+                            Text('${_progress.clamp(0, 100).toStringAsFixed(1)}%'),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+    );
+  }
+}
+
+class _Fb2BlockView extends StatelessWidget {
+  const _Fb2BlockView({required this.block});
+
+  final _Fb2Block block;
+
+  @override
+  Widget build(BuildContext context) {
+    switch (block.kind) {
+      case _Fb2BlockKind.image:
+        final bytes = block.imageBytes;
+        if (bytes == null || bytes.isEmpty) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 420),
+              child: Image.memory(bytes, fit: BoxFit.contain, errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined)),
+            ),
+          ),
+        );
+      case _Fb2BlockKind.title:
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(0, 18, 0, 8),
+          child: Text(
+            block.plainText,
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+          ),
+        );
+      case _Fb2BlockKind.paragraph:
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: RichText(
+            text: TextSpan(
+              style: const TextStyle(fontSize: 18, height: 1.55, color: Color(0xFF2F261F)),
+              children: block.inlines.map((inline) {
+                final href = inline.href;
+                if (href == null || href.isEmpty) return TextSpan(text: inline.text);
+                return TextSpan(
+                  text: inline.text,
+                  style: const TextStyle(decoration: TextDecoration.underline, color: Color(0xFF7A4E1D)),
+                  recognizer: TapGestureRecognizer()
+                    ..onTap = () {
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ссылка: $href')));
+                    },
+                );
+              }).toList(),
+            ),
+          ),
+        );
+    }
+  }
+}
+
+enum _Fb2BlockKind { paragraph, title, image }
+
+class _Fb2Inline {
+  const _Fb2Inline(this.text, {this.href});
+  final String text;
+  final String? href;
+}
+
+class _Fb2Block {
+  const _Fb2Block.paragraph(this.inlines)
+      : kind = _Fb2BlockKind.paragraph,
+        imageBytes = null,
+        _titleText = '';
+  const _Fb2Block.title(String text)
+      : kind = _Fb2BlockKind.title,
+        inlines = const [],
+        imageBytes = null,
+        _titleText = text;
+  const _Fb2Block.image(this.imageBytes)
+      : kind = _Fb2BlockKind.image,
+        inlines = const [],
+        _titleText = '';
+
+  final _Fb2BlockKind kind;
+  final List<_Fb2Inline> inlines;
+  final Uint8List? imageBytes;
+  final String _titleText;
+
+  String get plainText => kind == _Fb2BlockKind.title ? _titleText : inlines.map((item) => item.text).join();
+}
+
+class _Fb2Document {
+  const _Fb2Document(this.blocks);
+  final List<_Fb2Block> blocks;
+}
+
+class _Fb2Locator {
+  const _Fb2Locator({required this.blockIndex, required this.blockCount});
+  final int blockIndex;
+  final int blockCount;
+
+  double get progressPercent {
+    if (blockCount <= 1) return blockCount == 1 && blockIndex > 0 ? 100 : 0;
+    return ((blockIndex / (blockCount - 1)) * 100).clamp(0.0, 100.0).toDouble();
+  }
+
+  String toJsonString() => jsonEncode({
+        'type': 'fb2-block-anchor-v1',
+        'blockIndex': blockIndex,
+        'blockCount': blockCount,
+        'progressPercent': progressPercent,
+        'updatedAt': DateTime.now().toUtc().toIso8601String(),
+      });
+}
+
+_Fb2Document _parseFb2Document(String xmlText) {
+  final xml = _normalizeText(xmlText);
+  final binaries = <String, Uint8List>{};
+  final binaryRe = RegExp(r'<binary\b([^>]*)>(.*?)</binary>', caseSensitive: false, dotAll: true);
+  for (final match in binaryRe.allMatches(xml)) {
+    final attrs = match.group(1) ?? '';
+    final id = _attr(attrs, 'id');
+    if (id == null || id.isEmpty) continue;
+    final payload = (match.group(2) ?? '').replaceAll(RegExp(r'\s+'), '');
+    try {
+      binaries[id] = Uint8List.fromList(base64Decode(payload));
+    } catch (_) {}
+  }
+
+  var body = xml;
+  final bodyMatch = RegExp(r'<body\b[^>]*>(.*?)</body>', caseSensitive: false, dotAll: true).firstMatch(xml);
+  if (bodyMatch != null) body = bodyMatch.group(1) ?? body;
+  body = body.replaceAll(RegExp(r'<binary\b[^>]*>.*?</binary>', caseSensitive: false, dotAll: true), '');
+  body = body.replaceAll(RegExp(r'<description\b[^>]*>.*?</description>', caseSensitive: false, dotAll: true), '');
+  body = body.replaceAll(RegExp(r'<empty-line\s*/?>', caseSensitive: false), '<p> </p>');
+
+  final blocks = <_Fb2Block>[];
+  final blockRe = RegExp(
+    r'<image\b[^>]*/>|<title\b[^>]*>.*?</title>|<subtitle\b[^>]*>.*?</subtitle>|<p\b[^>]*>.*?</p>|<v\b[^>]*>.*?</v>',
+    caseSensitive: false,
+    dotAll: true,
+  );
+  for (final match in blockRe.allMatches(body)) {
+    final raw = match.group(0) ?? '';
+    if (raw.startsWith(RegExp(r'<image', caseSensitive: false))) {
+      final href = _hrefFromTag(raw);
+      final id = href?.replaceFirst('#', '');
+      final image = id == null ? null : binaries[id];
+      if (image != null) blocks.add(_Fb2Block.image(image));
+      continue;
+    }
+    final isTitle = raw.startsWith(RegExp(r'<title|<subtitle', caseSensitive: false));
+    if (isTitle) {
+      final text = _stripFb2InlineTags(raw).trim();
+      if (text.isNotEmpty) blocks.add(_Fb2Block.title(text));
+      final images = RegExp(r'<image\b[^>]*/>', caseSensitive: false).allMatches(raw);
+      for (final imageMatch in images) {
+        final href = _hrefFromTag(imageMatch.group(0) ?? '');
+        final id = href?.replaceFirst('#', '');
+        final image = id == null ? null : binaries[id];
+        if (image != null) blocks.add(_Fb2Block.image(image));
+      }
+      continue;
+    }
+    final images = RegExp(r'<image\b[^>]*/>', caseSensitive: false).allMatches(raw).toList();
+    for (final imageMatch in images) {
+      final href = _hrefFromTag(imageMatch.group(0) ?? '');
+      final id = href?.replaceFirst('#', '');
+      final image = id == null ? null : binaries[id];
+      if (image != null) blocks.add(_Fb2Block.image(image));
+    }
+    final inlines = _parseFb2Inlines(raw);
+    final text = inlines.map((item) => item.text).join().trim();
+    if (text.isNotEmpty) blocks.add(_Fb2Block.paragraph(inlines));
+  }
+
+  if (blocks.isEmpty) {
+    final text = _extractFb2Text(xml);
+    for (final paragraph in text.split(RegExp(r'\n{2,}'))) {
+      final trimmed = paragraph.trim();
+      if (trimmed.isNotEmpty) blocks.add(_Fb2Block.paragraph([_Fb2Inline(trimmed)]));
+    }
+  }
+  return _Fb2Document(blocks.isEmpty ? [_Fb2Block.paragraph(const [_Fb2Inline('Не удалось извлечь содержимое FB2.')])] : blocks);
+}
+
+List<_Fb2Inline> _parseFb2Inlines(String rawBlock) {
+  var content = rawBlock.replaceFirst(RegExp(r'^<[^>]+>', caseSensitive: false), '');
+  content = content.replaceFirst(RegExp(r'</[^>]+>$', caseSensitive: false), '');
+  content = content.replaceAll(RegExp(r'<image\b[^>]*/>', caseSensitive: false), '');
+  final result = <_Fb2Inline>[];
+  final linkRe = RegExp(r'<a\b([^>]*)>(.*?)</a>', caseSensitive: false, dotAll: true);
+  var cursor = 0;
+  for (final match in linkRe.allMatches(content)) {
+    if (match.start > cursor) {
+      final before = _stripFb2InlineTags(content.substring(cursor, match.start));
+      if (before.isNotEmpty) result.add(_Fb2Inline(before));
+    }
+    final href = _hrefFromAttrs(match.group(1) ?? '');
+    final linkText = _stripFb2InlineTags(match.group(2) ?? '');
+    if (linkText.isNotEmpty) result.add(_Fb2Inline(linkText, href: href));
+    cursor = match.end;
+  }
+  if (cursor < content.length) {
+    final rest = _stripFb2InlineTags(content.substring(cursor));
+    if (rest.isNotEmpty) result.add(_Fb2Inline(rest));
+  }
+  return result.isEmpty ? const [_Fb2Inline('')] : result;
+}
+
+String _stripFb2InlineTags(String input) {
+  var text = input.replaceAll(RegExp(r'<[^>]+>', dotAll: true), '');
+  text = _decodeXmlEntities(text);
+  return text.replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trim();
+}
+
+String? _hrefFromTag(String tag) => _hrefFromAttrs(tag);
+
+String? _hrefFromAttrs(String attrs) {
+  return _attr(attrs, 'l:href') ?? _attr(attrs, 'xlink:href') ?? _attr(attrs, 'href');
+}
+
+String? _attr(String attrs, String name) {
+  final escaped = RegExp.escape(name);
+  final doubleQuoted = RegExp('$escaped\\s*=\\s*"([^"]*)"', caseSensitive: false, dotAll: true).firstMatch(attrs);
+  if (doubleQuoted != null) return _decodeXmlEntities(doubleQuoted.group(1) ?? '').trim();
+  final singleQuoted = RegExp("$escaped\\s*=\\s*'([^']*)'", caseSensitive: false, dotAll: true).firstMatch(attrs);
+  return singleQuoted == null ? null : _decodeXmlEntities(singleQuoted.group(1) ?? '').trim();
 }
 
 class _PdfReaderScreen extends StatefulWidget {
