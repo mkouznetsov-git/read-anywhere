@@ -1,8 +1,17 @@
 import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:cryptography/cryptography.dart';
+
+
+class BinaryEncryptionResult {
+  const BinaryEncryptionResult({required this.header, required this.cipherBytes});
+
+  final Map<String, dynamic> header;
+  final Uint8List cipherBytes;
+}
 
 class ReadAnywhereE2eCrypto {
   static const version = 'readanywhere-e2e-v2';
@@ -127,6 +136,111 @@ class ReadAnywhereE2eCrypto {
     return Map<String, dynamic>.from(decoded);
   }
 
+
+  static Future<BinaryEncryptionResult> encryptBinaryFrame({
+    required Map<String, dynamic> headerFields,
+    required List<int> clearBytes,
+    required String accountEncryptionKey,
+  }) async {
+    final keyBytes = _decodeBase64UrlNoPadding(accountEncryptionKey);
+    if (keyBytes.length != 32) {
+      throw StateError('Некорректный account encryption key: ${keyBytes.length} bytes');
+    }
+    final header = Map<String, dynamic>.from(headerFields);
+    final eventType = header['type']?.toString() ?? 'binary';
+    final accountId = header['accountId']?.toString() ?? '';
+    final deviceId = header['deviceId']?.toString() ?? '';
+    final eventId = _base64UrlNoPadding(_randomBytes(16));
+    final issuedAt = DateTime.now().toUtc().toIso8601String();
+    final nonce = _randomBytes(12);
+    final aadText = _binaryAadText(header, eventId, issuedAt);
+    final secretBox = await _algorithm.encrypt(
+      clearBytes,
+      secretKey: SecretKey(keyBytes),
+      nonce: nonce,
+      aad: utf8.encode(aadText),
+    );
+    final nonceText = _base64UrlNoPadding(secretBox.nonce);
+    final macText = _base64UrlNoPadding(secretBox.mac.bytes);
+    final signature = _signBinaryFrame(
+      keyBytes: keyBytes,
+      accountId: accountId,
+      deviceId: deviceId,
+      eventType: eventType,
+      eventId: eventId,
+      issuedAt: issuedAt,
+      nonce: nonceText,
+      mac: macText,
+      aadText: aadText,
+    );
+    header['e2ee'] = {
+      'v': 'readanywhere-binary-e2e-v1',
+      'alg': 'AES-256-GCM',
+      'eventId': eventId,
+      'issuedAt': issuedAt,
+      'signerDeviceId': deviceId,
+      'nonce': nonceText,
+      'mac': macText,
+      'sigAlg': 'HMAC-SHA256/account-key/v1',
+      'signature': signature,
+    };
+    return BinaryEncryptionResult(
+      header: header,
+      cipherBytes: Uint8List.fromList(secretBox.cipherText),
+    );
+  }
+
+  static Future<Uint8List> decryptBinaryFrame({
+    required Map<String, dynamic> header,
+    required List<int> cipherBytes,
+    required String accountEncryptionKey,
+  }) async {
+    final e2eeRaw = header['e2ee'];
+    if (e2eeRaw is! Map) throw StateError('Binary frame is not encrypted');
+    final e2ee = Map<String, dynamic>.from(e2eeRaw);
+    if (e2ee['v'] != 'readanywhere-binary-e2e-v1') {
+      throw StateError('Неподдерживаемая версия binary E2E: ${e2ee['v']}');
+    }
+    final keyBytes = _decodeBase64UrlNoPadding(accountEncryptionKey);
+    if (keyBytes.length != 32) {
+      throw StateError('Некорректный account encryption key: ${keyBytes.length} bytes');
+    }
+    final eventType = header['type']?.toString() ?? 'binary';
+    final accountId = header['accountId']?.toString() ?? '';
+    final signerDeviceId = e2ee['signerDeviceId']?.toString() ?? header['deviceId']?.toString() ?? '';
+    final eventId = e2ee['eventId']?.toString() ?? '';
+    final issuedAt = e2ee['issuedAt']?.toString() ?? '';
+    final nonceText = e2ee['nonce']?.toString() ?? '';
+    final macText = e2ee['mac']?.toString() ?? '';
+    final aadHeader = Map<String, dynamic>.from(header)..remove('e2ee');
+    final aadText = _binaryAadText(aadHeader, eventId, issuedAt);
+    final expected = _signBinaryFrame(
+      keyBytes: keyBytes,
+      accountId: accountId,
+      deviceId: signerDeviceId,
+      eventType: eventType,
+      eventId: eventId,
+      issuedAt: issuedAt,
+      nonce: nonceText,
+      mac: macText,
+      aadText: aadText,
+    );
+    final actual = e2ee['signature']?.toString() ?? '';
+    if (!_constantTimeStringEquals(expected, actual)) {
+      throw StateError('Подпись binary sync-события не прошла проверку');
+    }
+    final clear = await _algorithm.decrypt(
+      SecretBox(
+        cipherBytes,
+        nonce: _decodeBase64UrlNoPadding(nonceText),
+        mac: Mac(_decodeBase64UrlNoPadding(macText)),
+      ),
+      secretKey: SecretKey(keyBytes),
+      aad: utf8.encode(aadText),
+    );
+    return Uint8List.fromList(clear);
+  }
+
   static bool isEncryptedPayload(Map<String, dynamic> payload) => payload['e2ee'] is Map;
 
   static String? encryptedEventId(Map<String, dynamic> payload) {
@@ -173,6 +287,50 @@ class ReadAnywhereE2eCrypto {
       mac,
     ].join('\n');
     return _base64UrlNoPadding(crypto.Hmac(crypto.sha256, keyBytes).convert(utf8.encode(input)).bytes);
+  }
+
+
+  static String _binaryAadText(Map<String, dynamic> header, String eventId, String issuedAt) {
+    final sanitized = Map<String, dynamic>.from(header)..remove('e2ee');
+    return 'readanywhere-binary|$eventId|$issuedAt|${_canonicalJson(sanitized)}';
+  }
+
+  static String _signBinaryFrame({
+    required List<int> keyBytes,
+    required String accountId,
+    required String deviceId,
+    required String eventType,
+    required String eventId,
+    required String issuedAt,
+    required String nonce,
+    required String mac,
+    required String aadText,
+  }) {
+    final input = [
+      'readanywhere-binary-e2e-v1',
+      accountId,
+      deviceId,
+      eventType,
+      eventId,
+      issuedAt,
+      nonce,
+      mac,
+      aadText,
+    ].join('\n');
+    return _base64UrlNoPadding(crypto.Hmac(crypto.sha256, keyBytes).convert(utf8.encode(input)).bytes);
+  }
+
+  static String _canonicalJson(Object? value) {
+    Object? normalize(Object? item) {
+      if (item is Map) {
+        final entries = item.entries.toList()
+          ..sort((a, b) => a.key.toString().compareTo(b.key.toString()));
+        return {for (final entry in entries) entry.key.toString(): normalize(entry.value)};
+      }
+      if (item is Iterable) return item.map(normalize).toList();
+      return item;
+    }
+    return jsonEncode(normalize(value));
   }
 
   static bool _constantTimeStringEquals(String a, String b) {

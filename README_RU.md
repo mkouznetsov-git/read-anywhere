@@ -343,3 +343,8 @@ TXT-reader переведён на один обычный вертикальн�
 ## Sprint 13 hotfix
 
 Исправлены FB2-locator и восстановление позиции чтения: FB2 теперь сохраняет `fb2-unit-anchor-v2` с `blockIndex + unitInBlock`, а не только абсолютный индекс. Для FB2-scroll добавлен `itemExtentBuilder`, чтобы уменьшить скачки scrollbar на macOS. Передача файлов стала использовать chunks 2 MiB и показывает примерную скорость MB/s.
+
+
+## Sprint 15 — binary file transfer, FB2 reopen fix, app icon
+
+Добавлена более устойчивая передача файлов через encrypted WebSocket binary frames, retry chunk до 3 раз, resume по границе chunk и SHA-256 validation. Исправлен откат FB2-прогресса при закрытии reader-а. Обновлена иконка приложения на выбранный вариант с ноутбуком, телефоном и книгой.

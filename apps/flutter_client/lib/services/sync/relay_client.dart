@@ -1,9 +1,44 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../models/manifest.dart';
+
+
+class RelayBinaryMessage {
+  const RelayBinaryMessage({required this.header, required this.body});
+
+  final Map<String, dynamic> header;
+  final Uint8List body;
+
+  Uint8List toFrame() {
+    final headerBytes = utf8.encode(jsonEncode(header));
+    final result = Uint8List(4 + headerBytes.length + body.length);
+    final byteData = ByteData.view(result.buffer);
+    byteData.setUint32(0, headerBytes.length, Endian.big);
+    result.setRange(4, 4 + headerBytes.length, headerBytes);
+    result.setRange(4 + headerBytes.length, result.length, body);
+    return result;
+  }
+
+  static RelayBinaryMessage parse(List<int> raw) {
+    final bytes = raw is Uint8List ? raw : Uint8List.fromList(raw);
+    if (bytes.length < 4) throw StateError('Binary frame too short');
+    final headerLength = ByteData.sublistView(bytes, 0, 4).getUint32(0, Endian.big);
+    if (headerLength <= 0 || 4 + headerLength > bytes.length) {
+      throw StateError('Invalid binary frame header length');
+    }
+    final headerRaw = utf8.decode(bytes.sublist(4, 4 + headerLength));
+    final decoded = jsonDecode(headerRaw);
+    if (decoded is! Map) throw StateError('Binary frame header is not an object');
+    return RelayBinaryMessage(
+      header: Map<String, dynamic>.from(decoded),
+      body: Uint8List.fromList(bytes.sublist(4 + headerLength)),
+    );
+  }
+}
 
 class RelayClient {
   RelayClient({
@@ -18,9 +53,11 @@ class RelayClient {
 
   WebSocketChannel? _channel;
   final _incoming = StreamController<SyncEnvelope>.broadcast();
+  final _binaryIncoming = StreamController<RelayBinaryMessage>.broadcast();
   StreamSubscription<dynamic>? _subscription;
 
   Stream<SyncEnvelope> get incoming => _incoming.stream;
+  Stream<RelayBinaryMessage> get binaryIncoming => _binaryIncoming.stream;
 
   Future<void> connect() async {
     final scheme = switch (relayUri.scheme) {
@@ -61,6 +98,14 @@ class RelayClient {
   }
 
   void _handleRawMessage(dynamic raw) {
+    if (raw is List<int>) {
+      try {
+        _binaryIncoming.add(RelayBinaryMessage.parse(raw));
+      } catch (error) {
+        _incoming.add(_systemError('Cannot parse binary relay frame: $error'));
+      }
+      return;
+    }
     if (raw is! String) return;
     try {
       final decodedRaw = jsonDecode(raw);
@@ -106,6 +151,15 @@ class RelayClient {
     channel.sink.add(jsonEncode(envelope.toJson()));
   }
 
+
+  void sendBinary(RelayBinaryMessage message) {
+    final channel = _channel;
+    if (channel == null) {
+      throw StateError('RelayClient is not connected');
+    }
+    channel.sink.add(message.toFrame());
+  }
+
   Future<void> close() async {
     await _subscription?.cancel();
     _subscription = null;
@@ -116,5 +170,6 @@ class RelayClient {
   Future<void> dispose() async {
     await close();
     await _incoming.close();
+    await _binaryIncoming.close();
   }
 }

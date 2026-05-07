@@ -17,7 +17,7 @@ import 'merge.dart';
 import 'relay_client.dart';
 
 const _uuid = Uuid();
-const _defaultChunkSize = 512 * 1024; // Sprint 14: smaller ACKed chunks are more stable on mobile/Funnel WebSockets.
+const _defaultChunkSize = 256 * 1024; // Binary ACKed chunks: stable on Android/Tailscale, faster than JSON/base64.
 
 class PairingInvite {
   const PairingInvite({
@@ -181,6 +181,7 @@ class SyncService {
 
   RelayClient? _client;
   StreamSubscription<void>? _incomingSubscription;
+  StreamSubscription<void>? _binarySubscription;
   final _manifestChanges = StreamController<LibraryManifest>.broadcast();
   final _downloadsByTransferId = <String, _DownloadSession>{};
   final _uploadAckWaiters = <String, Completer<void>>{};
@@ -232,6 +233,16 @@ class SyncService {
         unawaited(_handleRelayDisconnected(error));
       },
     );
+    _binarySubscription = client.binaryIncoming
+        .asyncMap((message) async {
+          await _handleIncomingBinaryFrame(message);
+        })
+        .listen(
+      (_) {},
+      onError: (error) {
+        unawaited(_handleRelayDisconnected(error));
+      },
+    );
 
     try {
       await client.connect();
@@ -265,6 +276,8 @@ class SyncService {
     }
     await _incomingSubscription?.cancel();
     _incomingSubscription = null;
+    await _binarySubscription?.cancel();
+    _binarySubscription = null;
     final client = _client;
     _client = null;
     await client?.dispose();
@@ -671,6 +684,7 @@ class SyncService {
               'expectedSha256': book.contentSha256,
               'expectedSizeBytes': book.sizeBytes,
               'preferredChunkSize': _defaultChunkSize,
+              'binaryTransfer': true,
             },
           ),
           logLabel: label,
@@ -945,6 +959,7 @@ class SyncService {
           'sizeBytes': await file.length(),
           'sha256': book.contentSha256,
           'chunkSize': chunkSize,
+          'binaryTransfer': true,
         },
       ),
     );
@@ -1027,6 +1042,7 @@ class SyncService {
           'requestingDeviceId': local.deviceId,
           'chunkSize': session.chunkSize,
           'startChunkIndex': session.expectedChunkIndex,
+          'binaryTransfer': true,
         },
       ),
     );
@@ -1054,6 +1070,7 @@ class SyncService {
         requestingDeviceId: requestingDeviceId,
         chunkSize: (payload['chunkSize'] as num?)?.toInt() ?? _defaultChunkSize,
         startChunkIndex: (payload['startChunkIndex'] as num?)?.toInt() ?? 0,
+        binaryTransfer: payload['binaryTransfer'] == true,
       );
     } finally {
       _uploadLocks.remove(transferId);
@@ -1067,6 +1084,7 @@ class SyncService {
     required String requestingDeviceId,
     required int chunkSize,
     required int startChunkIndex,
+    required bool binaryTransfer,
   }) async {
     final book = _findBook(await _storage.loadManifest(), bookId);
     if (book == null || book.localPath == null) {
@@ -1118,42 +1136,72 @@ class SyncService {
         final data = await raf.read(safeChunkSize);
         if (data.isEmpty) break;
         sentBytes += data.length;
-        final ackKey = _ackKey(transferId, chunkIndex);
-        final ackCompleter = Completer<void>();
-        _uploadAckWaiters[ackKey] = ackCompleter;
-        final sent = await _sendEnvelope(
-          SyncEnvelope(
-            type: 'book_file_chunk',
-            accountId: local.accountId,
-            deviceId: local.deviceId,
-            payload: {
-              'transferId': transferId,
-              'bookId': bookId,
-              'sourceDeviceId': local.deviceId,
-              'requestingDeviceId': requestingDeviceId,
-              'chunkIndex': chunkIndex,
-              'totalChunks': totalChunks,
-              'offset': chunkIndex * safeChunkSize,
-              'totalBytes': size,
-              'sha256': book.contentSha256,
-              'dataBase64': base64Encode(data),
-            },
-          ),
-        );
-        if (!sent) {
-          failed = true;
-          _uploadAckWaiters.remove(ackKey);
-          await _sendFileError(local, transferId, bookId, requestingDeviceId, 'Не удалось отправить chunk $chunkIndex');
-          break;
+        var acknowledged = false;
+        for (var attempt = 1; attempt <= 3 && !acknowledged; attempt++) {
+          final ackKey = _ackKey(transferId, chunkIndex);
+          final ackCompleter = Completer<void>();
+          _uploadAckWaiters[ackKey] = ackCompleter;
+          final sent = binaryTransfer
+              ? await _sendBinaryFileChunk(
+                  local: local,
+                  transferId: transferId,
+                  bookId: bookId,
+                  requestingDeviceId: requestingDeviceId,
+                  chunkIndex: chunkIndex,
+                  totalChunks: totalChunks,
+                  offset: chunkIndex * safeChunkSize,
+                  totalBytes: size,
+                  sha256Text: book.contentSha256,
+                  data: data,
+                )
+              : await _sendEnvelope(
+                  SyncEnvelope(
+                    type: 'book_file_chunk',
+                    accountId: local.accountId,
+                    deviceId: local.deviceId,
+                    payload: {
+                      'transferId': transferId,
+                      'bookId': bookId,
+                      'sourceDeviceId': local.deviceId,
+                      'requestingDeviceId': requestingDeviceId,
+                      'chunkIndex': chunkIndex,
+                      'totalChunks': totalChunks,
+                      'offset': chunkIndex * safeChunkSize,
+                      'totalBytes': size,
+                      'sha256': book.contentSha256,
+                      'dataBase64': base64Encode(data),
+                    },
+                  ),
+                );
+          if (!sent) {
+            _uploadAckWaiters.remove(ackKey);
+            if (attempt == 3) {
+              failed = true;
+              await _sendFileError(local, transferId, bookId, requestingDeviceId, 'Не удалось отправить chunk $chunkIndex');
+              break;
+            }
+            continue;
+          }
+          try {
+            await ackCompleter.future.timeout(const Duration(seconds: 20));
+            acknowledged = true;
+          } on TimeoutException {
+            _uploadAckWaiters.remove(ackKey);
+            if (attempt < 3) {
+              _updateTransferByKey(
+                uploadKey,
+                state.value.fileTransfers[uploadKey]!.copyWith(
+                      statusText: 'Повтор chunk $chunkIndex ($attempt/3)...',
+                    ),
+              );
+              await Future<void>.delayed(const Duration(milliseconds: 350));
+            } else {
+              failed = true;
+              await _sendFileError(local, transferId, bookId, requestingDeviceId, 'Получатель не подтвердил chunk $chunkIndex');
+            }
+          }
         }
-        try {
-          await ackCompleter.future.timeout(const Duration(seconds: 15));
-        } on TimeoutException {
-          failed = true;
-          _uploadAckWaiters.remove(ackKey);
-          await _sendFileError(local, transferId, bookId, requestingDeviceId, 'Получатель не подтвердил chunk $chunkIndex');
-          break;
-        }
+        if (!acknowledged) break;
         final progress = size == 0 ? 100.0 : (sentBytes / size) * 100;
         final elapsed = DateTime.now().difference(transferStartedAt).inMilliseconds.clamp(1, 1 << 31);
         final mbps = ((sentBytes - startOffset) / (1024 * 1024)) / (elapsed / 1000.0);
@@ -1201,6 +1249,152 @@ class SyncService {
     } finally {
       await raf.close();
     }
+  }
+
+
+  Future<bool> _sendBinaryFileChunk({
+    required LibraryManifest local,
+    required String transferId,
+    required String bookId,
+    required String requestingDeviceId,
+    required int chunkIndex,
+    required int totalChunks,
+    required int offset,
+    required int totalBytes,
+    required String sha256Text,
+    required List<int> data,
+  }) async {
+    final client = _client;
+    if (client == null || !state.value.connected) return false;
+    try {
+      final encrypted = await ReadAnywhereE2eCrypto.encryptBinaryFrame(
+        accountEncryptionKey: local.accountEncryptionKey,
+        clearBytes: data,
+        headerFields: {
+          'frame': 'readanywhere-binary-v1',
+          'type': 'book_file_binary_chunk',
+          'accountId': local.accountId,
+          'deviceId': local.deviceId,
+          'transferId': transferId,
+          'bookId': bookId,
+          'sourceDeviceId': local.deviceId,
+          'requestingDeviceId': requestingDeviceId,
+          'chunkIndex': chunkIndex,
+          'totalChunks': totalChunks,
+          'offset': offset,
+          'totalBytes': totalBytes,
+          'sha256': sha256Text,
+        },
+      );
+      client.sendBinary(RelayBinaryMessage(header: encrypted.header, body: encrypted.cipherBytes));
+      _setState(state.value.copyWith(sentEvents: state.value.sentEvents + 1));
+      return true;
+    } catch (error) {
+      _appendLog('Не удалось отправить binary chunk $chunkIndex: $error');
+      unawaited(_handleRelayDisconnected(error));
+      return false;
+    }
+  }
+
+  Future<void> _handleIncomingBinaryFrame(RelayBinaryMessage message) async {
+    try {
+      final local = await _storage.loadManifest();
+      final header = message.header;
+      if (header['type'] != 'book_file_binary_chunk') return;
+      if (header['accountId'] != local.accountId) return;
+      if (header['requestingDeviceId'] != local.deviceId) return;
+      final clearBytes = await ReadAnywhereE2eCrypto.decryptBinaryFrame(
+        header: header,
+        cipherBytes: message.body,
+        accountEncryptionKey: local.accountEncryptionKey,
+      );
+      await _handleBookFileBinaryChunk(header, clearBytes, local);
+    } catch (error, stackTrace) {
+      debugPrint('Binary sync event handling failed: $error\n$stackTrace');
+      _appendLog('Ошибка binary transfer: $error');
+    }
+  }
+
+  Future<void> _handleBookFileBinaryChunk(
+    Map<String, dynamic> payload,
+    List<int> data,
+    LibraryManifest local,
+  ) async {
+    final transferId = payload['transferId'] as String?;
+    if (transferId == null) return;
+    final session = _downloadsByTransferId[transferId];
+    if (session == null) return;
+    if (session.sourceDeviceId != null && payload['sourceDeviceId'] != session.sourceDeviceId) return;
+
+    final chunkIndex = (payload['chunkIndex'] as num?)?.toInt();
+    if (chunkIndex == null) return;
+    if (chunkIndex != session.expectedChunkIndex) {
+      // Duplicate chunks can arrive when the source retries after a delayed ACK.
+      // ACK them again and keep the already written file intact.
+      if (chunkIndex < session.expectedChunkIndex) {
+        await _sendChunkAck(local, session, chunkIndex);
+        return;
+      }
+      await _failDownload(
+        session,
+        'Нарушен порядок binary chunks: ожидали ${session.expectedChunkIndex}, получили $chunkIndex',
+      );
+      return;
+    }
+
+    final tempFile = session.tempFile;
+    if (tempFile == null) return;
+    try {
+      await tempFile.writeAsBytes(data, mode: FileMode.append, flush: false);
+      session
+        ..expectedChunkIndex += 1
+        ..receivedBytes += data.length
+        ..totalChunks = (payload['totalChunks'] as num?)?.toInt()
+        ..expectedBytes = (payload['totalBytes'] as num?)?.toInt() ?? session.expectedBytes;
+
+      final totalBytes = session.expectedBytes;
+      final progress = totalBytes <= 0 ? 0.0 : (session.receivedBytes / totalBytes) * 100;
+      final elapsed = DateTime.now().difference(session.startedAt).inMilliseconds.clamp(1, 1 << 31);
+      final mbps = (session.receivedBytes / (1024 * 1024)) / (elapsed / 1000.0);
+      _setDownloadSnapshot(
+        state.value.downloadForBook(session.bookId)!.copyWith(
+              statusText: 'Скачивание: ${progress.clamp(0, 100).toStringAsFixed(1)}% • ${mbps.toStringAsFixed(1)} MB/s',
+              progressPercent: progress.clamp(0, 100).toDouble(),
+              transferredBytes: session.receivedBytes,
+              totalBytes: totalBytes,
+              active: true,
+            ),
+      );
+
+      _resetDownloadWatchdog(session);
+      await _sendChunkAck(local, session, chunkIndex);
+
+      final totalChunks = session.totalChunks;
+      if (totalChunks != null && session.expectedChunkIndex >= totalChunks) {
+        session.watchdog?.cancel();
+        await _finalizeDownload(session);
+      }
+    } catch (error) {
+      await _failDownload(session, 'Ошибка получения binary chunk: $error');
+    }
+  }
+
+  Future<void> _sendChunkAck(LibraryManifest local, _DownloadSession session, int chunkIndex) async {
+    await _sendEnvelope(
+      SyncEnvelope(
+        type: 'book_file_chunk_ack',
+        accountId: local.accountId,
+        deviceId: local.deviceId,
+        payload: {
+          'transferId': session.transferId,
+          'bookId': session.bookId,
+          'sourceDeviceId': session.sourceDeviceId,
+          'requestingDeviceId': local.deviceId,
+          'chunkIndex': chunkIndex,
+          'receivedBytes': session.receivedBytes,
+        },
+      ),
+    );
   }
 
   Future<void> _handleBookFileChunk(
@@ -1255,21 +1449,7 @@ class SyncService {
       );
 
       _resetDownloadWatchdog(session);
-      await _sendEnvelope(
-        SyncEnvelope(
-          type: 'book_file_chunk_ack',
-          accountId: local.accountId,
-          deviceId: local.deviceId,
-          payload: {
-            'transferId': transferId,
-            'bookId': session.bookId,
-            'sourceDeviceId': session.sourceDeviceId,
-            'requestingDeviceId': local.deviceId,
-            'chunkIndex': chunkIndex,
-            'receivedBytes': session.receivedBytes,
-          },
-        ),
-      );
+      await _sendChunkAck(local, session, chunkIndex);
 
       final totalChunks = session.totalChunks;
       if (totalChunks != null && session.expectedChunkIndex >= totalChunks) {

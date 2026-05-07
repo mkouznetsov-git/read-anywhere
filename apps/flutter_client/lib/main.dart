@@ -995,7 +995,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     _layoutDebounce?.cancel();
     _saveDebounce?.cancel();
     _progressRedrawThrottle?.cancel();
-    final locator = _currentLocator() ?? _lastKnownLocator;
+    final locator = _lastKnownLocator ?? _currentLocator();
     if (locator != null) unawaited(_saveProgress(locator));
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
@@ -1153,7 +1153,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     final units = _units;
     if (units == null || units.isEmpty) return null;
     if (!_scrollController.hasClients) {
-      return _locatorForUnit(_pendingUnitIndex.clamp(0, units.length - 1).toInt());
+      return _lastKnownLocator ?? _locatorForUnit(_pendingUnitIndex.clamp(0, units.length - 1).toInt());
     }
     if (_scrollController.position.maxScrollExtent <= 0 || _scrollController.position.extentAfter <= 8) {
       return _locatorForUnit(units.length - 1);
@@ -1206,6 +1206,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     final locator = _currentLocator();
     if (locator == null) return;
     _lastKnownLocator = locator;
+    _pendingUnitIndex = locator.unitIndex;
     _progress = locator.progressPercent;
     if (!(_progressRedrawThrottle?.isActive ?? false)) {
       _progressRedrawThrottle = Timer(const Duration(milliseconds: 80), () {
@@ -1220,6 +1221,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
 
   Future<void> _saveProgress(_Fb2UnitLocator locator) async {
     _lastKnownLocator = locator;
+    _pendingUnitIndex = locator.unitIndex;
     _progress = locator.progressPercent;
     final manifest = await widget.storage.updateProgress(
       bookId: widget.book.id,

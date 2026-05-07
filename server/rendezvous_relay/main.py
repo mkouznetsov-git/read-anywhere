@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketState
 
-app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.1.7")
+app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.1.8")
 
 # In-memory only. The relay intentionally stores no books and writes nothing to
 # disk. Sprint 3 hotfix 2 keeps the latest *metadata snapshots* in RAM so a newly
@@ -21,7 +21,8 @@ _rooms: DefaultDict[str, Dict[WebSocket, str]] = defaultdict(dict)
 _snapshot_cache: DefaultDict[str, Dict[str, str]] = defaultdict(dict)
 _pairing_codes: Dict[str, dict] = {}
 _lock = asyncio.Lock()
-MAX_MESSAGE_BYTES = 1024 * 1024 * 16  # 16 MB; large E2E JSON/base64 chunks for MVP file transfer.
+MAX_MESSAGE_BYTES = 1024 * 1024 * 16  # text metadata/control frames
+MAX_BINARY_MESSAGE_BYTES = 1024 * 1024 * 2  # encrypted binary file chunks
 MAX_CACHED_SNAPSHOT_BYTES = 1024 * 1024  # metadata only; book chunks are never cached.
 PAIRING_TTL_SECONDS = 5 * 60
 
@@ -159,44 +160,61 @@ async def websocket_endpoint(websocket: WebSocket, account_id: str, device_id: s
 
     try:
         while True:
-            message = await websocket.receive_text()
-            if len(message.encode("utf-8")) > MAX_MESSAGE_BYTES:
-                await websocket.close(
-                    code=status.WS_1009_MESSAGE_TOO_BIG,
-                    reason="Message too large. Use chunked file transfer.",
-                )
+            incoming = await websocket.receive()
+            if "text" in incoming and incoming["text"] is not None:
+                message = incoming["text"]
+                if len(message.encode("utf-8")) > MAX_MESSAGE_BYTES:
+                    await websocket.close(
+                        code=status.WS_1009_MESSAGE_TOO_BIG,
+                        reason="Message too large. Use binary chunked file transfer.",
+                    )
+                    break
+
+                try:
+                    decoded = json.loads(message)
+                except json.JSONDecodeError:
+                    await websocket.send_json({"type": "error", "message": "Invalid JSON"})
+                    continue
+
+                if not isinstance(decoded, dict):
+                    await websocket.send_json({"type": "error", "message": "Invalid message shape"})
+                    continue
+
+                message_type = decoded.get("type")
+                envelope_account_id = decoded.get("accountId")
+                envelope_device_id = decoded.get("deviceId") or device_id
+                if envelope_account_id != account_id:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Envelope accountId does not match websocket room",
+                    })
+                    continue
+
+                if message_type == "library_snapshot":
+                    await _cache_library_snapshot(account_id, str(envelope_device_id), message)
+                elif message_type == "library_snapshot_requested":
+                    await _send_cached_snapshots(
+                        account_id=account_id,
+                        target=websocket,
+                        exclude_device_id=str(envelope_device_id),
+                    )
+
+                await _broadcast_raw(account_id, message, exclude=websocket)
+                continue
+
+            if "bytes" in incoming and incoming["bytes"] is not None:
+                data = incoming["bytes"]
+                if len(data) > MAX_BINARY_MESSAGE_BYTES:
+                    await websocket.close(
+                        code=status.WS_1009_MESSAGE_TOO_BIG,
+                        reason="Binary chunk too large.",
+                    )
+                    break
+                await _broadcast_binary(account_id, data, exclude=websocket)
+                continue
+
+            if incoming.get("type") == "websocket.disconnect":
                 break
-
-            try:
-                decoded = json.loads(message)
-            except json.JSONDecodeError:
-                await websocket.send_json({"type": "error", "message": "Invalid JSON"})
-                continue
-
-            if not isinstance(decoded, dict):
-                await websocket.send_json({"type": "error", "message": "Invalid message shape"})
-                continue
-
-            message_type = decoded.get("type")
-            envelope_account_id = decoded.get("accountId")
-            envelope_device_id = decoded.get("deviceId") or device_id
-            if envelope_account_id != account_id:
-                await websocket.send_json({
-                    "type": "error",
-                    "message": "Envelope accountId does not match websocket room",
-                })
-                continue
-
-            if message_type == "library_snapshot":
-                await _cache_library_snapshot(account_id, str(envelope_device_id), message)
-            elif message_type == "library_snapshot_requested":
-                await _send_cached_snapshots(
-                    account_id=account_id,
-                    target=websocket,
-                    exclude_device_id=str(envelope_device_id),
-                )
-
-            await _broadcast_raw(account_id, message, exclude=websocket)
     except WebSocketDisconnect:
         pass
     finally:
@@ -266,6 +284,16 @@ async def _broadcast_raw(account_id: str, message: str, exclude: WebSocket | Non
         await _send_text_safely(peer, message, account_id=account_id)
 
 
+
+async def _broadcast_binary(account_id: str, message: bytes, exclude: WebSocket | None = None) -> None:
+    async with _lock:
+        peers = list(_rooms.get(account_id, {}).keys())
+    for peer in peers:
+        if peer is exclude:
+            continue
+        await _send_bytes_safely(peer, message, account_id=account_id)
+
+
 async def _broadcast_system(account_id: str, payload: dict, exclude: WebSocket | None = None) -> None:
     await _broadcast_raw(account_id, json.dumps(payload), exclude=exclude)
 
@@ -283,6 +311,33 @@ async def _send_text_safely(
             raise WebSocketDisconnect(code=1005)
         await peer.send_text(message)
     except Exception as exc:  # Starlette/uvicorn/websockets use different disconnect exceptions.
+        name = exc.__class__.__name__
+        module = exc.__class__.__module__
+        is_disconnect = (
+            isinstance(exc, (RuntimeError, WebSocketDisconnect))
+            or name in {
+                'ClientDisconnected',
+                'ConnectionClosed',
+                'ConnectionClosedOK',
+                'ConnectionClosedError',
+            }
+            or 'websockets.' in module
+        )
+        if not is_disconnect:
+            raise
+        if account_id is not None:
+            async with _lock:
+                room = _rooms.get(account_id)
+                if room is not None:
+                    room.pop(peer, None)
+
+
+async def _send_bytes_safely(peer: WebSocket, message: bytes, account_id: str | None = None) -> None:
+    try:
+        if peer.client_state == WebSocketState.DISCONNECTED:
+            raise WebSocketDisconnect(code=1005)
+        await peer.send_bytes(message)
+    except Exception as exc:
         name = exc.__class__.__name__
         module = exc.__class__.__module__
         is_disconnect = (
