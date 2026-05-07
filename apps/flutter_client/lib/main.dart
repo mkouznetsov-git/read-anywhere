@@ -536,6 +536,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
   double _lastProgress = 0;
   BookRecord? _runtimeBook;
   _TextAnchorLocator? _lastKnownLocator;
+  bool _fullScreen = false;
 
   BookRecord get _book => _runtimeBook ?? widget.book;
 
@@ -819,16 +820,43 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
     final raw = _rawText;
     final lines = _lines;
     return Scaffold(
-      appBar: AppBar(
-        title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-        actions: [
-          IconButton(
-            tooltip: 'Добавить закладку',
-            onPressed: lines != null ? _addBookmark : null,
-            icon: const Icon(Icons.bookmark_add_outlined),
-          ),
-        ],
-      ),
+      appBar: _fullScreen
+          ? null
+          : AppBar(
+              title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+              actions: [
+                IconButton(
+                  tooltip: 'Полный экран',
+                  onPressed: () => setState(() => _fullScreen = true),
+                  icon: const Icon(Icons.fullscreen_rounded),
+                ),
+                IconButton(
+                  tooltip: 'Добавить закладку',
+                  onPressed: lines != null ? _addBookmark : null,
+                  icon: const Icon(Icons.bookmark_add_outlined),
+                ),
+              ],
+            ),
+      floatingActionButton: _fullScreen
+          ? Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FloatingActionButton.small(
+                  heroTag: 'txt-bookmark-${widget.book.id}',
+                  tooltip: 'Добавить закладку',
+                  onPressed: lines != null ? _addBookmark : null,
+                  child: const Icon(Icons.bookmark_add_outlined),
+                ),
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                  heroTag: 'txt-exit-fullscreen-${widget.book.id}',
+                  tooltip: 'Выйти из полного экрана',
+                  onPressed: () => setState(() => _fullScreen = false),
+                  child: const Icon(Icons.fullscreen_exit_rounded),
+                ),
+              ],
+            )
+          : null,
       body: _loadError != null
           ? Center(
               child: Padding(
@@ -878,20 +906,21 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
                         },
                       ),
                     ),
-                    SafeArea(
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: LinearProgressIndicator(value: _lastProgress.clamp(0, 100) / 100),
-                            ),
-                            const SizedBox(width: 12),
-                            Text('${_lastProgress.clamp(0, 100).toStringAsFixed(1)}%'),
-                          ],
+                    if (!_fullScreen)
+                      SafeArea(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: LinearProgressIndicator(value: _lastProgress.clamp(0, 100) / 100),
+                              ),
+                              const SizedBox(width: 12),
+                              Text('${_lastProgress.clamp(0, 100).toStringAsFixed(1)}%'),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
                   ],
                 ),
     );
@@ -917,9 +946,12 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
   String? _loadError;
   Timer? _saveDebounce;
   Timer? _progressRedrawThrottle;
+  final _fb2ViewportKey = GlobalKey();
+  List<GlobalKey> _blockKeys = const [];
   double _progress = 0;
   int _targetBlockIndex = 0;
   bool _didInitialRestore = false;
+  bool _fullScreen = false;
 
   BookRecord get _book => _runtimeBook ?? widget.book;
 
@@ -968,6 +1000,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
       setState(() {
         _runtimeBook = book;
         _document = document;
+        _blockKeys = List<GlobalKey>.generate(document.blocks.length, (_) => GlobalKey());
         _targetBlockIndex = target;
         _progress = _progressForBlock(target, document.blocks.length);
         _loadError = null;
@@ -1010,6 +1043,17 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
         if (document == null || document.blocks.isEmpty) return;
         final approx = (_targetBlockIndex / document.blocks.length) * _scrollController.position.maxScrollExtent;
         _scrollController.jumpTo(approx.clamp(0.0, _scrollController.position.maxScrollExtent));
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        final targetContext = _targetBlockIndex >= 0 && _targetBlockIndex < _blockKeys.length
+            ? _blockKeys[_targetBlockIndex].currentContext
+            : null;
+        if (targetContext != null && mounted) {
+          await Scrollable.ensureVisible(
+            targetContext,
+            alignment: 0,
+            duration: Duration.zero,
+          );
+        }
         _didInitialRestore = true;
         if (mounted) setState(() {});
         return;
@@ -1039,14 +1083,50 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     if (!_scrollController.hasClients) {
       return _Fb2Locator(blockIndex: _targetBlockIndex, blockCount: document.blocks.length);
     }
-    final max = _scrollController.position.maxScrollExtent;
-    if (max <= 0 || _scrollController.position.extentAfter <= 8) {
+    if (_scrollController.position.maxScrollExtent <= 0 || _scrollController.position.extentAfter <= 8) {
       return _Fb2Locator(blockIndex: document.blocks.length - 1, blockCount: document.blocks.length);
     }
-    final ratio = (_scrollController.offset / max).clamp(0.0, 1.0);
-    final index = (ratio * (document.blocks.length - 1)).round().clamp(0, document.blocks.length - 1).toInt();
-    return _Fb2Locator(blockIndex: index, blockCount: document.blocks.length);
+    final topIndex = _topVisibleFb2BlockIndex(document.blocks.length);
+    return _Fb2Locator(blockIndex: topIndex, blockCount: document.blocks.length);
   }
+
+  int _topVisibleFb2BlockIndex(int blockCount) {
+    if (blockCount <= 0) return 0;
+    final viewportContext = _fb2ViewportKey.currentContext;
+    if (viewportContext != null) {
+      final viewportBox = viewportContext.findRenderObject();
+      if (viewportBox is RenderBox && viewportBox.hasSize) {
+        final viewportTop = viewportBox.localToGlobal(Offset.zero).dy;
+        final viewportBottom = viewportTop + viewportBox.size.height;
+        int? firstBelowTop;
+        double firstBelowDistance = double.infinity;
+
+        for (var i = 0; i < _blockKeys.length; i++) {
+          final context = _blockKeys[i].currentContext;
+          if (context == null) continue;
+          final render = context.findRenderObject();
+          if (render is! RenderBox || !render.hasSize) continue;
+          final top = render.localToGlobal(Offset.zero).dy;
+          final bottom = top + render.size.height;
+          if (bottom <= viewportTop + 1 || top >= viewportBottom) continue;
+          if (top <= viewportTop + 2 && bottom > viewportTop + 2) {
+            return i.clamp(0, blockCount - 1).toInt();
+          }
+          final distance = (top - viewportTop).abs();
+          if (top >= viewportTop && distance < firstBelowDistance) {
+            firstBelowDistance = distance;
+            firstBelowTop = i;
+          }
+        }
+        if (firstBelowTop != null) return firstBelowTop.clamp(0, blockCount - 1).toInt();
+      }
+    }
+
+    final max = _scrollController.position.maxScrollExtent;
+    final ratio = max <= 0 ? 0.0 : (_scrollController.offset / max).clamp(0.0, 1.0);
+    return (ratio * (blockCount - 1)).round().clamp(0, blockCount - 1).toInt();
+  }
+
 
   Future<void> _saveProgress(_Fb2Locator locator) async {
     final manifest = await widget.storage.updateProgress(
@@ -1079,16 +1159,43 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
   Widget build(BuildContext context) {
     final document = _document;
     return Scaffold(
-      appBar: AppBar(
-        title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-        actions: [
-          IconButton(
-            tooltip: 'Добавить закладку',
-            onPressed: document != null ? _addBookmark : null,
-            icon: const Icon(Icons.bookmark_add_outlined),
-          ),
-        ],
-      ),
+      appBar: _fullScreen
+          ? null
+          : AppBar(
+              title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+              actions: [
+                IconButton(
+                  tooltip: 'Полный экран',
+                  onPressed: () => setState(() => _fullScreen = true),
+                  icon: const Icon(Icons.fullscreen_rounded),
+                ),
+                IconButton(
+                  tooltip: 'Добавить закладку',
+                  onPressed: document != null ? _addBookmark : null,
+                  icon: const Icon(Icons.bookmark_add_outlined),
+                ),
+              ],
+            ),
+      floatingActionButton: _fullScreen
+          ? Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FloatingActionButton.small(
+                  heroTag: 'fb2-bookmark-${widget.book.id}',
+                  tooltip: 'Добавить закладку',
+                  onPressed: document != null ? _addBookmark : null,
+                  child: const Icon(Icons.bookmark_add_outlined),
+                ),
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                  heroTag: 'fb2-exit-fullscreen-${widget.book.id}',
+                  tooltip: 'Выйти из полного экрана',
+                  onPressed: () => setState(() => _fullScreen = false),
+                  child: const Icon(Icons.fullscreen_exit_rounded),
+                ),
+              ],
+            )
+          : null,
       body: _loadError != null
           ? Center(
               child: Padding(
@@ -1101,30 +1208,37 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
               : Column(
                   children: [
                     Expanded(
-                      child: Scrollbar(
-                        controller: _scrollController,
-                        thumbVisibility: true,
-                        interactive: true,
-                        child: ListView.builder(
+                      child: KeyedSubtree(
+                        key: _fb2ViewportKey,
+                        child: Scrollbar(
                           controller: _scrollController,
-                          padding: const EdgeInsets.fromLTRB(22, 18, 22, 28),
-                          itemCount: document.blocks.length,
-                          itemBuilder: (context, index) => _Fb2BlockView(block: document.blocks[index]),
+                          thumbVisibility: true,
+                          interactive: true,
+                          child: ListView.builder(
+                            controller: _scrollController,
+                            padding: const EdgeInsets.fromLTRB(22, 18, 22, 28),
+                            itemCount: document.blocks.length,
+                            itemBuilder: (context, index) => KeyedSubtree(
+                              key: index < _blockKeys.length ? _blockKeys[index] : null,
+                              child: _Fb2BlockView(block: document.blocks[index]),
+                            ),
+                          ),
                         ),
                       ),
                     ),
-                    SafeArea(
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
-                        child: Row(
-                          children: [
-                            Expanded(child: LinearProgressIndicator(value: _progress.clamp(0, 100) / 100)),
-                            const SizedBox(width: 12),
-                            Text('${_progress.clamp(0, 100).toStringAsFixed(1)}%'),
-                          ],
+                    if (!_fullScreen)
+                      SafeArea(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
+                          child: Row(
+                            children: [
+                              Expanded(child: LinearProgressIndicator(value: _progress.clamp(0, 100) / 100)),
+                              const SizedBox(width: 12),
+                              Text('${_progress.clamp(0, 100).toStringAsFixed(1)}%'),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
                   ],
                 ),
     );

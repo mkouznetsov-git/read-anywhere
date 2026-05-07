@@ -214,3 +214,11 @@ macOS DMG/PKG build
 2. Open it and verify that title/paragraph text is readable.
 3. Scroll to a recognizable location, close, reopen, and verify position restore.
 4. Sync to another device and verify that the same approximate top line is restored there.
+
+## Sprint 11 Hotfix 02 checks
+
+- Отключить Tailscale/relay при работающем приложении: статус sync должен стать недоступным примерно за 5 секунд.
+- Снова включить relay: приложение должно подключиться автоматически без ручной кнопки.
+- При выключенном relay на старте приложения статус не должен прыгать между `Подключено` и `Relay недоступен`.
+- FB2: при прокрутке прогресс должен монотонно меняться по верхнему видимому блоку.
+- TXT/FB2: включить полноэкранный режим, убедиться, что скрыты панели и доступны только книга, scrollbar, закладка и выход из fullscreen.

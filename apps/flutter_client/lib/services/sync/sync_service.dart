@@ -189,8 +189,10 @@ class SyncService {
   static const _replayWindow = Duration(hours: 24);
 
   Timer? _reconnectTimer;
+  Timer? _healthTimer;
   bool _manualDisconnect = true;
   bool _reconnectInProgress = false;
+  bool _relayUnavailableLogged = false;
   int _reconnectAttempt = 0;
   String? _lastRelayUrl;
 
@@ -211,6 +213,7 @@ class SyncService {
     );
 
     final manifest = await _storage.loadManifest();
+    await _probeRelayHealth(relayUrl, timeout: const Duration(seconds: 5));
     final uri = Uri.parse(relayUrl.trim());
     final client = RelayClient(
       relayUri: uri,
@@ -234,22 +237,26 @@ class SyncService {
     } catch (error) {
       await disconnect(manual: false);
       if (!_reconnectInProgress) {
-        _appendLog('Relay недоступен. Автопереподключение включено.');
+        _appendRelayUnavailableLogOnce();
         _scheduleReconnect();
       }
       rethrow;
     }
     _reconnectAttempt = 0;
+    _relayUnavailableLogged = false;
     _appendLog('Подключено к $relayUrl');
     _setState(
       state.value.copyWith(connected: true, statusText: 'Подключено'),
     );
+    _startHealthMonitor(relayUrl);
 
     await refreshMetadata(reason: 'connected');
     _scheduleStartupMetadataRefresh(client);
   }
 
   Future<void> disconnect({bool manual = true}) async {
+    _healthTimer?.cancel();
+    _healthTimer = null;
     if (manual) {
       _manualDisconnect = true;
       _reconnectTimer?.cancel();
@@ -273,9 +280,7 @@ class SyncService {
   Future<void> _handleRelayDisconnected(Object error) async {
     if (_manualDisconnect) return;
     await disconnect(manual: false);
-    if (_reconnectAttempt == 0) {
-      _appendLog('Relay недоступен. Автопереподключение включено.');
-    }
+    _appendRelayUnavailableLogOnce();
     _scheduleReconnect();
   }
 
@@ -296,8 +301,47 @@ class SyncService {
   }
 
   int _reconnectDelaySeconds(int attempt) {
-    const delays = [2, 4, 8, 15, 30, 60];
+    // Keep retry/health traffic modest, but detect recovery quickly.
+    // After the first two quick attempts we probe every 5 seconds.
+    const delays = [2, 2, 5, 5, 5, 5];
     return delays[attempt.clamp(0, delays.length - 1).toInt()];
+  }
+
+  void _appendRelayUnavailableLogOnce() {
+    if (_relayUnavailableLogged) return;
+    _relayUnavailableLogged = true;
+    _appendLog('Relay недоступен. Автопереподключение включено.');
+  }
+
+  void _startHealthMonitor(String relayUrl) {
+    _healthTimer?.cancel();
+    _healthTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      unawaited(_checkRelayHealth(relayUrl));
+    });
+  }
+
+  Future<void> _checkRelayHealth(String relayUrl) async {
+    if (_manualDisconnect || !state.value.connected) return;
+    try {
+      await _probeRelayHealth(relayUrl, timeout: const Duration(seconds: 4));
+    } catch (error) {
+      await _handleRelayDisconnected(error);
+    }
+  }
+
+  Future<void> _probeRelayHealth(String relayUrl, {required Duration timeout}) async {
+    final uri = _buildEndpointUri(relayUrl, '/health');
+    final client = HttpClient()..connectionTimeout = timeout;
+    try {
+      final request = await client.getUrl(uri).timeout(timeout);
+      final response = await request.close().timeout(timeout);
+      await response.drain().timeout(timeout);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw StateError('HTTP ${response.statusCode}');
+      }
+    } finally {
+      client.close(force: true);
+    }
   }
 
   Future<void> _attemptReconnect(String relayUrl) async {
