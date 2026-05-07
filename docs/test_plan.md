@@ -232,3 +232,11 @@ macOS DMG/PKG build
 - TXT and FB2 text can be selected/copied.
 - FB2 images can be copied as data URI.
 - Fullscreen mode is available for TXT, FB2 and PDF.
+
+## Sprint 16 checks
+
+- Импортировать EPUB и проверить открытие на Mac и Android.
+- Пролистать EPUB, закрыть, открыть снова и проверить восстановление позиции.
+- Проверить синхронизацию EPUB progress между устройствами.
+- Проверить копирование видимого фрагмента в TXT, FB2 и EPUB.
+- Проверить скачивание книги 5–10 MB и сравнить скорость со Sprint 15.

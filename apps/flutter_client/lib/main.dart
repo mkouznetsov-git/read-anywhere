@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:archive/archive.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:pdfx/pdfx.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -479,6 +480,8 @@ class ReaderScreen extends StatelessWidget {
         return _TxtReaderScreen(book: book, storage: storage, sync: sync);
       case 'fb2':
         return _Fb2ReaderScreen(book: book, storage: storage, sync: sync);
+      case 'epub':
+        return _TxtReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _TextSourceKind.epub);
       case 'pdf':
         return _PdfReaderScreen(book: book, storage: storage, sync: sync);
       default:
@@ -490,7 +493,7 @@ class ReaderScreen extends StatelessWidget {
   }
 }
 
-enum _TextSourceKind { txt, fb2 }
+enum _TextSourceKind { txt, fb2, epub }
 
 class _TxtReaderScreen extends StatefulWidget {
   const _TxtReaderScreen({
@@ -584,10 +587,11 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
       final file = File(book.localPath!);
       if (!await file.exists()) throw StateError('Файл отсутствует: ${book.localPath}');
       final bytes = await file.readAsBytes();
-      final decoded = _decodeTextFile(bytes);
-      final raw = widget.sourceKind == _TextSourceKind.fb2
-          ? _extractFb2Text(decoded)
-          : _normalizeText(decoded);
+      final raw = switch (widget.sourceKind) {
+        _TextSourceKind.fb2 => _extractFb2Text(_decodeTextFile(bytes)),
+        _TextSourceKind.epub => _extractEpubText(bytes),
+        _TextSourceKind.txt => _normalizeText(_decodeTextFile(bytes)),
+      };
       final totalChars = raw.length;
       final targetChar = _targetCharForBook(book, totalChars);
       if (!mounted) return;
@@ -603,7 +607,11 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
       });
     } catch (error) {
       if (!mounted) return;
-      final label = widget.sourceKind == _TextSourceKind.fb2 ? 'FB2' : 'TXT';
+      final label = switch (widget.sourceKind) {
+        _TextSourceKind.fb2 => 'FB2',
+        _TextSourceKind.epub => 'EPUB',
+        _TextSourceKind.txt => 'TXT',
+      };
       setState(() => _loadError = 'Не удалось открыть $label: $error');
     }
   }
@@ -660,6 +668,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
       final type = decoded['type'];
       if (type == 'txt-line-anchor-v1' ||
           type == 'fb2-line-anchor-v1' ||
+          type == 'epub-line-anchor-v1' ||
           type == 'txt-top-anchor-v3' ||
           type == 'txt-top-anchor-v2' ||
           type == 'txt-top-anchor-v1' ||
@@ -784,13 +793,38 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
     });
   }
 
+  String get _textLocatorType => switch (widget.sourceKind) {
+        _TextSourceKind.fb2 => 'fb2-line-anchor-v1',
+        _TextSourceKind.epub => 'epub-line-anchor-v1',
+        _TextSourceKind.txt => 'txt-line-anchor-v1',
+      };
+
+  String get _textReaderLabel => switch (widget.sourceKind) {
+        _TextSourceKind.fb2 => 'FB2',
+        _TextSourceKind.epub => 'EPUB',
+        _TextSourceKind.txt => 'TXT',
+      };
+
+  Future<void> _copyVisibleText() async {
+    final lines = _lines;
+    if (lines == null || lines.isEmpty) return;
+    final current = _currentLocator();
+    final start = (current?.lineIndex ?? 0).clamp(0, lines.length - 1).toInt();
+    final end = (start + 36).clamp(start + 1, lines.length).toInt();
+    final text = lines.sublist(start, end).map((line) => line.text).join('\n').trimRight();
+    if (text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Скопирован фрагмент $_textReaderLabel (${end - start} строк)')),
+    );
+  }
+
   Future<void> _saveProgress(_TextAnchorLocator locator) async {
     final manifest = await widget.storage.updateProgress(
       bookId: widget.book.id,
       progressPercent: locator.progressPercent,
-      locator: locator.toJsonString(
-        type: widget.sourceKind == _TextSourceKind.fb2 ? 'fb2-line-anchor-v1' : 'txt-line-anchor-v1',
-      ),
+      locator: locator.toJsonString(type: _textLocatorType),
     );
     for (final book in manifest.books) {
       if (book.id == widget.book.id) {
@@ -806,9 +840,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
     await widget.storage.addBookmark(
       bookId: widget.book.id,
       label: 'Закладка ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
-      locator: locator?.toJsonString(
-            type: widget.sourceKind == _TextSourceKind.fb2 ? 'fb2-line-anchor-v1' : 'txt-line-anchor-v1',
-          ) ??
+      locator: locator?.toJsonString(type: _textLocatorType) ??
           _book.currentLocator,
     );
     await widget.sync.broadcastLibrarySnapshot(reason: 'bookmark_added');
@@ -832,6 +864,11 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
                   icon: const Icon(Icons.fullscreen_rounded),
                 ),
                 IconButton(
+                  tooltip: 'Скопировать видимый фрагмент',
+                  onPressed: lines != null ? _copyVisibleText : null,
+                  icon: const Icon(Icons.copy_all_rounded),
+                ),
+                IconButton(
                   tooltip: 'Добавить закладку',
                   onPressed: lines != null ? _addBookmark : null,
                   icon: const Icon(Icons.bookmark_add_outlined),
@@ -842,6 +879,13 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
           ? Column(
               mainAxisSize: MainAxisSize.min,
               children: [
+                FloatingActionButton.small(
+                  heroTag: 'txt-copy-${widget.book.id}',
+                  tooltip: 'Скопировать видимый фрагмент',
+                  onPressed: lines != null ? _copyVisibleText : null,
+                  child: const Icon(Icons.copy_all_rounded),
+                ),
+                const SizedBox(height: 8),
                 FloatingActionButton.small(
                   heroTag: 'txt-bookmark-${widget.book.id}',
                   tooltip: 'Добавить закладку',
@@ -1249,11 +1293,28 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Закладка добавлена')));
   }
 
-  Future<void> _copyImageDataUri(Uint8List bytes) async {
-    final encoded = base64Encode(bytes);
-    await Clipboard.setData(ClipboardData(text: 'data:image/*;base64,$encoded'));
+  Future<void> _copyVisibleText() async {
+    final units = _units;
+    if (units == null || units.isEmpty) return;
+    final current = _currentLocator();
+    final start = (current?.unitIndex ?? 0).clamp(0, units.length - 1).toInt();
+    final buffer = StringBuffer();
+    var copied = 0;
+    for (var i = start; i < units.length && copied < 40; i++) {
+      final unit = units[i];
+      if (unit.imageBytes != null) continue;
+      final text = unit.segments.map((segment) => segment.text).join('').trimRight();
+      if (text.isEmpty) continue;
+      buffer.writeln(text);
+      copied += 1;
+    }
+    final text = buffer.toString().trimRight();
+    if (text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Изображение скопировано как data URI')));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Скопирован фрагмент FB2 ($copied строк)')),
+    );
   }
 
   Future<void> _openExternalLink(String href) async {
@@ -1285,6 +1346,11 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
                   icon: const Icon(Icons.fullscreen_rounded),
                 ),
                 IconButton(
+                  tooltip: 'Скопировать видимый фрагмент',
+                  onPressed: units != null ? _copyVisibleText : null,
+                  icon: const Icon(Icons.copy_all_rounded),
+                ),
+                IconButton(
                   tooltip: 'Добавить закладку',
                   onPressed: units != null ? _addBookmark : null,
                   icon: const Icon(Icons.bookmark_add_outlined),
@@ -1295,6 +1361,13 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
           ? Column(
               mainAxisSize: MainAxisSize.min,
               children: [
+                FloatingActionButton.small(
+                  heroTag: 'fb2-copy-${widget.book.id}',
+                  tooltip: 'Скопировать видимый фрагмент',
+                  onPressed: units != null ? _copyVisibleText : null,
+                  child: const Icon(Icons.copy_all_rounded),
+                ),
+                const SizedBox(height: 8),
                 FloatingActionButton.small(
                   heroTag: 'fb2-bookmark-${widget.book.id}',
                   tooltip: 'Добавить закладку',
@@ -1350,7 +1423,6 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
                                 return _Fb2UnitView(
                                   unit: unit,
                                   onOpenLink: _openExternalLink,
-                                  onCopyImage: _copyImageDataUri,
                                 );
                               },
                             ),
@@ -1379,11 +1451,10 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
 
 
 class _Fb2UnitView extends StatelessWidget {
-  const _Fb2UnitView({required this.unit, required this.onOpenLink, required this.onCopyImage});
+  const _Fb2UnitView({required this.unit, required this.onOpenLink});
 
   final _Fb2RenderUnit unit;
   final ValueChanged<String> onOpenLink;
-  final ValueChanged<Uint8List> onCopyImage;
 
   @override
   Widget build(BuildContext context) {
@@ -1393,26 +1464,13 @@ class _Fb2UnitView extends StatelessWidget {
         height: unit.extent,
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 8),
-          child: Stack(
-            children: [
-              Center(
-                child: Image.memory(
-                  bytes,
-                  fit: BoxFit.contain,
-                  height: _Fb2ReaderScreenState._imageExtent - 16,
-                  errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined),
-                ),
-              ),
-              Positioned(
-                right: 0,
-                top: 0,
-                child: IconButton.filledTonal(
-                  tooltip: 'Копировать изображение',
-                  onPressed: () => onCopyImage(bytes),
-                  icon: const Icon(Icons.copy_rounded, size: 18),
-                ),
-              ),
-            ],
+          child: Center(
+            child: Image.memory(
+              bytes,
+              fit: BoxFit.contain,
+              height: _Fb2ReaderScreenState._imageExtent - 16,
+              errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined),
+            ),
           ),
         ),
       );
@@ -2105,6 +2163,122 @@ String _decodeTextFile(List<int> bytes) {
 }
 
 String _normalizeText(String text) => text.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+
+
+String _extractEpubText(Uint8List bytes) {
+  final archive = ZipDecoder().decodeBytes(bytes, verify: false);
+  ArchiveFile? findFile(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    for (final file in archive.files) {
+      if (!file.isFile) continue;
+      if (file.name.replaceAll('\\', '/') == normalized) return file;
+    }
+    return null;
+  }
+
+  String fileText(ArchiveFile file) => _decodeTextFile(_archiveFileBytes(file));
+  final container = findFile('META-INF/container.xml');
+  var opfPath = '';
+  if (container != null) {
+    final containerText = fileText(container);
+    final match = RegExp("full-path\\s*=\\s*[\"']([^\"']+)[\"']", caseSensitive: false).firstMatch(containerText);
+    opfPath = match?.group(1) ?? '';
+  }
+  if (opfPath.isEmpty) {
+    for (final file in archive.files) {
+      if (file.isFile && file.name.toLowerCase().endsWith('.opf')) {
+        opfPath = file.name;
+        break;
+      }
+    }
+  }
+  final opf = opfPath.isEmpty ? null : findFile(opfPath);
+  final orderedPaths = <String>[];
+  if (opf != null) {
+    final opfText = fileText(opf);
+    final baseDir = _zipDirName(opfPath);
+    final manifest = <String, String>{};
+    for (final match in RegExp(r'<item\b[^>]*>', caseSensitive: false).allMatches(opfText)) {
+      final tag = match.group(0) ?? '';
+      final id = _xmlAttr(tag, 'id');
+      final href = _xmlAttr(tag, 'href');
+      final mediaType = (_xmlAttr(tag, 'media-type') ?? '').toLowerCase();
+      if (id == null || href == null) continue;
+      final lower = href.toLowerCase();
+      final looksReadable = mediaType.contains('xhtml') || mediaType.contains('html') || lower.endsWith('.xhtml') || lower.endsWith('.html') || lower.endsWith('.htm');
+      if (looksReadable) manifest[id] = _joinZipPath(baseDir, href);
+    }
+    for (final match in RegExp(r'<itemref\b[^>]*>', caseSensitive: false).allMatches(opfText)) {
+      final idref = _xmlAttr(match.group(0) ?? '', 'idref');
+      final path = idref == null ? null : manifest[idref];
+      if (path != null) orderedPaths.add(path);
+    }
+    if (orderedPaths.isEmpty) orderedPaths.addAll(manifest.values);
+  }
+  if (orderedPaths.isEmpty) {
+    for (final file in archive.files) {
+      final name = file.name.toLowerCase();
+      if (file.isFile && (name.endsWith('.xhtml') || name.endsWith('.html') || name.endsWith('.htm'))) {
+        orderedPaths.add(file.name);
+      }
+    }
+    orderedPaths.sort();
+  }
+  final buffer = StringBuffer();
+  for (final path in orderedPaths) {
+    final file = findFile(path);
+    if (file == null) continue;
+    final text = _htmlToPlainText(fileText(file));
+    if (text.trim().isEmpty) continue;
+    if (buffer.isNotEmpty) buffer.writeln('\n');
+    buffer.writeln(text.trim());
+  }
+  final result = _normalizeText(buffer.toString());
+  if (result.trim().isEmpty) throw StateError('EPUB не содержит читаемого XHTML/HTML текста');
+  return result;
+}
+
+Uint8List _archiveFileBytes(ArchiveFile file) {
+  final content = file.content;
+  if (content is Uint8List) return content;
+  if (content is List<int>) return Uint8List.fromList(content);
+  throw StateError('Не удалось прочитать файл EPUB: ${file.name}');
+}
+
+String? _xmlAttr(String tag, String name) {
+  final match = RegExp("$name\\s*=\\s*[\"']([^\"']+)[\"']", caseSensitive: false).firstMatch(tag);
+  return match?.group(1);
+}
+
+String _zipDirName(String path) {
+  final normalized = path.replaceAll('\\', '/');
+  final index = normalized.lastIndexOf('/');
+  return index <= 0 ? '' : normalized.substring(0, index);
+}
+
+String _joinZipPath(String baseDir, String href) {
+  final parts = <String>[];
+  final raw = (baseDir.isEmpty ? href : '$baseDir/$href').split('/');
+  for (final part in raw) {
+    if (part.isEmpty || part == '.') continue;
+    if (part == '..') {
+      if (parts.isNotEmpty) parts.removeLast();
+    } else {
+      parts.add(Uri.decodeFull(part));
+    }
+  }
+  return parts.join('/');
+}
+
+String _htmlToPlainText(String html) {
+  var text = html;
+  text = text.replaceAll(RegExp(r'<script\b[^>]*>.*?</script>', caseSensitive: false, dotAll: true), '');
+  text = text.replaceAll(RegExp(r'<style\b[^>]*>.*?</style>', caseSensitive: false, dotAll: true), '');
+  text = text.replaceAll(RegExp(r'</(p|div|section|article|chapter|h[1-6]|li|tr)>', caseSensitive: false), '\n');
+  text = text.replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n');
+  text = text.replaceAll(RegExp(r'<[^>]+>'), ' ');
+  return _decodeXmlEntities(text).replaceAll(RegExp(r'[ \t\u00a0]+'), ' ').replaceAll(RegExp(r'\n\s+'), '\n');
+}
 
 String _extractFb2Text(String xmlText) {
   var text = _normalizeText(xmlText);

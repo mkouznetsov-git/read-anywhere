@@ -17,7 +17,7 @@ import 'merge.dart';
 import 'relay_client.dart';
 
 const _uuid = Uuid();
-const _defaultChunkSize = 256 * 1024; // Binary ACKed chunks: stable on Android/Tailscale, faster than JSON/base64.
+const _defaultChunkSize = 1024 * 1024; // Binary chunks: 1 MiB keeps Tailscale/Android stable and reduces ACK overhead.
 
 class PairingInvite {
   const PairingInvite({
@@ -1098,7 +1098,7 @@ class SyncService {
     }
 
     final size = await file.length();
-    final safeChunkSize = chunkSize.clamp(128 * 1024, _defaultChunkSize).toInt();
+    final safeChunkSize = chunkSize.clamp(256 * 1024, _defaultChunkSize).toInt();
     final totalChunks = (size / safeChunkSize).ceil();
     final safeStartChunkIndex = startChunkIndex.clamp(0, totalChunks).toInt();
     final startOffset = (safeStartChunkIndex * safeChunkSize).clamp(0, size).toInt();
