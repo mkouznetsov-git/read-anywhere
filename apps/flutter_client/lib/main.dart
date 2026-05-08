@@ -615,7 +615,11 @@ class ReaderScreen extends StatelessWidget {
         return _TxtReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _TextSourceKind.chm);
       case 'djvu':
       case 'djv':
-        return _TxtReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _TextSourceKind.djvu);
+        return _ConversionNeededReaderScreen(
+          book: book,
+          formatLabel: 'DJVU',
+          adapterName: 'DjVuLibre/нативный DJVU renderer',
+        );
       case 'pdf':
         return _PdfReaderScreen(book: book, storage: storage, sync: sync);
       default:
@@ -727,7 +731,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
         _TextSourceKind.docx => _extractDocxText(bytes),
         _TextSourceKind.doc => _extractLegacyBinaryText(bytes, 'DOC'),
         _TextSourceKind.chm => _extractChmText(bytes),
-        _TextSourceKind.djvu => _extractLegacyBinaryText(bytes, 'DJVU'),
+        _TextSourceKind.djvu => _safeUnsupportedBinaryPreview('DJVU'),
         _TextSourceKind.txt => _normalizeText(_decodeTextFile(bytes)),
       };
       final totalChars = raw.length;
@@ -1255,7 +1259,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
 
     final current = _currentLocator() ?? _lastKnownLocator;
     final built = _buildFb2RenderUnits(document, usableWidth);
-    final units = built.isEmpty ? [_Fb2RenderUnit.text(const [_Fb2LineSegment('')], 0, 0, false)] : built;
+    final units = built.isEmpty ? [_Fb2RenderUnit.text(const [_Fb2LineSegment('')], 0, 0, false, 0, 0)] : built;
     final target = _didInitialRestore && current != null
         ? _targetUnitForLocator(current, units)
         : _targetUnitForBook(_book, units);
@@ -1275,17 +1279,36 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
   int _targetUnitForBook(BookRecord book, List<_Fb2RenderUnit> units) {
     if (units.isEmpty) return 0;
     final progress = book.progressPercent.clamp(0.0, 100.0).toDouble();
-    int byProgress() => ((progress / 100.0) * (units.length - 1)).round().clamp(0, units.length - 1).toInt();
+    int byProgress() {
+      final document = _document;
+      final totalChars = document?.totalTextChars ?? 0;
+      if (totalChars > 1) {
+        final anchor = ((progress / 100.0) * (totalChars - 1)).round().clamp(0, totalChars - 1).toInt();
+        return _unitIndexForAnchorChar(anchor, units);
+      }
+      return ((progress / 100.0) * (units.length - 1)).round().clamp(0, units.length - 1).toInt();
+    }
 
     try {
       final decoded = jsonDecode(book.currentLocator);
       if (decoded is Map) {
         final type = decoded['type'];
         final locatorProgress = (decoded['progressPercent'] as num?)?.toDouble();
+        final anchorChar = (decoded['anchorChar'] as num?)?.round();
+        final totalChars = (_document?.totalTextChars ?? (decoded['totalChars'] as num?)?.round() ?? 0);
+        if ((type == 'fb2-unit-anchor-v4' || type == 'epub-unit-anchor-v2' || type == 'docx-unit-anchor-v1') && anchorChar != null) {
+          return _unitIndexForAnchorChar(anchorChar.clamp(0, totalChars > 0 ? totalChars : 1 << 30).toInt(), units);
+        }
         // If manifest.progressPercent and currentLocator disagree, trust the
-        // progress field. This recovers old states where FB2 saved a newer
-        // percentage but kept an older locator, causing reopen at e.g. 4.3%.
-        if (locatorProgress != null && (locatorProgress - progress).abs() > 0.75) {
+        // manifest progress. Also trust progress when the locator was saved on
+        // a different screen width: unitInBlock is a wrapped-line number and is
+        // not stable between macOS/Android. This fixes cases like 2.4% synced
+        // in the list but reopening on Android jumping back to 1.4%.
+        final locatorWidth = (decoded['usableWidth'] as num?)?.toDouble();
+        final savedUnitCount = (decoded['unitCount'] as num?)?.round();
+        final widthChanged = locatorWidth != null && _lastUsableWidth > 0 && (locatorWidth - _lastUsableWidth).abs() > 16;
+        final unitCountChanged = savedUnitCount != null && savedUnitCount > 0 && ((savedUnitCount - units.length).abs() / units.length) > 0.04;
+        if ((locatorProgress != null && (locatorProgress - progress).abs() > 0.75) || widthChanged || unitCountChanged) {
           return byProgress();
         }
 
@@ -1324,9 +1347,29 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
   }
 
   int _targetUnitForLocator(_Fb2UnitLocator locator, List<_Fb2RenderUnit> units) {
+    if (locator.anchorChar > 0) return _unitIndexForAnchorChar(locator.anchorChar, units);
     final idx = units.indexWhere((unit) => unit.blockIndex == locator.blockIndex && unit.unitInBlock == locator.unitInBlock);
     if (idx >= 0) return idx;
     return locator.unitIndex.clamp(0, units.length - 1).toInt();
+  }
+
+  int _unitIndexForAnchorChar(int anchorChar, List<_Fb2RenderUnit> units) {
+    if (units.isEmpty) return 0;
+    final safeAnchor = anchorChar.clamp(0, 1 << 30).toInt();
+    var low = 0;
+    var high = units.length - 1;
+    while (low <= high) {
+      final mid = low + ((high - low) >> 1);
+      final unit = units[mid];
+      if (safeAnchor < unit.anchorChar) {
+        high = mid - 1;
+      } else if (safeAnchor >= unit.endChar && unit.endChar > unit.anchorChar) {
+        low = mid + 1;
+      } else {
+        return mid;
+      }
+    }
+    return low.clamp(0, units.length - 1).toInt();
   }
 
   void _scheduleRestoreScroll() {
@@ -1385,6 +1428,8 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
       unitCount: units.length,
       blockIndex: unit.blockIndex,
       unitInBlock: unit.unitInBlock,
+      anchorChar: unit.anchorChar,
+      totalChars: _document?.totalTextChars ?? 0,
       scrollOffset: _scrollController.hasClients ? _scrollController.offset : null,
       totalExtent: _unitOffsets.isEmpty ? null : (_unitOffsets.last + units.last.extent + _bottomPadding),
       usableWidth: _lastUsableWidth,
@@ -1439,7 +1484,12 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     final manifest = await widget.storage.updateProgress(
       bookId: widget.book.id,
       progressPercent: locator.progressPercent,
-      locator: locator.toJsonString(type: widget.sourceKind == _RichSourceKind.epub ? 'epub-unit-anchor-v1' : 'fb2-unit-anchor-v3'),
+      locator: locator.toJsonString(type: switch (widget.sourceKind) {
+        _RichSourceKind.epub => 'epub-unit-anchor-v2',
+        _RichSourceKind.docx => 'docx-unit-anchor-v1',
+        _RichSourceKind.doc => 'doc-unit-anchor-v1',
+        _RichSourceKind.fb2 => 'fb2-unit-anchor-v4',
+      }),
     );
     for (final book in manifest.books) {
       if (book.id == widget.book.id) {
@@ -1455,7 +1505,13 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     await widget.storage.addBookmark(
       bookId: widget.book.id,
       label: 'Закладка ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
-      locator: locator?.toJsonString(type: widget.sourceKind == _RichSourceKind.epub ? 'epub-unit-anchor-v1' : 'fb2-unit-anchor-v3') ?? _book.currentLocator,
+      locator: locator?.toJsonString(type: switch (widget.sourceKind) {
+            _RichSourceKind.epub => 'epub-unit-anchor-v2',
+            _RichSourceKind.docx => 'docx-unit-anchor-v1',
+            _RichSourceKind.doc => 'doc-unit-anchor-v1',
+            _RichSourceKind.fb2 => 'fb2-unit-anchor-v4',
+          }) ??
+          _book.currentLocator,
     );
     await widget.sync.broadcastLibrarySnapshot(reason: 'bookmark_added');
     if (!mounted) return;
@@ -1798,18 +1854,24 @@ class _Fb2LineSegment {
 
 
 class _Fb2RenderUnit {
-  const _Fb2RenderUnit.text(this.segments, this.blockIndex, this.unitInBlock, this.isTitle)
-      : imageBytes = null,
+  const _Fb2RenderUnit.text(
+    this.segments,
+    this.blockIndex,
+    this.unitInBlock,
+    this.isTitle,
+    this.anchorChar,
+    this.endChar,
+  )   : imageBytes = null,
         tableRows = const [],
         extent = isTitle ? _Fb2ReaderScreenState._titleExtent : _Fb2ReaderScreenState._lineExtent;
 
-  const _Fb2RenderUnit.image(this.imageBytes, this.blockIndex, this.unitInBlock)
+  const _Fb2RenderUnit.image(this.imageBytes, this.blockIndex, this.unitInBlock, this.anchorChar, this.endChar)
       : segments = const [],
         tableRows = const [],
         isTitle = false,
         extent = _Fb2ReaderScreenState._imageExtent;
 
-  _Fb2RenderUnit.table(this.tableRows, this.blockIndex, this.unitInBlock)
+  _Fb2RenderUnit.table(this.tableRows, this.blockIndex, this.unitInBlock, this.anchorChar, this.endChar)
       : segments = const [],
         imageBytes = null,
         isTitle = false,
@@ -1830,6 +1892,8 @@ class _Fb2RenderUnit {
   final int blockIndex;
   final int unitInBlock;
   final bool isTitle;
+  final int anchorChar;
+  final int endChar;
   final double extent;
 }
 
@@ -1839,6 +1903,8 @@ class _Fb2UnitLocator {
     required this.unitCount,
     required this.blockIndex,
     required this.unitInBlock,
+    required this.anchorChar,
+    required this.totalChars,
     this.scrollOffset,
     this.totalExtent,
     this.usableWidth,
@@ -1848,21 +1914,26 @@ class _Fb2UnitLocator {
   final int unitCount;
   final int blockIndex;
   final int unitInBlock;
+  final int anchorChar;
+  final int totalChars;
   final double? scrollOffset;
   final double? totalExtent;
   final double? usableWidth;
 
   double get progressPercent {
+    if (totalChars > 1) return ((anchorChar / (totalChars - 1)) * 100).clamp(0.0, 100.0).toDouble();
     if (unitCount <= 1) return unitCount == 1 && unitIndex > 0 ? 100 : 0;
     return ((unitIndex / (unitCount - 1)) * 100).clamp(0.0, 100.0).toDouble();
   }
 
-  String toJsonString({String type = 'fb2-unit-anchor-v3'}) => jsonEncode({
+  String toJsonString({String type = 'fb2-unit-anchor-v4'}) => jsonEncode({
         'type': type,
         'unitIndex': unitIndex,
         'unitCount': unitCount,
         'blockIndex': blockIndex,
         'unitInBlock': unitInBlock,
+        'anchorChar': anchorChar,
+        'totalChars': totalChars,
         'scrollOffset': scrollOffset,
         'totalExtent': totalExtent,
         'usableWidth': usableWidth,
@@ -1876,41 +1947,48 @@ List<_Fb2RenderUnit> _buildFb2RenderUnits(_Fb2Document document, double usableWi
   final charsPerLine = (usableWidth / (_Fb2ReaderScreenState._fontSize * 0.56)).floor().clamp(24, 140).toInt();
   for (var blockIndex = 0; blockIndex < document.blocks.length; blockIndex++) {
     final block = document.blocks[blockIndex];
+    final blockStartChar = document.startCharForBlock(blockIndex);
+    final blockEndChar = document.endCharForBlock(blockIndex);
     switch (block.kind) {
       case _Fb2BlockKind.image:
         final bytes = block.imageBytes;
-        if (bytes != null && bytes.isNotEmpty) units.add(_Fb2RenderUnit.image(bytes, blockIndex, 0));
+        if (bytes != null && bytes.isNotEmpty) units.add(_Fb2RenderUnit.image(bytes, blockIndex, 0, blockStartChar, blockEndChar));
         break;
       case _Fb2BlockKind.table:
-        if (block.tableRows.isNotEmpty) units.add(_Fb2RenderUnit.table(block.tableRows, blockIndex, 0));
+        if (block.tableRows.isNotEmpty) units.add(_Fb2RenderUnit.table(block.tableRows, blockIndex, 0, blockStartChar, blockEndChar));
         break;
       case _Fb2BlockKind.title:
-        units.addAll(_wrapFb2Segments([_Fb2LineSegment(block.plainText)], blockIndex, true, charsPerLine));
+        units.addAll(_wrapFb2Segments([_Fb2LineSegment(block.plainText)], blockIndex, true, charsPerLine, blockStartChar));
         break;
       case _Fb2BlockKind.paragraph:
         final segments = block.inlines.map((inline) => _Fb2LineSegment(inline.text, href: inline.href, bold: inline.bold, italic: inline.italic, underline: inline.underline)).toList();
-        units.addAll(_wrapFb2Segments(segments, blockIndex, false, charsPerLine));
+        units.addAll(_wrapFb2Segments(segments, blockIndex, false, charsPerLine, blockStartChar));
         break;
     }
   }
   return units;
 }
 
-List<_Fb2RenderUnit> _wrapFb2Segments(List<_Fb2LineSegment> source, int blockIndex, bool isTitle, int charsPerLine) {
+List<_Fb2RenderUnit> _wrapFb2Segments(List<_Fb2LineSegment> source, int blockIndex, bool isTitle, int charsPerLine, int blockStartChar) {
   final result = <_Fb2RenderUnit>[];
   final current = <_Fb2LineSegment>[];
   var currentLen = 0;
   var unitInBlock = 0;
+  var cursor = blockStartChar;
+  var unitStartChar = blockStartChar;
+  var unitEndChar = blockStartChar;
 
   void flush() {
     if (current.isEmpty) return;
     final normalized = current.where((segment) => segment.text.isNotEmpty).toList();
     if (normalized.isNotEmpty) {
-      result.add(_Fb2RenderUnit.text(List.unmodifiable(normalized), blockIndex, unitInBlock, isTitle));
+      result.add(_Fb2RenderUnit.text(List.unmodifiable(normalized), blockIndex, unitInBlock, isTitle, unitStartChar, unitEndChar));
       unitInBlock += 1;
     }
     current.clear();
     currentLen = 0;
+    unitStartChar = cursor;
+    unitEndChar = cursor;
   }
 
   for (final segment in source) {
@@ -1921,9 +1999,12 @@ List<_Fb2RenderUnit> _wrapFb2Segments(List<_Fb2LineSegment> source, int blockInd
         flush();
         continue;
       }
+      if (current.isEmpty) unitStartChar = cursor;
       if (text.length <= remaining) {
         current.add(_Fb2LineSegment(text, href: segment.href, bold: segment.bold, italic: segment.italic, underline: segment.underline));
         currentLen += text.length;
+        cursor += text.length;
+        unitEndChar = cursor;
         text = '';
       } else {
         var cut = text.lastIndexOf(' ', remaining);
@@ -1932,9 +2013,14 @@ List<_Fb2RenderUnit> _wrapFb2Segments(List<_Fb2LineSegment> source, int blockInd
         if (part.isNotEmpty) {
           current.add(_Fb2LineSegment(part, href: segment.href, bold: segment.bold, italic: segment.italic, underline: segment.underline));
           currentLen += part.length;
+          cursor += part.length;
+          unitEndChar = cursor;
         }
         flush();
-        text = text.substring(cut).trimLeft();
+        final rest = text.substring(cut);
+        final trimmedRest = rest.trimLeft();
+        cursor += rest.length - trimmedRest.length;
+        text = trimmedRest;
       }
     }
   }
@@ -2008,9 +2094,40 @@ class _Fb2Block {
 }
 
 class _Fb2Document {
-  const _Fb2Document(this.blocks, {this.linkTargets = const {}});
+  const _Fb2Document(
+    this.blocks, {
+    this.linkTargets = const {},
+    this.blockStartChars = const [],
+    this.totalTextChars = 0,
+  });
+
   final List<_Fb2Block> blocks;
   final Map<String, int> linkTargets;
+  final List<int> blockStartChars;
+  final int totalTextChars;
+
+  int startCharForBlock(int blockIndex) {
+    if (blockStartChars.isEmpty) return 0;
+    return blockStartChars[blockIndex.clamp(0, blockStartChars.length - 1).toInt()];
+  }
+
+  int endCharForBlock(int blockIndex) {
+    final safe = blockIndex.clamp(0, blocks.length - 1).toInt();
+    if (safe + 1 < blockStartChars.length) return blockStartChars[safe + 1];
+    return totalTextChars;
+  }
+}
+
+_Fb2Document _makeFb2Document(List<_Fb2Block> blocks, {Map<String, int> linkTargets = const {}}) {
+  final starts = <int>[];
+  var cursor = 0;
+  for (final block in blocks) {
+    starts.add(cursor);
+    final length = block.kind == _Fb2BlockKind.image ? 1 : block.plainText.trimRight().length;
+    cursor += length <= 0 ? 1 : length;
+    cursor += 1; // Stable separator between blocks; keeps progress based on top logical line.
+  }
+  return _Fb2Document(blocks, linkTargets: linkTargets, blockStartChars: List.unmodifiable(starts), totalTextChars: cursor.clamp(0, 1 << 62).toInt());
 }
 
 class _Fb2Locator {
@@ -2179,7 +2296,7 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
     }
   }
 
-  return _Fb2Document(
+  return _makeFb2Document(
     blocks.isEmpty ? [_Fb2Block.paragraph(const [_Fb2Inline('Не удалось извлечь содержимое EPUB.')])] : blocks,
     linkTargets: linkTargets,
   );
@@ -2192,7 +2309,7 @@ _Fb2Document _parseDocDocument(Uint8List bytes) {
   // external converter such as LibreOffice/antiword; showing binary garbage is
   // worse than a clear adapter message.
   if (_looksLikeZip(bytes)) return _parseDocxDocument(bytes);
-  return const _Fb2Document([
+  return _makeFb2Document(const [
     _Fb2Block.paragraph([
       _Fb2Inline(
         'Legacy binary DOC сохранён и синхронизируется как оригинал. Для встроенного просмотра нужен локальный конвертер DOC → HTML/текст. Пока ReadArc не показывает бинарное содержимое как текст.',
@@ -2355,11 +2472,11 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
   parsePart('word/footnotes.xml', title: 'Сноски');
   parsePart('word/endnotes.xml', title: 'Примечания');
   if (blocks.isEmpty) {
-    return const _Fb2Document([
+    return _makeFb2Document(const [
       _Fb2Block.paragraph([_Fb2Inline('DOCX не содержит извлекаемого текста.')]),
     ]);
   }
-  return _Fb2Document(blocks);
+  return _makeFb2Document(blocks);
 }
 
 bool _looksLikeZip(Uint8List bytes) => bytes.length >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4B;
@@ -2496,7 +2613,7 @@ _Fb2Document _parseFb2Document(String xmlText) {
       if (trimmed.isNotEmpty) blocks.add(_Fb2Block.paragraph([_Fb2Inline(trimmed)]));
     }
   }
-  return _Fb2Document(blocks.isEmpty ? [_Fb2Block.paragraph(const [_Fb2Inline('Не удалось извлечь содержимое FB2.')])] : blocks);
+  return _makeFb2Document(blocks.isEmpty ? [_Fb2Block.paragraph(const [_Fb2Inline('Не удалось извлечь содержимое FB2.')])] : blocks);
 }
 
 List<_Fb2Inline> _parseFb2Inlines(String rawBlock) {
@@ -2556,28 +2673,38 @@ class _PdfReaderScreen extends StatefulWidget {
 }
 
 class _PdfReaderScreenState extends State<_PdfReaderScreen> {
-  PdfController? _controller;
+  PdfDocument? _document;
+  final _scrollController = ScrollController();
   BookRecord? _runtimeBook;
   int _page = 1;
   int _pages = 0;
+  List<_PdfPageGeometry> _pageGeometries = const [];
   String? _loadError;
   String? _textLayer;
   Timer? _saveDebounce;
+  Timer? _scrollRedrawThrottle;
   bool _fullScreen = false;
   bool _showTextLayer = false;
+  bool _restoringScroll = false;
+  double _lastViewportWidth = 0;
 
   BookRecord get _book => _runtimeBook ?? widget.book;
 
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onPdfScroll);
     unawaited(_load());
   }
 
   @override
   void dispose() {
     _saveDebounce?.cancel();
-    _controller?.dispose();
+    _scrollRedrawThrottle?.cancel();
+    _scrollController.removeListener(_onPdfScroll);
+    _scrollController.dispose();
+    final document = _document;
+    if (document != null) unawaited(Future<void>.sync(() => document.close()));
     super.dispose();
   }
 
@@ -2599,72 +2726,88 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
       if (mounted) setState(() => _loadError = 'Файл PDF отсутствует: ${book.localPath}');
       return;
     }
-    final initialPage = _targetPageForBook(book);
-    final textLayer = await _extractPdfTextLayer(file);
-    final controller = PdfController(
-      document: PdfDocument.openFile(file.path),
-      initialPage: initialPage,
-    );
-    if (!mounted) {
-      controller.dispose();
-      return;
+    try {
+      final doc = await PdfDocument.openFile(file.path);
+      final pages = doc.pagesCount;
+      final geometries = await _readPdfPageGeometries(doc, pages);
+      final initialPage = _targetPageForBook(book, pages: pages);
+      final textLayer = await _extractPdfTextLayer(file);
+      if (!mounted) {
+        unawaited(Future<void>.sync(() => doc.close()));
+        return;
+      }
+      setState(() {
+        _runtimeBook = book;
+        _page = initialPage;
+        _pages = pages;
+        _pageGeometries = geometries;
+        _document = doc;
+        _textLayer = textLayer;
+        _loadError = null;
+      });
+      _schedulePdfScrollToPage(initialPage, animated: false);
+    } catch (error) {
+      if (mounted) setState(() => _loadError = 'Не удалось открыть PDF: $error');
     }
-    setState(() {
-      _runtimeBook = book;
-      _page = initialPage;
-      _controller = controller;
-      _textLayer = textLayer;
-      _loadError = null;
-    });
   }
 
-  int _targetPageForBook(BookRecord book) {
+  Future<List<_PdfPageGeometry>> _readPdfPageGeometries(PdfDocument doc, int pages) async {
+    final result = <_PdfPageGeometry>[];
+    for (var pageNumber = 1; pageNumber <= pages; pageNumber++) {
+      try {
+        final page = await doc.getPage(pageNumber);
+        result.add(_PdfPageGeometry(width: page.width.toDouble(), height: page.height.toDouble()));
+        await Future<void>.sync(() => page.close());
+      } catch (_) {
+        result.add(const _PdfPageGeometry(width: 595, height: 842));
+      }
+    }
+    return List.unmodifiable(result);
+  }
+
+  int _targetPageForBook(BookRecord book, {required int pages}) {
     try {
       final decoded = jsonDecode(book.currentLocator);
       if (decoded is Map && decoded['type'] == 'pdf-page-v1') {
-        final page = ((decoded['page'] as num?)?.round() ?? 1).clamp(1, 100000).toInt();
+        final page = ((decoded['page'] as num?)?.round() ?? 1).clamp(1, pages).toInt();
         return page;
       }
     } catch (_) {}
     final p = book.progressPercent.clamp(0, 100).toDouble();
-    if (p <= 0) return 1;
-    return ((p / 100.0) * 1000).round().clamp(1, 100000).toInt();
+    if (pages <= 1 || p <= 0) return 1;
+    return (1 + ((p / 100.0) * (pages - 1)).round()).clamp(1, pages).toInt();
   }
 
-  void _onDocumentLoaded(PdfDocument document) {
-    final pages = document.pagesCount;
-    final safePage = _page.clamp(1, pages).toInt();
-    setState(() {
-      _pages = pages;
-      _page = safePage;
-    });
-    if (safePage != _controller?.page) {
-      _controller?.jumpToPage(safePage);
+  void _onPdfScroll() {
+    if (_restoringScroll || !_scrollController.hasClients || _pages <= 0 || _lastViewportWidth <= 0) return;
+    final page = _pageForOffset(_scrollController.offset, _lastViewportWidth).clamp(1, _pages).toInt();
+    if (page != _page) {
+      _page = page;
+      if (!(_scrollRedrawThrottle?.isActive ?? false)) {
+        _scrollRedrawThrottle = Timer(const Duration(milliseconds: 80), () {
+          if (mounted) setState(() {});
+        });
+      }
+      _saveDebounce?.cancel();
+      _saveDebounce = Timer(const Duration(milliseconds: 500), () {
+        unawaited(_savePage(page));
+      });
     }
   }
 
-  void _onPageChanged(int page) {
-    setState(() => _page = page);
-    _saveDebounce?.cancel();
-    _saveDebounce = Timer(const Duration(milliseconds: 500), () {
-      unawaited(_savePage(page));
-    });
-  }
-
   String _pdfLocatorJson(int page) {
-    final pages = _pages > 0 ? _pages : (_controller?.pagesCount ?? 0);
     final progress = _pdfProgress(page);
     return jsonEncode({
       'type': 'pdf-page-v1',
       'page': page,
-      'pages': pages,
+      'pages': _pages,
       'progressPercent': progress,
       'updatedAt': DateTime.now().toUtc().toIso8601String(),
     });
   }
 
   double _pdfProgress(int page) {
-    final pages = _pages > 0 ? _pages : (_controller?.pagesCount ?? 0);
+    final pages = _pages;
     return pages <= 1 ? 0.0 : (((page - 1) / (pages - 1)) * 100).clamp(0.0, 100.0).toDouble();
   }
 
@@ -2700,9 +2843,52 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
     );
   }
 
+  double _pdfPageDisplayHeight(_PdfPageGeometry geometry, double viewportWidth) {
+    final width = viewportWidth.clamp(220.0, 2200.0).toDouble();
+    final ratio = geometry.height <= 0 || geometry.width <= 0 ? 1.414 : geometry.height / geometry.width;
+    return width * ratio;
+  }
+
+  double _offsetForPage(int page, double viewportWidth) {
+    final safe = page.clamp(1, _pages).toInt();
+    var offset = 12.0;
+    for (var i = 0; i < safe - 1 && i < _pageGeometries.length; i++) {
+      offset += _pdfPageDisplayHeight(_pageGeometries[i], viewportWidth) + 12.0;
+    }
+    return offset;
+  }
+
+  int _pageForOffset(double offset, double viewportWidth) {
+    if (_pageGeometries.isEmpty) return 1;
+    var cursor = 12.0;
+    for (var i = 0; i < _pageGeometries.length; i++) {
+      final height = _pdfPageDisplayHeight(_pageGeometries[i], viewportWidth) + 12.0;
+      if (offset < cursor + height * 0.62) return i + 1;
+      cursor += height;
+    }
+    return _pageGeometries.length;
+  }
+
+  void _schedulePdfScrollToPage(int page, {required bool animated}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted || !_scrollController.hasClients || _lastViewportWidth <= 0) return;
+      _restoringScroll = true;
+      try {
+        final offset = _offsetForPage(page, _lastViewportWidth).clamp(0.0, _scrollController.position.maxScrollExtent);
+        if (animated) {
+          await _scrollController.animateTo(offset, duration: const Duration(milliseconds: 220), curve: Curves.easeOutCubic);
+        } else {
+          _scrollController.jumpTo(offset);
+        }
+      } finally {
+        _restoringScroll = false;
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
-    final controller = _controller;
+    final document = _document;
     return Scaffold(
       backgroundColor: const Color(0xFFF3E7CF),
       appBar: _fullScreen
@@ -2727,7 +2913,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                 ),
                 IconButton(
                   tooltip: 'Добавить закладку',
-                  onPressed: controller != null ? _addBookmark : null,
+                  onPressed: document != null ? _addBookmark : null,
                   icon: const Icon(Icons.bookmark_add_outlined),
                 ),
               ],
@@ -2746,7 +2932,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                 FloatingActionButton.small(
                   heroTag: 'pdf-bookmark-${widget.book.id}',
                   tooltip: 'Добавить закладку',
-                  onPressed: controller != null ? _addBookmark : null,
+                  onPressed: document != null ? _addBookmark : null,
                   child: const Icon(Icons.bookmark_add_outlined),
                 ),
                 const SizedBox(height: 8),
@@ -2766,24 +2952,48 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                 child: Text(_loadError!, textAlign: TextAlign.center),
               ),
             )
-          : controller == null
+          : document == null
               ? const Center(child: CircularProgressIndicator())
               : Column(
                   children: [
                     Expanded(
                       child: _showTextLayer && _hasPdfTextLayer
                           ? _PdfTextLayerView(text: _textLayer!, onCopyAll: _copyPdfTextLayer)
-                          : DecoratedBox(
-                              decoration: const BoxDecoration(color: Color(0xFFF3E7CF)),
-                              child: SizedBox.expand(
-                                child: PdfView(
-                                  controller: controller,
-                                  scrollDirection: Axis.vertical,
-                                  pageSnapping: false,
-                                  onDocumentLoaded: _onDocumentLoaded,
-                                  onPageChanged: _onPageChanged,
-                                ),
-                              ),
+                          : LayoutBuilder(
+                              builder: (context, constraints) {
+                                _lastViewportWidth = constraints.maxWidth;
+                                final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, 3.0).toDouble();
+                                return ColoredBox(
+                                  color: const Color(0xFFF3E7CF),
+                                  child: Scrollbar(
+                                    controller: _scrollController,
+                                    thumbVisibility: true,
+                                    interactive: true,
+                                    child: ListView.builder(
+                                      controller: _scrollController,
+                                      padding: const EdgeInsets.only(top: 12),
+                                      itemCount: _pages,
+                                      itemBuilder: (context, index) {
+                                        final geometry = index < _pageGeometries.length
+                                            ? _pageGeometries[index]
+                                            : const _PdfPageGeometry(width: 595, height: 842);
+                                        final displayWidth = constraints.maxWidth.clamp(220.0, 2200.0).toDouble();
+                                        final displayHeight = _pdfPageDisplayHeight(geometry, displayWidth);
+                                        return Padding(
+                                          padding: const EdgeInsets.only(bottom: 12),
+                                          child: _PdfFitWidthPage(
+                                            document: document,
+                                            pageNumber: index + 1,
+                                            displayWidth: displayWidth,
+                                            displayHeight: displayHeight,
+                                            devicePixelRatio: dpr,
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                );
+                              },
                             ),
                     ),
                     if (!_fullScreen)
@@ -2805,6 +3015,97 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                       ),
                   ],
                 ),
+    );
+  }
+}
+
+class _PdfPageGeometry {
+  const _PdfPageGeometry({required this.width, required this.height});
+
+  final double width;
+  final double height;
+}
+
+class _PdfFitWidthPage extends StatefulWidget {
+  const _PdfFitWidthPage({
+    required this.document,
+    required this.pageNumber,
+    required this.displayWidth,
+    required this.displayHeight,
+    required this.devicePixelRatio,
+  });
+
+  final PdfDocument document;
+  final int pageNumber;
+  final double displayWidth;
+  final double displayHeight;
+  final double devicePixelRatio;
+
+  @override
+  State<_PdfFitWidthPage> createState() => _PdfFitWidthPageState();
+}
+
+class _PdfFitWidthPageState extends State<_PdfFitWidthPage> {
+  late Future<Uint8List?> _imageFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _imageFuture = _render();
+  }
+
+  @override
+  void didUpdateWidget(covariant _PdfFitWidthPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.document != widget.document ||
+        oldWidget.pageNumber != widget.pageNumber ||
+        (oldWidget.displayWidth - widget.displayWidth).abs() > 2 ||
+        (oldWidget.devicePixelRatio - widget.devicePixelRatio).abs() > 0.1) {
+      _imageFuture = _render();
+    }
+  }
+
+  Future<Uint8List?> _render() async {
+    final page = await widget.document.getPage(widget.pageNumber);
+    try {
+      final pixelWidth = (widget.displayWidth * widget.devicePixelRatio).round().clamp(320, 4096).toDouble();
+      final pixelHeight = (widget.displayHeight * widget.devicePixelRatio).round().clamp(320, 8192).toDouble();
+      final image = await page.render(
+        width: pixelWidth,
+        height: pixelHeight,
+        format: PdfPageImageFormat.png,
+        backgroundColor: '#FFFFFF',
+      );
+      return image?.bytes;
+    } finally {
+      await Future<void>.sync(() => page.close());
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: widget.displayWidth,
+      height: widget.displayHeight,
+      child: FutureBuilder<Uint8List?>(
+        future: _imageFuture,
+        builder: (context, snapshot) {
+          final bytes = snapshot.data;
+          if (bytes == null) {
+            return const ColoredBox(
+              color: Color(0xFFF8F1E3),
+              child: Center(child: CircularProgressIndicator()),
+            );
+          }
+          return Image.memory(
+            bytes,
+            width: widget.displayWidth,
+            height: widget.displayHeight,
+            fit: BoxFit.fill,
+            gaplessPlayback: true,
+          );
+        },
+      ),
     );
   }
 }
@@ -3279,10 +3580,15 @@ String _extractLegacyBinaryText(Uint8List bytes, String formatLabel) {
   return lines.take(20000).join('\n');
 }
 
+String _safeUnsupportedBinaryPreview(String formatLabel) {
+  return '$formatLabel-файл сохранён и синхронизируется как оригинал. Чтобы не показывать бинарные “кракозябры”, ReadArc не открывает этот формат как сырой текст. Для полноценного просмотра нужен нативный адаптер/конвертер формата.';
+}
+
 String _extractChmText(Uint8List bytes) {
-  // CHM is a compressed ITSF container. A full reader needs a native CHM/LZX
-  // adapter, but this function avoids the previous binary mojibake by extracting
-  // only high-confidence readable runs from HTML/index/string tables.
+  // CHM is an ITSF container; most real books/help files store topics compressed
+  // with LZX. A naive binary string scan produces readable-looking mojibake, so
+  // this adapter only shows high-confidence HTML/TOC fragments. Otherwise it
+  // deliberately falls back to a clear message instead of “кракозябры”.
   final candidates = <String>[];
 
   void addCandidate(String text) {
@@ -3295,18 +3601,26 @@ String _extractChmText(Uint8List bytes) {
     candidates.addAll(normalized);
   }
 
-  // Some CHM files contain uncompressed HTML fragments or TOC/index entries.
   final cp1251 = _decodeWindows1251(bytes);
   final utf8Text = utf8.decode(bytes, allowMalformed: true);
-  for (final source in [cp1251, utf8Text]) {
-    for (final html in RegExp(r'<(?:html|body|h[1-6]|p|li|object)\b[^>]*>.*?(?:</(?:html|body|h[1-6]|p|li|object)>|$)', caseSensitive: false, dotAll: true).allMatches(source)) {
+  final utf16Text = _extractUtf16LeRuns(bytes, minLength: 8);
+
+  for (final source in [cp1251, utf8Text, utf16Text]) {
+    for (final html in RegExp(
+      r'<(?:html|body|h[1-6]|p|li|ul|ol|table|tr|td|object)\b[^>]*>.*?(?:</(?:html|body|h[1-6]|p|li|ul|ol|table|tr|td|object)>|$)',
+      caseSensitive: false,
+      dotAll: true,
+    ).allMatches(source)) {
       final text = _htmlToPlainText(html.group(0) ?? '');
       addCandidate(text);
     }
-  }
 
-  addCandidate(_extractSingleByteRuns(bytes, minLength: 12));
-  addCandidate(_extractUtf16LeRuns(bytes, minLength: 8));
+    // TOC/index files in CHM often contain plain visible titles near Local/Name
+    // fields. Extract only such labeled snippets; do not scan arbitrary binary.
+    for (final match in RegExp(r'(?:Name|Local|Title)\s*[:=]?\s*([^\n\r<>]{8,180})', caseSensitive: false).allMatches(source)) {
+      addCandidate(match.group(1) ?? '');
+    }
+  }
 
   final deduped = <String>[];
   final seen = <String>{};
@@ -3315,11 +3629,28 @@ String _extractChmText(Uint8List bytes) {
     if (seen.add(key)) deduped.add(line);
   }
 
-  if (deduped.length < 6) {
-    return 'CHM-файл сохранён и синхронизируется как оригинал. Внутренний CHM-контент сжат в ITSF/LZX, поэтому без нативного CHM-адаптера безопасно извлечь текст не удалось. Чтобы не показывать “кракозябры”, ReadArc отображает это сообщение вместо бинарного мусора.';
+  final preview = deduped.take(4000).join('\n');
+  if (!_looksLikeReadableDocumentPreview(preview, minLetters: 80, minWords: 18)) {
+    return 'CHM-файл сохранён и синхронизируется как оригинал. Внутренний CHM-контент обычно сжат в ITSF/LZX; без нативного CHM-адаптера безопасно извлечь главы не удалось. Чтобы не показывать “кракозябры”, ReadArc отображает это сообщение вместо бинарного мусора.';
   }
 
-  return deduped.take(20000).join('\n');
+  return preview;
+}
+
+bool _looksLikeReadableDocumentPreview(String text, {required int minLetters, required int minWords}) {
+  final normalized = text.trim();
+  if (normalized.length < 80) return false;
+  final letters = RegExp(r'[A-Za-zА-Яа-яЁё]').allMatches(normalized).length;
+  final words = RegExp(r'[A-Za-zА-Яа-яЁё]{2,}').allMatches(normalized).length;
+  final replacement = '�'.allMatches(normalized).length;
+  final controls = RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F]').allMatches(normalized).length;
+  final suspicious = RegExp(r'[þÿÐðªº§¤¦¶]').allMatches(normalized).length;
+  final len = normalized.length;
+  if (letters < minLetters || words < minWords) return false;
+  if (replacement > 0 || controls > 0) return false;
+  if (suspicious / len > 0.015) return false;
+  if (letters / len < 0.45) return false;
+  return true;
 }
 
 String _extractSingleByteRuns(Uint8List bytes, {required int minLength}) {
