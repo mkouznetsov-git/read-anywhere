@@ -975,7 +975,6 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
                                   return Text(
                                     line.text,
                                     maxLines: 1,
-          overflow: TextOverflow.clip,
                                     overflow: TextOverflow.clip,
                                     softWrap: false,
                                     style: _readerTextStyle,
@@ -1819,7 +1818,7 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
     for (final match in blockRe.allMatches(html)) {
       final tag = (match.group(1) ?? '').toLowerCase();
       final body = match.group(2) ?? '';
-      for (final img in RegExp(r'<img\b[^>]*\bsrc\s*=\s*["\']([^"\']+)["\'][^>]*>', caseSensitive: false).allMatches(body)) {
+      for (final img in RegExp(r'''<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>''', caseSensitive: false).allMatches(body)) {
         final src = _joinZipPath(baseDir, img.group(1) ?? '');
         final bytes = imagePaths[src] ?? (findFile(src) == null ? null : _archiveFileBytes(findFile(src)!));
         if (bytes != null) blocks.add(_Fb2Block.image(bytes));
@@ -1840,7 +1839,7 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
 List<_Fb2Inline> _parseHtmlInlines(String html, String baseDir) {
   final result = <_Fb2Inline>[];
   var cursor = 0;
-  final linkRe = RegExp(r'<a\b[^>]*\bhref\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>', caseSensitive: false, dotAll: true);
+  final linkRe = RegExp(r'''<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>''', caseSensitive: false, dotAll: true);
   for (final match in linkRe.allMatches(html)) {
     final before = _htmlToPlainText(html.substring(cursor, match.start)).trim();
     if (before.isNotEmpty) result.add(_Fb2Inline('$before '));
