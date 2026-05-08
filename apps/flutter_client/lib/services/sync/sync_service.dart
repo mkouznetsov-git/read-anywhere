@@ -1713,7 +1713,8 @@ class SyncService {
   Future<void> _handleDirectFileRequest(HttpRequest request) async {
     try {
       final segments = request.uri.pathSegments;
-      if (request.method != 'GET' || segments.length != 2 || segments[0] != 'direct-file') {
+      final isDownloadMethod = request.method == 'GET' || request.method == 'HEAD';
+      if (!isDownloadMethod || segments.length != 2 || segments[0] != 'direct-file') {
         request.response.statusCode = HttpStatus.notFound;
         await request.response.close();
         return;
@@ -1747,7 +1748,11 @@ class SyncService {
         request.response.statusCode = HttpStatus.ok;
       }
       request.response.contentLength = size - start;
-      await share.file.openRead(start).pipe(request.response);
+      if (request.method == 'HEAD') {
+        await request.response.close();
+      } else {
+        await share.file.openRead(start).pipe(request.response);
+      }
     } catch (error) {
       try {
         request.response.statusCode = HttpStatus.internalServerError;
@@ -1757,86 +1762,169 @@ class SyncService {
     }
   }
 
+  List<Uri> _directDownloadCandidates(List<String> urls) {
+    final seen = <String>{};
+    final candidates = <Uri>[];
+    for (final rawUrl in urls) {
+      final uri = Uri.tryParse(rawUrl.trim());
+      if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) continue;
+      if (!seen.add(uri.toString())) continue;
+      candidates.add(uri);
+    }
+    candidates.sort((a, b) => _directHostRank(a.host).compareTo(_directHostRank(b.host)));
+    return candidates;
+  }
+
+  int _directHostRank(String host) {
+    if (host.startsWith('192.168.') || host.startsWith('10.') || host.startsWith('172.16.') || host.startsWith('172.17.') || host.startsWith('172.18.') || host.startsWith('172.19.') || host.startsWith('172.2') || host.startsWith('172.30.') || host.startsWith('172.31.')) {
+      return 0;
+    }
+    final parts = host.split('.').map(int.tryParse).toList();
+    if (parts.length == 4 && parts[0] == 100 && parts[1] != null && parts[1]! >= 64 && parts[1]! <= 127) {
+      return 1; // Tailscale/CGNAT range: still usually fast, but after ordinary LAN.
+    }
+    return 2;
+  }
+
+  Future<Uri?> _selectReachableDirectUrl(List<Uri> candidates, String bookId) async {
+    if (candidates.isEmpty) return null;
+    final snap = state.value.downloadForBook(bookId);
+    if (snap != null) {
+      _setDownloadSnapshot(snap.copyWith(
+        statusText: 'Быстро проверяем Direct/LAN (${candidates.length})...',
+        active: true,
+        clearError: true,
+      ));
+    }
+
+    final probing = candidates.take(12).toList(growable: false);
+    final completer = Completer<Uri?>();
+    var pending = probing.length;
+    for (final uri in probing) {
+      unawaited(_probeDirectUrl(uri).then((ok) {
+        if (ok && !completer.isCompleted) completer.complete(uri);
+      }).whenComplete(() {
+        pending -= 1;
+        if (pending <= 0 && !completer.isCompleted) completer.complete(null);
+      }));
+    }
+    return completer.future.timeout(const Duration(seconds: 4), onTimeout: () => null);
+  }
+
+  Future<bool> _probeDirectUrl(Uri uri) async {
+    final client = HttpClient()..connectionTimeout = const Duration(milliseconds: 900);
+    try {
+      final request = await client.openUrl('HEAD', uri).timeout(const Duration(milliseconds: 1200));
+      final response = await request.close().timeout(const Duration(milliseconds: 1500));
+      final ok = response.statusCode == HttpStatus.ok || response.statusCode == HttpStatus.partialContent;
+      try {
+        await response.drain().timeout(const Duration(milliseconds: 300), onTimeout: () => null);
+      } catch (_) {}
+      return ok;
+    } catch (_) {
+      return false;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   Future<bool> _tryDirectDownload(_DownloadSession session, List<String> urls) async {
     final tempFile = session.tempFile;
     if (tempFile == null) return false;
     session.watchdog?.cancel();
-    for (final rawUrl in urls) {
-      final uri = Uri.tryParse(rawUrl);
-      if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) continue;
-      final existing = state.value.downloadForBook(session.bookId);
-      if (existing != null) {
-        _setDownloadSnapshot(existing.copyWith(
-          statusText: 'Пробуем Direct/LAN скачивание...',
-          active: true,
-          clearError: true,
-        ));
-      }
-      final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
-      IOSink? sink;
-      try {
-        var resumeBytes = await tempFile.exists() ? await tempFile.length() : 0;
-        if (resumeBytes > session.expectedBytes) {
-          await tempFile.writeAsBytes(const [], flush: true);
-          resumeBytes = 0;
-        }
-        final request = await client.getUrl(uri).timeout(const Duration(seconds: 12));
-        if (resumeBytes > 0) request.headers.set(HttpHeaders.rangeHeader, 'bytes=$resumeBytes-');
-        final response = await request.close().timeout(const Duration(seconds: 20));
-        if (response.statusCode != HttpStatus.ok && response.statusCode != HttpStatus.partialContent) {
-          await response.drain();
-          continue;
-        }
-        if (response.statusCode == HttpStatus.ok && resumeBytes > 0) {
-          await tempFile.writeAsBytes(const [], flush: true);
-          resumeBytes = 0;
-        }
-        session.receivedBytes = resumeBytes;
-        sink = tempFile.openWrite(mode: FileMode.append);
-        final startedAt = DateTime.now();
-        var lastUi = DateTime.fromMillisecondsSinceEpoch(0);
-        await for (final chunk in response.timeout(const Duration(seconds: 120))) {
-          sink.add(chunk);
-          session.receivedBytes += chunk.length;
-          final now = DateTime.now();
-          if (now.difference(lastUi).inMilliseconds > 250) {
-            lastUi = now;
-            final progress = session.expectedBytes <= 0 ? 0.0 : (session.receivedBytes / session.expectedBytes) * 100;
-            final elapsed = now.difference(startedAt).inMilliseconds.clamp(1, 1 << 31);
-            final mbps = ((session.receivedBytes - resumeBytes) / (1024 * 1024)) / (elapsed / 1000.0);
-            final snap = state.value.downloadForBook(session.bookId);
-            if (snap != null) {
-              _setDownloadSnapshot(snap.copyWith(
-                statusText: 'Direct/LAN: ${progress.clamp(0, 100).toStringAsFixed(1)}% • ${mbps.toStringAsFixed(1)} MB/s',
-                progressPercent: progress.clamp(0, 100).toDouble(),
-                transferredBytes: session.receivedBytes,
-                totalBytes: session.expectedBytes,
-                active: true,
-              ));
-            }
-          }
-        }
-        await sink.flush();
-        await sink.close();
-        sink = null;
-        if (session.expectedBytes <= 0 || session.receivedBytes >= session.expectedBytes) {
-          final snap = state.value.downloadForBook(session.bookId);
-          if (snap != null) {
-            _setDownloadSnapshot(snap.copyWith(statusText: 'Проверяем SHA-256...', active: true));
-          }
-          await _finalizeDownload(session);
-          return true;
-        }
-      } catch (error) {
-        debugPrint('Direct/LAN download failed from $rawUrl: $error');
-      } finally {
-        try { await sink?.close(); } catch (_) {}
-        client.close(force: true);
-      }
+    final candidates = _directDownloadCandidates(urls);
+    final selected = await _selectReachableDirectUrl(candidates, session.bookId);
+    if (selected == null) {
+      _resetDownloadWatchdog(session);
+      return false;
+    }
+
+    final ordered = <Uri>[
+      selected,
+      ...candidates.where((candidate) => candidate != selected),
+    ];
+    for (final uri in ordered.take(3)) {
+      final ok = await _downloadFromDirectUri(session, uri, tempFile);
+      if (ok) return true;
     }
     _resetDownloadWatchdog(session);
     return false;
   }
+
+  Future<bool> _downloadFromDirectUri(_DownloadSession session, Uri uri, File tempFile) async {
+    final existing = state.value.downloadForBook(session.bookId);
+    if (existing != null) {
+      _setDownloadSnapshot(existing.copyWith(
+        statusText: 'Direct/LAN: соединяемся...',
+        active: true,
+        clearError: true,
+      ));
+    }
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
+    IOSink? sink;
+    try {
+      var resumeBytes = await tempFile.exists() ? await tempFile.length() : 0;
+      if (resumeBytes > session.expectedBytes) {
+        await tempFile.writeAsBytes(const [], flush: true);
+        resumeBytes = 0;
+      }
+      final request = await client.getUrl(uri).timeout(const Duration(seconds: 3));
+      if (resumeBytes > 0) request.headers.set(HttpHeaders.rangeHeader, 'bytes=$resumeBytes-');
+      final response = await request.close().timeout(const Duration(seconds: 5));
+      if (response.statusCode != HttpStatus.ok && response.statusCode != HttpStatus.partialContent) {
+        await response.drain();
+        return false;
+      }
+      if (response.statusCode == HttpStatus.ok && resumeBytes > 0) {
+        await tempFile.writeAsBytes(const [], flush: true);
+        resumeBytes = 0;
+      }
+      session.receivedBytes = resumeBytes;
+      sink = tempFile.openWrite(mode: FileMode.append);
+      final startedAt = DateTime.now();
+      var lastUi = DateTime.fromMillisecondsSinceEpoch(0);
+      await for (final chunk in response.timeout(const Duration(seconds: 120))) {
+        sink.add(chunk);
+        session.receivedBytes += chunk.length;
+        final now = DateTime.now();
+        if (now.difference(lastUi).inMilliseconds > 250) {
+          lastUi = now;
+          final progress = session.expectedBytes <= 0 ? 0.0 : (session.receivedBytes / session.expectedBytes) * 100;
+          final elapsed = now.difference(startedAt).inMilliseconds.clamp(1, 1 << 31);
+          final mbps = ((session.receivedBytes - resumeBytes) / (1024 * 1024)) / (elapsed / 1000.0);
+          final snap = state.value.downloadForBook(session.bookId);
+          if (snap != null) {
+            _setDownloadSnapshot(snap.copyWith(
+              statusText: 'Direct/LAN: ${progress.clamp(0, 100).toStringAsFixed(1)}% • ${mbps.toStringAsFixed(1)} MB/s',
+              progressPercent: progress.clamp(0, 100).toDouble(),
+              transferredBytes: session.receivedBytes,
+              totalBytes: session.expectedBytes,
+              active: true,
+            ));
+          }
+        }
+      }
+      await sink.flush();
+      await sink.close();
+      sink = null;
+      if (session.expectedBytes <= 0 || session.receivedBytes >= session.expectedBytes) {
+        final snap = state.value.downloadForBook(session.bookId);
+        if (snap != null) {
+          _setDownloadSnapshot(snap.copyWith(statusText: 'Проверяем SHA-256...', active: true));
+        }
+        await _finalizeDownload(session);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      debugPrint('Direct/LAN download failed from $uri: $error');
+      return false;
+    } finally {
+      try { await sink?.close(); } catch (_) {}
+      client.close(force: true);
+    }
+  }
+
 
   Future<void> _sendFileError(
     LibraryManifest local,

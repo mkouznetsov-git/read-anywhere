@@ -605,10 +605,10 @@ class ReaderScreen extends StatelessWidget {
       case 'doc':
         return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.doc);
       case 'chm':
-        return _ConversionNeededReaderScreen(book: book, formatLabel: 'CHM', adapterName: 'HTML Help/CHM');
+        return _TxtReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _TextSourceKind.chm);
       case 'djvu':
       case 'djv':
-        return _ConversionNeededReaderScreen(book: book, formatLabel: 'DJVU', adapterName: 'DjVuLibre/MuPDF');
+        return _TxtReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _TextSourceKind.djvu);
       case 'pdf':
         return _PdfReaderScreen(book: book, storage: storage, sync: sync);
       default:
@@ -1479,16 +1479,47 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
   }
 
   Future<void> _openExternalLink(String href) async {
-    final uri = Uri.tryParse(href.trim());
-    if (uri == null || !uri.hasScheme) {
+    final trimmed = href.trim();
+    if (trimmed.isEmpty) return;
+    final uri = Uri.tryParse(trimmed);
+    final isExternal = uri != null && uri.hasScheme && uri.scheme.toLowerCase() != 'file';
+    if (!isExternal) {
+      final target = _internalLinkTargetFor(trimmed);
+      final units = _units;
+      if (target != null && units != null && units.isNotEmpty && _scrollController.hasClients) {
+        final unitIndex = units.indexWhere((unit) => unit.blockIndex >= target);
+        final safe = (unitIndex < 0 ? units.length - 1 : unitIndex).clamp(0, units.length - 1).toInt();
+        _pendingUnitIndex = safe;
+        final offset = _offsetForUnit(safe).clamp(0.0, _scrollController.position.maxScrollExtent);
+        await _scrollController.animateTo(offset, duration: const Duration(milliseconds: 220), curve: Curves.easeOutCubic);
+        final locator = _locatorForUnit(safe);
+        if (locator != null) {
+          _lastKnownLocator = locator;
+          _progress = locator.progressPercent;
+          unawaited(_saveProgress(locator));
+          if (mounted) setState(() {});
+        }
+        return;
+      }
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Внутренняя ссылка: $href')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не найден якорь: $href')));
       return;
     }
     final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
     if (!ok && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось открыть ссылку: $href')));
     }
+  }
+
+  int? _internalLinkTargetFor(String href) {
+    final document = _document;
+    if (document == null || document.linkTargets.isEmpty) return null;
+    final candidates = _internalHrefLookupCandidates(href);
+    for (final key in candidates) {
+      final target = document.linkTargets[key];
+      if (target != null) return target;
+    }
+    return null;
   }
 
   @override
@@ -1815,16 +1846,16 @@ class _Fb2Inline {
 }
 
 class _Fb2Block {
-  const _Fb2Block.paragraph(this.inlines)
+  const _Fb2Block.paragraph(this.inlines, {this.anchors = const []})
       : kind = _Fb2BlockKind.paragraph,
         imageBytes = null,
         _titleText = '';
-  const _Fb2Block.title(String text)
+  const _Fb2Block.title(String text, {this.anchors = const []})
       : kind = _Fb2BlockKind.title,
         inlines = const [],
         imageBytes = null,
         _titleText = text;
-  const _Fb2Block.image(this.imageBytes)
+  const _Fb2Block.image(this.imageBytes, {this.anchors = const []})
       : kind = _Fb2BlockKind.image,
         inlines = const [],
         _titleText = '';
@@ -1833,13 +1864,15 @@ class _Fb2Block {
   final List<_Fb2Inline> inlines;
   final Uint8List? imageBytes;
   final String _titleText;
+  final List<String> anchors;
 
   String get plainText => kind == _Fb2BlockKind.title ? _titleText : inlines.map((item) => item.text).join();
 }
 
 class _Fb2Document {
-  const _Fb2Document(this.blocks);
+  const _Fb2Document(this.blocks, {this.linkTargets = const {}});
   final List<_Fb2Block> blocks;
+  final Map<String, int> linkTargets;
 }
 
 class _Fb2Locator {
@@ -1888,8 +1921,42 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
       }
     }
   }
+
   final orderedPaths = <String>[];
   final imagePaths = <String, Uint8List>{};
+  final linkTargets = <String, int>{};
+
+  void addTarget(String path, String? anchor, int blockIndex) {
+    void put(String key) {
+      final normalized = key.trim().replaceAll('\\', '/');
+      if (normalized.isEmpty) return;
+      linkTargets.putIfAbsent(normalized, () => blockIndex);
+      try {
+        linkTargets.putIfAbsent(Uri.decodeFull(normalized), () => blockIndex);
+      } catch (_) {}
+    }
+
+    final normalizedPath = _joinZipPath('', path);
+    put(normalizedPath);
+    if (anchor == null || anchor.trim().isEmpty) return;
+    final normalizedAnchor = _decodeXmlEntities(anchor).trim();
+    put('$normalizedPath#$normalizedAnchor');
+    put('#$normalizedAnchor');
+    put(normalizedAnchor);
+  }
+
+  List<String> anchorsFrom(String attrs, String body) {
+    final anchors = <String>[];
+    final id = _attr(attrs, 'id') ?? _attr(attrs, 'xml:id') ?? _attr(attrs, 'name');
+    if (id != null && id.isNotEmpty) anchors.add(id);
+    for (final match in RegExp(r'''<a\b([^>]*)>''', caseSensitive: false).allMatches(body)) {
+      final anchorAttrs = match.group(1) ?? '';
+      final anchor = _attr(anchorAttrs, 'id') ?? _attr(anchorAttrs, 'name') ?? _attr(anchorAttrs, 'xml:id');
+      if (anchor != null && anchor.isNotEmpty) anchors.add(anchor);
+    }
+    return anchors.toSet().toList(growable: false);
+  }
+
   final opf = opfPath.isEmpty ? null : findFile(opfPath);
   if (opf != null) {
     final opfText = fileText(opf);
@@ -1918,44 +1985,66 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
     }
     if (orderedPaths.isEmpty) orderedPaths.addAll(manifest.values);
   }
+
   if (orderedPaths.isEmpty) {
     for (final file in archive.files) {
       final name = file.name.toLowerCase();
       if (file.isFile && (name.endsWith('.xhtml') || name.endsWith('.html') || name.endsWith('.htm'))) orderedPaths.add(file.name);
-      if (file.isFile && (name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.gif') || name.endsWith('.webp'))) imagePaths[file.name] = _archiveFileBytes(file);
+      if (file.isFile && (name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.gif') || name.endsWith('.webp'))) {
+        imagePaths[file.name] = _archiveFileBytes(file);
+      }
     }
     orderedPaths.sort();
   }
 
   final blocks = <_Fb2Block>[];
   for (final path in orderedPaths) {
-    final file = findFile(path);
+    final normalizedPath = _joinZipPath('', path);
+    final file = findFile(normalizedPath);
     if (file == null) continue;
-    final baseDir = _zipDirName(path);
     var html = fileText(file);
     html = html.replaceAll(RegExp(r'<script\b[^>]*>.*?</script>', caseSensitive: false, dotAll: true), '');
     html = html.replaceAll(RegExp(r'<style\b[^>]*>.*?</style>', caseSensitive: false, dotAll: true), '');
 
-    final blockRe = RegExp(r'<(h[1-6]|title|p|div|section|li|blockquote)\b[^>]*>(.*?)</\1>', caseSensitive: false, dotAll: true);
+    addTarget(normalizedPath, null, blocks.length);
+    final bodyTag = RegExp(r'''<body\b([^>]*)>''', caseSensitive: false).firstMatch(html);
+    if (bodyTag != null) {
+      final bodyAttrs = bodyTag.group(1) ?? '';
+      final bodyAnchor = _attr(bodyAttrs, 'id') ?? _attr(bodyAttrs, 'xml:id');
+      addTarget(normalizedPath, bodyAnchor, blocks.length);
+    }
+
+    final blockRe = RegExp(r'<(h[1-6]|title|p|div|section|li|blockquote)\b([^>]*)>(.*?)</\1>', caseSensitive: false, dotAll: true);
     for (final match in blockRe.allMatches(html)) {
       final tag = (match.group(1) ?? '').toLowerCase();
-      final body = match.group(2) ?? '';
-      for (final img in RegExp(r'''<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>''', caseSensitive: false).allMatches(body)) {
-        final src = _joinZipPath(baseDir, img.group(1) ?? '');
-        final bytes = imagePaths[src] ?? (findFile(src) == null ? null : _archiveFileBytes(findFile(src)!));
-        if (bytes != null) blocks.add(_Fb2Block.image(bytes));
+      final attrs = match.group(2) ?? '';
+      final body = match.group(3) ?? '';
+      final targetIndex = blocks.length;
+      final anchors = anchorsFrom(attrs, body);
+      for (final anchor in anchors) {
+        addTarget(normalizedPath, anchor, targetIndex);
       }
-      final inlines = _parseHtmlInlines(body, baseDir);
+
+      for (final img in RegExp(r'''<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>''', caseSensitive: false).allMatches(body)) {
+        final src = _normalizeHtmlHref(img.group(1) ?? '', normalizedPath);
+        final image = imagePaths[src] ?? (findFile(src) == null ? null : _archiveFileBytes(findFile(src)!));
+        if (image != null) blocks.add(_Fb2Block.image(image, anchors: anchors));
+      }
+      final inlines = _parseHtmlInlines(body, normalizedPath);
       final text = inlines.map((item) => item.text).join().replaceAll(RegExp(r'\s+'), ' ').trim();
       if (text.isEmpty) continue;
       if (tag.startsWith('h') || tag == 'title') {
-        blocks.add(_Fb2Block.title(text));
+        blocks.add(_Fb2Block.title(text, anchors: anchors));
       } else {
-        blocks.add(_Fb2Block.paragraph(inlines));
+        blocks.add(_Fb2Block.paragraph(inlines, anchors: anchors));
       }
     }
   }
-  return _Fb2Document(blocks.isEmpty ? [_Fb2Block.paragraph(const [_Fb2Inline('Не удалось извлечь содержимое EPUB.')])] : blocks);
+
+  return _Fb2Document(
+    blocks.isEmpty ? [_Fb2Block.paragraph(const [_Fb2Inline('Не удалось извлечь содержимое EPUB.')])] : blocks,
+    linkTargets: linkTargets,
+  );
 }
 
 
@@ -1977,10 +2066,81 @@ _Fb2Document _parseDocDocument(Uint8List bytes) {
 _Fb2Document _parseDocxDocument(Uint8List bytes) {
   final archive = ZipDecoder().decodeBytes(bytes, verify: false);
   ArchiveFile? findFile(String path) {
+    final normalized = path.replaceAll('\\', '/');
     for (final file in archive.files) {
-      if (file.isFile && file.name.replaceAll('\\', '/') == path) return file;
+      if (file.isFile && file.name.replaceAll('\\', '/') == normalized) return file;
     }
     return null;
+  }
+
+  Map<String, String> relationshipsFor(String partPath) {
+    final normalizedPart = partPath.replaceAll('\\', '/');
+    final dir = _zipDirName(normalizedPart);
+    final fileName = normalizedPart.split('/').last;
+    final relsPath = dir.isEmpty ? '_rels/$fileName.rels' : '$dir/_rels/$fileName.rels';
+    final rels = findFile(relsPath);
+    if (rels == null) return const {};
+    final xml = _decodeTextFile(_archiveFileBytes(rels));
+    final result = <String, String>{};
+    for (final match in RegExp(r'<Relationship\b[^>]*>', caseSensitive: false).allMatches(xml)) {
+      final tag = match.group(0) ?? '';
+      final id = _xmlAttr(tag, 'Id') ?? _xmlAttr(tag, 'id');
+      final target = _xmlAttr(tag, 'Target') ?? _xmlAttr(tag, 'target');
+      final mode = (_xmlAttr(tag, 'TargetMode') ?? '').toLowerCase();
+      if (id == null || target == null || mode == 'external') continue;
+      result[id] = _joinZipPath(dir, target);
+    }
+    return result;
+  }
+
+  String textFromXml(String xml) {
+    final buffer = StringBuffer();
+    final tokens = RegExp(
+      r'<w:tab\b[^>]*/>|<w:br\b[^>]*/>|<w:t\b[^>]*>(.*?)</w:t>',
+      caseSensitive: false,
+      dotAll: true,
+    );
+    for (final token in tokens.allMatches(xml)) {
+      final raw = token.group(0) ?? '';
+      if (raw.startsWith(RegExp(r'<w:tab', caseSensitive: false))) {
+        buffer.write('\t');
+      } else if (raw.startsWith(RegExp(r'<w:br', caseSensitive: false))) {
+        buffer.write('\n');
+      } else {
+        buffer.write(_decodeXmlEntities(token.group(1) ?? ''));
+      }
+    }
+    return buffer.toString().replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trim();
+  }
+
+  List<Uint8List> imagesFromXml(String xml, Map<String, String> rels) {
+    final images = <Uint8List>[];
+    final ids = <String>{};
+    for (final match in RegExp(r'''<(?:a:blip|v:imagedata)\b[^>]*(?:r:embed|r:id)\s*=\s*["']([^"']+)["'][^>]*>''', caseSensitive: false).allMatches(xml)) {
+      final id = match.group(1);
+      if (id != null && id.isNotEmpty) ids.add(id);
+    }
+    for (final id in ids) {
+      final path = rels[id];
+      if (path == null) continue;
+      final file = findFile(path);
+      if (file != null) images.add(_archiveFileBytes(file));
+    }
+    return images;
+  }
+
+  List<String> tableRowsFromXml(String tblXml) {
+    final rows = <String>[];
+    for (final row in RegExp(r'<w:tr\b[^>]*>(.*?)</w:tr>', caseSensitive: false, dotAll: true).allMatches(tblXml)) {
+      final cells = <String>[];
+      final rowBody = row.group(1) ?? '';
+      for (final cell in RegExp(r'<w:tc\b[^>]*>(.*?)</w:tc>', caseSensitive: false, dotAll: true).allMatches(rowBody)) {
+        final cellText = textFromXml(cell.group(1) ?? '').replaceAll(RegExp(r'\s*\n\s*'), ' ').trim();
+        cells.add(cellText.isEmpty ? ' ' : cellText);
+      }
+      if (cells.any((cell) => cell.trim().isNotEmpty)) rows.add('│ ${cells.join(' │ ')} │');
+    }
+    return rows;
   }
 
   final blocks = <_Fb2Block>[];
@@ -1989,20 +2149,29 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     if (file == null) return;
     if (title != null && title.isNotEmpty) blocks.add(_Fb2Block.title(title));
     var xml = _decodeTextFile(_archiveFileBytes(file));
-    xml = xml.replaceAll(RegExp(r'<w:tab\b[^>]*/>', caseSensitive: false), '\t');
-    xml = xml.replaceAll(RegExp(r'<w:br\b[^>]*/>', caseSensitive: false), '\n');
-    final paragraphRe = RegExp(r'<w:p\b[^>]*>(.*?)</w:p>', caseSensitive: false, dotAll: true);
-    for (final para in paragraphRe.allMatches(xml)) {
-      final body = para.group(1) ?? '';
-      final isHeading = RegExp(r'''<w:pStyle\b[^>]*w:val\s*=\s*["']Heading[1-6]["']''', caseSensitive: false).hasMatch(body) ||
-          RegExp(r'<w:outlineLvl\b', caseSensitive: false).hasMatch(body);
-      final isList = RegExp(r'<w:numPr\b', caseSensitive: false).hasMatch(body);
-      final textBuffer = StringBuffer();
-      final runTextRe = RegExp(r'<w:t\b[^>]*>(.*?)</w:t>', caseSensitive: false, dotAll: true);
-      for (final run in runTextRe.allMatches(body)) {
-        textBuffer.write(_decodeXmlEntities(run.group(1) ?? ''));
+    xml = xml.replaceAll(RegExp(r'<w:tab\b[^>]*/>', caseSensitive: false), '<w:tab/>');
+    xml = xml.replaceAll(RegExp(r'<w:br\b[^>]*/>', caseSensitive: false), '<w:br/>');
+    final rels = relationshipsFor(path);
+
+    final blockRe = RegExp(r'<w:tbl\b[^>]*>.*?</w:tbl>|<w:p\b[^>]*>.*?</w:p>', caseSensitive: false, dotAll: true);
+    for (final blockMatch in blockRe.allMatches(xml)) {
+      final raw = blockMatch.group(0) ?? '';
+      for (final image in imagesFromXml(raw, rels)) {
+        blocks.add(_Fb2Block.image(image));
       }
-      var text = textBuffer.toString().replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trim();
+
+      if (raw.startsWith(RegExp(r'<w:tbl', caseSensitive: false))) {
+        final rows = tableRowsFromXml(raw);
+        for (final row in rows) {
+          blocks.add(_Fb2Block.paragraph([_Fb2Inline(row)]));
+        }
+        continue;
+      }
+
+      final isHeading = RegExp(r'''<w:pStyle\b[^>]*w:val\s*=\s*["']Heading[1-6]["']''', caseSensitive: false).hasMatch(raw) ||
+          RegExp(r'<w:outlineLvl\b', caseSensitive: false).hasMatch(raw);
+      final isList = RegExp(r'<w:numPr\b', caseSensitive: false).hasMatch(raw);
+      var text = textFromXml(raw);
       if (text.isEmpty) continue;
       if (isList) text = '• $text';
       if (isHeading) {
@@ -2026,15 +2195,14 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
 
 bool _looksLikeZip(Uint8List bytes) => bytes.length >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4B;
 
-List<_Fb2Inline> _parseHtmlInlines(String html, String baseDir) {
+List<_Fb2Inline> _parseHtmlInlines(String html, String currentPath) {
   final result = <_Fb2Inline>[];
   var cursor = 0;
   final linkRe = RegExp(r'''<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>''', caseSensitive: false, dotAll: true);
   for (final match in linkRe.allMatches(html)) {
     final before = _htmlToPlainText(html.substring(cursor, match.start)).trim();
     if (before.isNotEmpty) result.add(_Fb2Inline('$before '));
-    final hrefRaw = match.group(1) ?? '';
-    final href = hrefRaw.startsWith('http') || hrefRaw.startsWith('#') ? hrefRaw : _joinZipPath(baseDir, hrefRaw);
+    final href = _normalizeHtmlHref(match.group(1) ?? '', currentPath);
     final text = _htmlToPlainText(match.group(2) ?? '').trim();
     if (text.isNotEmpty) result.add(_Fb2Inline(text, href: href));
     cursor = match.end;
@@ -2042,6 +2210,53 @@ List<_Fb2Inline> _parseHtmlInlines(String html, String baseDir) {
   final rest = _htmlToPlainText(html.substring(cursor)).trim();
   if (rest.isNotEmpty) result.add(_Fb2Inline(rest));
   return result.isEmpty ? const [_Fb2Inline('')] : result;
+}
+
+String _normalizeHtmlHref(String hrefRaw, String currentPath) {
+  final href = _decodeXmlEntities(hrefRaw).trim();
+  if (href.isEmpty) return href;
+  final uri = Uri.tryParse(href);
+  if (uri != null && uri.hasScheme) return href;
+  final normalizedCurrent = _joinZipPath('', currentPath);
+  if (href.startsWith('#')) return '$normalizedCurrent$href';
+  return _joinZipPath(_zipDirName(normalizedCurrent), href);
+}
+
+List<String> _internalHrefLookupCandidates(String href) {
+  final result = <String>{};
+  void add(String value) {
+    var normalized = value.trim().replaceAll('\\', '/');
+    if (normalized.isEmpty) return;
+    while (normalized.startsWith('./')) {
+      normalized = normalized.substring(2);
+    }
+    if (normalized.startsWith('/')) normalized = normalized.substring(1);
+    result.add(normalized);
+    try {
+      result.add(Uri.decodeFull(normalized));
+    } catch (_) {}
+  }
+
+  add(href);
+  final uri = Uri.tryParse(href);
+  if (uri != null) {
+    final path = uri.path;
+    final fragment = uri.fragment;
+    if (path.isNotEmpty) add(fragment.isEmpty ? path : '$path#$fragment');
+    if (fragment.isNotEmpty) {
+      add('#$fragment');
+      add(fragment);
+    }
+  }
+  final hash = href.indexOf('#');
+  if (hash >= 0 && hash < href.length - 1) {
+    final path = href.substring(0, hash);
+    final fragment = href.substring(hash + 1);
+    if (path.isNotEmpty) add('$path#$fragment');
+    add('#$fragment');
+    add(fragment);
+  }
+  return result.toList(growable: false);
 }
 
 _Fb2Document _parseFb2Document(String xmlText) {
@@ -2655,13 +2870,21 @@ String _zipDirName(String path) {
 
 String _joinZipPath(String baseDir, String href) {
   final parts = <String>[];
-  final raw = (baseDir.isEmpty ? href : '$baseDir/$href').split('/');
+  final cleanedHref = href.trim().replaceAll('\\', '/');
+  final joined = cleanedHref.startsWith('/') || baseDir.isEmpty
+      ? cleanedHref.replaceFirst(RegExp(r'^/+'), '')
+      : '$baseDir/$cleanedHref';
+  final raw = joined.split('/');
   for (final part in raw) {
     if (part.isEmpty || part == '.') continue;
     if (part == '..') {
       if (parts.isNotEmpty) parts.removeLast();
     } else {
-      parts.add(Uri.decodeFull(part));
+      try {
+        parts.add(Uri.decodeFull(part));
+      } catch (_) {
+        parts.add(part);
+      }
     }
   }
   return parts.join('/');
