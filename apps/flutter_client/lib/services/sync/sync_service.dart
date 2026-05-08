@@ -969,6 +969,12 @@ class SyncService {
     );
     final directUrls = await _createDirectShareUrls(book: book, file: file);
 
+    if (directUrls.isEmpty) {
+      _appendLog('Direct/LAN endpoint недоступен для ${book.title}; будет использован relay fallback');
+    } else {
+      _appendLog('Direct/LAN URLs для ${book.title}: ${directUrls.length}');
+    }
+
     await _sendEnvelope(
       SyncEnvelope(
         type: 'book_file_offer',
@@ -1566,7 +1572,7 @@ class SyncService {
 
   void _resetDownloadWatchdog(_DownloadSession session) {
     session.watchdog?.cancel();
-    session.watchdog = Timer(const Duration(seconds: 25), () {
+    session.watchdog = Timer(const Duration(seconds: 90), () {
       final current = _downloadsByTransferId[session.transferId];
       if (current == null || current.sourceDeviceId == null) return;
       unawaited(_failDownload(current, 'Источник перестал отвечать во время скачивания'));
@@ -1766,7 +1772,7 @@ class SyncService {
           clearError: true,
         ));
       }
-      final client = HttpClient()..connectionTimeout = const Duration(seconds: 4);
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
       IOSink? sink;
       try {
         var resumeBytes = await tempFile.exists() ? await tempFile.length() : 0;
@@ -1774,9 +1780,9 @@ class SyncService {
           await tempFile.writeAsBytes(const [], flush: true);
           resumeBytes = 0;
         }
-        final request = await client.getUrl(uri).timeout(const Duration(seconds: 5));
+        final request = await client.getUrl(uri).timeout(const Duration(seconds: 12));
         if (resumeBytes > 0) request.headers.set(HttpHeaders.rangeHeader, 'bytes=$resumeBytes-');
-        final response = await request.close().timeout(const Duration(seconds: 8));
+        final response = await request.close().timeout(const Duration(seconds: 20));
         if (response.statusCode != HttpStatus.ok && response.statusCode != HttpStatus.partialContent) {
           await response.drain();
           continue;
@@ -1789,7 +1795,7 @@ class SyncService {
         sink = tempFile.openWrite(mode: FileMode.append);
         final startedAt = DateTime.now();
         var lastUi = DateTime.fromMillisecondsSinceEpoch(0);
-        await for (final chunk in response.timeout(const Duration(seconds: 30))) {
+        await for (final chunk in response.timeout(const Duration(seconds: 120))) {
           sink.add(chunk);
           session.receivedBytes += chunk.length;
           final now = DateTime.now();

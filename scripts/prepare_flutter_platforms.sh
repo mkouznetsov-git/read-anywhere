@@ -60,6 +60,9 @@ for entitlements in macos/Runner/DebugProfile.entitlements macos/Runner/Release.
       /usr/libexec/PlistBuddy -c "Set :com.apple.security.files.user-selected.read-write true" "$entitlements" || true
     /usr/libexec/PlistBuddy -c "Add :com.apple.security.network.client bool true" "$entitlements" 2>/dev/null || \
       /usr/libexec/PlistBuddy -c "Set :com.apple.security.network.client true" "$entitlements" || true
+    # Personal Hub direct file endpoint accepts incoming HTTP connections on LAN/Tailscale.
+    /usr/libexec/PlistBuddy -c "Add :com.apple.security.network.server bool true" "$entitlements" 2>/dev/null || \
+      /usr/libexec/PlistBuddy -c "Set :com.apple.security.network.server true" "$entitlements" || true
   fi
 done
 

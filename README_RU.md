@@ -356,3 +356,8 @@ TXT-reader переведён на один обычный вертикальн�
 ## Sprint 17
 
 Добавлены: устойчивое автопереподключение при старте без relay, Direct/LAN file endpoint для ускоренного скачивания в Personal Hub/LAN/Tailscale сценариях, rich EPUB MVP с изображениями/ссылками/заголовками, DOCX text extraction и MVP fallback для CHM/DOC/DJVU. См. `docs/sprint_17_autoreconnect_direct_epub_chm_docx_djvu_ru.md`.
+
+## Sprint 18
+
+Добавлены: кнопка скачивания всей библиотеки, hardening Direct/LAN transfer для Personal Hub, macOS network server entitlement, DOCX rich MVP, корректный fallback для DOC/CHM/DJVU без отображения бинарного мусора.
+

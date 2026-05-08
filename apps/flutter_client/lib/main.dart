@@ -93,6 +93,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   bool _busy = false;
   bool _healthBusy = false;
   bool _pairingBusy = false;
+  bool _bulkDownloadBusy = false;
   bool _logExpanded = false;
   PairingInvite? _pairingInvite;
   StreamSubscription<LibraryManifest>? _syncSubscription;
@@ -149,6 +150,98 @@ class _LibraryScreenState extends State<LibraryScreen> {
         const SnackBar(content: Text('Не удалось начать скачивание. Проверьте подключение к relay.')),
       );
     }
+  }
+
+
+  Future<void> _downloadWholeLibrary(List<BookRecord> books) async {
+    final toDownload = books.where((book) => !book.isDownloaded && !book.isDeleted).toList();
+    if (toDownload.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Все книги уже скачаны на это устройство.')),
+      );
+      return;
+    }
+    if (!widget.sync.state.value.connected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Нет подключения к relay.')),
+      );
+      return;
+    }
+    final totalBytes = toDownload.fold<int>(0, (sum, book) => sum + book.sizeBytes);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Скачать всю библиотеку?'),
+        content: Text(
+          'Скачать всю библиотеку (${_formatUiBytes(totalBytes)}) на это устройство?\n\n'
+          'Будет загружено книг: ${toDownload.length}.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Нет'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(context).pop(true),
+            icon: const Icon(Icons.download_for_offline_outlined),
+            label: const Text('Да, скачать'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() => _bulkDownloadBusy = true);
+    var started = 0;
+    var completed = 0;
+    try {
+      for (final book in toDownload) {
+        if (!mounted) break;
+        final currentManifest = await widget.storage.loadManifest();
+        BookRecord? currentBook;
+        for (final candidate in currentManifest.books) {
+          if (candidate.id == book.id) {
+            currentBook = candidate;
+            break;
+          }
+        }
+        if (currentBook?.isDownloaded == true) {
+          completed += 1;
+          continue;
+        }
+        final ok = await widget.sync.requestBookFile(currentBook ?? book);
+        if (ok) {
+          started += 1;
+          final done = await _waitForBookDownloaded(book.id, timeout: const Duration(minutes: 10));
+          if (done) completed += 1;
+        }
+        await _reload();
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Скачивание библиотеки: завершено $completed, запущено $started.')),
+      );
+    } finally {
+      if (mounted) setState(() => _bulkDownloadBusy = false);
+    }
+  }
+
+  Future<bool> _waitForBookDownloaded(String bookId, {required Duration timeout}) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      final manifest = await widget.storage.loadManifest();
+      for (final book in manifest.books) {
+        if (book.id == bookId) {
+          if (book.isDownloaded) return true;
+          final transfer = widget.sync.state.value.downloadForBook(bookId);
+          if (transfer != null && transfer.hasError && transfer.active == false) return false;
+          break;
+        }
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+    }
+    return false;
   }
 
   Future<void> _cancelBookDownload(BookRecord book) async {
@@ -231,6 +324,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
       appBar: AppBar(
         title: const Text('ReadAnywhere'),
         actions: [
+          IconButton(
+            tooltip: 'Скачать всю библиотеку на устройство',
+            onPressed: (_bulkDownloadBusy || books.where((book) => !book.isDownloaded && !book.isDeleted).isEmpty)
+                ? null
+                : () => _downloadWholeLibrary(books),
+            icon: _bulkDownloadBusy
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.download_for_offline_outlined),
+          ),
           ValueListenableBuilder<SyncStateSnapshot>(
             valueListenable: widget.sync.state,
             builder: (context, syncState, _) {
@@ -317,6 +423,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 ),
     );
   }
+}
+
+
+String _formatUiBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  if (bytes < 1024 * 1024 * 1024) return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
 }
 
 class _EmptyLibrary extends StatelessWidget {
@@ -487,14 +601,14 @@ class ReaderScreen extends StatelessWidget {
       case 'epub':
         return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.epub);
       case 'docx':
-        return _TxtReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _TextSourceKind.docx);
+        return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.docx);
       case 'doc':
-        return _TxtReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _TextSourceKind.doc);
+        return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.doc);
       case 'chm':
-        return _TxtReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _TextSourceKind.chm);
+        return _ConversionNeededReaderScreen(book: book, formatLabel: 'CHM', adapterName: 'HTML Help/CHM');
       case 'djvu':
       case 'djv':
-        return _TxtReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _TextSourceKind.djvu);
+        return _ConversionNeededReaderScreen(book: book, formatLabel: 'DJVU', adapterName: 'DjVuLibre/MuPDF');
       case 'pdf':
         return _PdfReaderScreen(book: book, storage: storage, sync: sync);
       default:
@@ -1009,7 +1123,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
 
 
 
-enum _RichSourceKind { fb2, epub }
+enum _RichSourceKind { fb2, epub, docx, doc }
 
 class _Fb2ReaderScreen extends StatefulWidget {
   const _Fb2ReaderScreen({required this.book, required this.storage, required this.sync, this.sourceKind = _RichSourceKind.fb2});
@@ -1091,7 +1205,12 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
         break;
       }
     }
-    final formatLabel = widget.sourceKind == _RichSourceKind.epub ? 'EPUB' : 'FB2';
+    final formatLabel = switch (widget.sourceKind) {
+      _RichSourceKind.epub => 'EPUB',
+      _RichSourceKind.docx => 'DOCX',
+      _RichSourceKind.doc => 'DOC',
+      _RichSourceKind.fb2 => 'FB2',
+    };
     if (book.localPath == null) {
       if (mounted) setState(() => _loadError = 'Файл $formatLabel не скачан на это устройство');
       return;
@@ -1103,9 +1222,12 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     }
     try {
       final bytes = await file.readAsBytes();
-      final document = widget.sourceKind == _RichSourceKind.epub
-          ? _parseEpubDocument(Uint8List.fromList(bytes))
-          : _parseFb2Document(_decodeTextFile(bytes));
+      final document = switch (widget.sourceKind) {
+        _RichSourceKind.epub => _parseEpubDocument(Uint8List.fromList(bytes)),
+        _RichSourceKind.docx => _parseDocxDocument(Uint8List.fromList(bytes)),
+        _RichSourceKind.doc => _parseDocDocument(Uint8List.fromList(bytes)),
+        _RichSourceKind.fb2 => _parseFb2Document(_decodeTextFile(bytes)),
+      };
       if (!mounted) return;
       setState(() {
         _runtimeBook = book;
@@ -1835,6 +1957,74 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
   }
   return _Fb2Document(blocks.isEmpty ? [_Fb2Block.paragraph(const [_Fb2Inline('Не удалось извлечь содержимое EPUB.')])] : blocks);
 }
+
+
+_Fb2Document _parseDocDocument(Uint8List bytes) {
+  // Many “.doc” files in the wild are actually OOXML/DOCX with a wrong
+  // extension. Parse those as DOCX. True legacy binary .doc requires an
+  // external converter such as LibreOffice/antiword; showing binary garbage is
+  // worse than a clear adapter message.
+  if (_looksLikeZip(bytes)) return _parseDocxDocument(bytes);
+  return const _Fb2Document([
+    _Fb2Block.paragraph([
+      _Fb2Inline(
+        'Legacy binary DOC сохранён и синхронизируется как оригинал. Для встроенного просмотра нужен локальный конвертер DOC → HTML/текст. Пока ReadAnywhere не показывает бинарное содержимое как текст.',
+      ),
+    ]),
+  ]);
+}
+
+_Fb2Document _parseDocxDocument(Uint8List bytes) {
+  final archive = ZipDecoder().decodeBytes(bytes, verify: false);
+  ArchiveFile? findFile(String path) {
+    for (final file in archive.files) {
+      if (file.isFile && file.name.replaceAll('\\', '/') == path) return file;
+    }
+    return null;
+  }
+
+  final blocks = <_Fb2Block>[];
+  void parsePart(String path, {String? title}) {
+    final file = findFile(path);
+    if (file == null) return;
+    if (title != null && title.isNotEmpty) blocks.add(_Fb2Block.title(title));
+    var xml = _decodeTextFile(_archiveFileBytes(file));
+    xml = xml.replaceAll(RegExp(r'<w:tab\b[^>]*/>', caseSensitive: false), '\t');
+    xml = xml.replaceAll(RegExp(r'<w:br\b[^>]*/>', caseSensitive: false), '\n');
+    final paragraphRe = RegExp(r'<w:p\b[^>]*>(.*?)</w:p>', caseSensitive: false, dotAll: true);
+    for (final para in paragraphRe.allMatches(xml)) {
+      final body = para.group(1) ?? '';
+      final isHeading = RegExp(r'''<w:pStyle\b[^>]*w:val\s*=\s*["']Heading[1-6]["']''', caseSensitive: false).hasMatch(body) ||
+          RegExp(r'<w:outlineLvl\b', caseSensitive: false).hasMatch(body);
+      final isList = RegExp(r'<w:numPr\b', caseSensitive: false).hasMatch(body);
+      final textBuffer = StringBuffer();
+      final runTextRe = RegExp(r'<w:t\b[^>]*>(.*?)</w:t>', caseSensitive: false, dotAll: true);
+      for (final run in runTextRe.allMatches(body)) {
+        textBuffer.write(_decodeXmlEntities(run.group(1) ?? ''));
+      }
+      var text = textBuffer.toString().replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trim();
+      if (text.isEmpty) continue;
+      if (isList) text = '• $text';
+      if (isHeading) {
+        blocks.add(_Fb2Block.title(text));
+      } else {
+        blocks.add(_Fb2Block.paragraph([_Fb2Inline(text)]));
+      }
+    }
+  }
+
+  parsePart('word/document.xml');
+  parsePart('word/footnotes.xml', title: 'Сноски');
+  parsePart('word/endnotes.xml', title: 'Примечания');
+  if (blocks.isEmpty) {
+    return const _Fb2Document([
+      _Fb2Block.paragraph([_Fb2Inline('DOCX не содержит извлекаемого текста.')]),
+    ]);
+  }
+  return _Fb2Document(blocks);
+}
+
+bool _looksLikeZip(Uint8List bytes) => bytes.length >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4B;
 
 List<_Fb2Inline> _parseHtmlInlines(String html, String baseDir) {
   final result = <_Fb2Inline>[];
@@ -2591,6 +2781,46 @@ class _UnsupportedReaderPlaceholder extends StatelessWidget {
               textAlign: TextAlign.center,
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+
+class _ConversionNeededReaderScreen extends StatelessWidget {
+  const _ConversionNeededReaderScreen({required this.book, required this.formatLabel, required this.adapterName});
+
+  final BookRecord book;
+  final String formatLabel;
+  final String adapterName;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(book.title, maxLines: 1, overflow: TextOverflow.ellipsis)),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.auto_fix_high_outlined, size: 56),
+              const SizedBox(height: 16),
+              Text(
+                '$formatLabel-файл сохранён и синхронизируется как оригинал.',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Встроенный просмотр $formatLabel требует локального адаптера $adapterName. '
+                'Пока ReadAnywhere не будет показывать бинарные “кракозябры” как текст. '
+                'Следующий production-шаг для этого формата — подключить нативный конвертер/renderer.',
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
         ),
       ),
     );
