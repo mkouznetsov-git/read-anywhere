@@ -1,17 +1,17 @@
-# Альтернатива: ReadAnywhere relay через Cloudflare Tunnel
+# Альтернатива: ReadArc relay через Cloudflare Tunnel
 
 Этот путь оставлен как запасной вариант. Он полезен, если Tailscale Funnel не подошёл.
 
 Схема:
 
 ```text
-ReadAnywhere app
+ReadArc app
   ↓ https/wss
 Cloudflare Tunnel URL
   ↓
 cloudflared на вашем устройстве
   ↓ localhost:8787
-ReadAnywhere FastAPI relay
+ReadArc FastAPI relay
 ```
 
 ## Quick Tunnel для разработки
@@ -34,7 +34,7 @@ cloudflared tunnel --url http://127.0.0.1:8787
 https://something.trycloudflare.com
 ```
 
-4. В ReadAnywhere выберите:
+4. В ReadArc выберите:
 
 ```text
 Синхронизация → Relay endpoint → Personal Hub / Tailscale Funnel

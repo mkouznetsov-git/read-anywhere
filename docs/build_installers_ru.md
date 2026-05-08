@@ -1,4 +1,4 @@
-# Сборка DMG/PKG/APK для ReadAnywhere
+# Сборка DMG/PKG/APK для ReadArc
 
 ## Короткий ответ
 
@@ -25,14 +25,14 @@
 ## Как собрать без локальной установки Flutter
 
 1. Создайте новый репозиторий на GitHub.
-2. Загрузите туда содержимое папки `read_anywhere_mvp`.
+2. Загрузите туда содержимое папки `readarc_mvp`.
 3. Откройте вкладку `Actions`.
 4. Выберите workflow `Build installable packages`.
 5. Нажмите `Run workflow`.
 6. Параметр `build_debug_artifacts` оставьте `false`, если не нужны debug-сборки.
 7. После завершения откройте completed run и скачайте `Artifacts`:
-   - `ReadAnywhere-android-release`;
-   - `ReadAnywhere-macos-release-dmg-pkg`.
+   - `ReadArc-android-release`;
+   - `ReadArc-macos-release-dmg-pkg`.
 
 ## Что именно будет собрано
 
@@ -41,10 +41,10 @@
 По умолчанию собираются release-артефакты для внутреннего тестирования:
 
 ```text
-dist/android/ReadAnywhere-0.1.0-android-arm64-v8a-release.apk
-dist/android/ReadAnywhere-0.1.0-android-armeabi-v7a-release.apk
-dist/android/ReadAnywhere-0.1.0-android-x86_64-release.apk
-dist/android/ReadAnywhere-0.1.0-android-release.aab
+dist/android/ReadArc-0.1.0-android-arm64-v8a-release.apk
+dist/android/ReadArc-0.1.0-android-armeabi-v7a-release.apk
+dist/android/ReadArc-0.1.0-android-x86_64-release.apk
+dist/android/ReadArc-0.1.0-android-release.aab
 dist/android/SHA256SUMS
 ```
 
@@ -55,9 +55,9 @@ dist/android/SHA256SUMS
 Будут собраны:
 
 ```text
-dist/macos/ReadAnywhere-0.1.0-macos-release.dmg
-dist/macos/ReadAnywhere-0.1.0-macos-release.pkg
-dist/macos/ReadAnywhere-0.1.0-macos-release-app.zip
+dist/macos/ReadArc-0.1.0-macos-release.dmg
+dist/macos/ReadArc-0.1.0-macos-release.pkg
+dist/macos/ReadArc-0.1.0-macos-release-app.zip
 dist/macos/SHA256SUMS
 ```
 
@@ -135,7 +135,7 @@ READANYWHERE_DEFAULT_RELAY_URL=https://your-service.koyeb.app ./scripts/package_
 1. При ручном запуске workflow заполнить input `default_relay_url`.
 2. Создать repository variable `READANYWHERE_DEFAULT_RELAY_URL`.
 
-После этого в приложении можно выбрать режим **ReadAnywhere relay** вместо ручного ввода URL.
+После этого в приложении можно выбрать режим **ReadArc relay** вместо ручного ввода URL.
 
 ## Публикация через GitHub Releases
 

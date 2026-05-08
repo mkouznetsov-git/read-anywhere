@@ -6,14 +6,14 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="$ROOT_DIR/apps/flutter_client"
-ORG="${READ_ANYWHERE_ORG:-com.readanywhere}"
-PLATFORMS="${READ_ANYWHERE_PLATFORMS:-android,macos}"
+ORG="${READARC_ORG:-com.readarc}"
+PLATFORMS="${READARC_PLATFORMS:-${READ_ANYWHERE_PLATFORMS:-android,macos}}"
 
 cd "$APP_DIR"
 
 echo "Preparing Flutter platforms: $PLATFORMS"
 flutter --version
-flutter create --project-name read_anywhere --org "$ORG" --platforms "$PLATFORMS" .
+flutter create --project-name readarc --org "$ORG" --platforms "$PLATFORMS" .
 flutter pub get
 
 # Android needs explicit Internet permission for WebSocket sync and camera permission for QR pairing scan.
@@ -28,7 +28,7 @@ fi
 
 # Friendly Android launcher name.
 if [[ -f "$ANDROID_MANIFEST" ]]; then
-  perl -0pi -e 's#android:label="[^"]*"#android:label="ReadAnywhere"#' "$ANDROID_MANIFEST"
+  perl -0pi -e 's#android:label="[^"]*"#android:label="ReadArc"#' "$ANDROID_MANIFEST"
 fi
 
 # Debug MVP may use ws:// or http:// relay. Production should use HTTPS/WSS and remove cleartext.
@@ -38,17 +38,17 @@ fi
 
 # Friendly macOS app name.
 if [[ -f macos/Runner/Info.plist && -x /usr/libexec/PlistBuddy ]]; then
-  /usr/libexec/PlistBuddy -c "Set :CFBundleName ReadAnywhere" macos/Runner/Info.plist 2>/dev/null || \
-    /usr/libexec/PlistBuddy -c "Add :CFBundleName string ReadAnywhere" macos/Runner/Info.plist || true
-  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName ReadAnywhere" macos/Runner/Info.plist 2>/dev/null || \
-    /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string ReadAnywhere" macos/Runner/Info.plist || true
+  /usr/libexec/PlistBuddy -c "Set :CFBundleName ReadArc" macos/Runner/Info.plist 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Add :CFBundleName string ReadArc" macos/Runner/Info.plist || true
+  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName ReadArc" macos/Runner/Info.plist 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string ReadArc" macos/Runner/Info.plist || true
 fi
 
 
 # Friendly macOS product name for generated .app bundles.
 MACOS_APPINFO="macos/Runner/Configs/AppInfo.xcconfig"
 if [[ -f "$MACOS_APPINFO" ]]; then
-  perl -0pi -e 's#PRODUCT_NAME = .*#PRODUCT_NAME = ReadAnywhere#' "$MACOS_APPINFO"
+  perl -0pi -e 's#PRODUCT_NAME = .*#PRODUCT_NAME = ReadArc#' "$MACOS_APPINFO"
 fi
 
 # File picker / local file access and outgoing network entitlement for macOS sandbox builds.
@@ -70,13 +70,13 @@ done
 # iOS camera usage string for future QR pairing builds.
 IOS_PLIST="ios/Runner/Info.plist"
 if [[ -f "$IOS_PLIST" && -x /usr/libexec/PlistBuddy ]]; then
-  /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string ReadAnywhere uses the camera to scan pairing QR codes." "$IOS_PLIST" 2>/dev/null || \
-    /usr/libexec/PlistBuddy -c "Set :NSCameraUsageDescription ReadAnywhere uses the camera to scan pairing QR codes." "$IOS_PLIST" || true
+  /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string ReadArc uses the camera to scan pairing QR codes." "$IOS_PLIST" 2>/dev/null || \
+    /usr/libexec/PlistBuddy -c "Set :NSCameraUsageDescription ReadArc uses the camera to scan pairing QR codes." "$IOS_PLIST" || true
 fi
 
 
 
-# ReadAnywhere custom app icon. flutter create regenerates platform folders, so copy
+# ReadArc custom app icon. flutter create regenerates platform folders, so copy
 # the committed icon set after platform generation.
 ICON_ROOT="$ROOT_DIR/assets/app_icon"
 if [[ -d "$ICON_ROOT/android" ]]; then

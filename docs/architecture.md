@@ -1,8 +1,8 @@
-# Архитектура ReadAnywhere
+# Архитектура ReadArc
 
 ## Главный принцип
 
-ReadAnywhere — local-first приложение. Каждое устройство хранит собственную копию метаданных аккаунта, прогресса, закладок и выбранных книг. Нет центральной базы с библиотекой и нет облачного хранения файлов книг.
+ReadArc — local-first приложение. Каждое устройство хранит собственную копию метаданных аккаунта, прогресса, закладок и выбранных книг. Нет центральной базы с библиотекой и нет облачного хранения файлов книг.
 
 ## Компоненты
 
@@ -27,7 +27,7 @@ ReadAnywhere — local-first приложение. Каждое устройст
 Рекомендуется SQLite + файловое хранилище:
 
 ```text
-ReadAnywhere/
+ReadArc/
   account.db
   books/
     <sha256>.<ext>
@@ -192,7 +192,7 @@ The relay remains in-memory and does not persist files. Sprint 3 uses JSON/base6
 Режимы:
 
 ```text
-ReadAnywhere relay — официальный/default endpoint, задаётся на этапе сборки
+ReadArc relay — официальный/default endpoint, задаётся на этапе сборки
 Свой relay — пользовательский публичный или домашний relay
 Локальная разработка — localhost/dev endpoint
 ```
@@ -206,7 +206,7 @@ ReadAnywhere relay — официальный/default endpoint, задаётся
 Начиная со Sprint 4.1 приложение не завязано на один тип relay. Поддерживаемые режимы endpoint:
 
 ```text
-ReadAnywhere relay                  будущий официальный endpoint
+ReadArc relay                  будущий официальный endpoint
 Custom relay                        VPS/self-hosted/любой совместимый relay
 Personal Hub / Tailscale Funnel     relay на устройстве пользователя, опубликованный через Funnel/Tunnel
 Local development                   http://127.0.0.1:8787

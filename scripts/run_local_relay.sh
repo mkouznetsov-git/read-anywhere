@@ -37,7 +37,7 @@ pip install -r requirements.txt
 
 LAN_IP="$(find_lan_ip | head -n 1)"
 
-echo "ReadAnywhere relay starting"
+echo "ReadArc relay starting"
 echo "  Bind address: $HOST"
 echo "  Port:         $PORT"
 echo

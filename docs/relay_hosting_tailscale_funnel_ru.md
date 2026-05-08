@@ -1,17 +1,17 @@
-# ReadAnywhere relay через Tailscale Funnel
+# ReadArc relay через Tailscale Funnel
 
 Цель: получить публичный HTTPS endpoint для текущего Python/FastAPI relay без VPS, белого IP, проброса портов и платёжной карты.
 
 Схема:
 
 ```text
-ReadAnywhere app
+ReadArc app
   ↓ https/wss
 Tailscale Funnel URL (*.ts.net)
   ↓
 Ваш Mac / Windows / Linux
   ↓ localhost:8787
-ReadAnywhere FastAPI relay
+ReadArc FastAPI relay
 ```
 
 Важно: устройство, на котором работает relay, становится временным **Personal Hub**. Оно должно быть включено и подключено к интернету, пока другие устройства синхронизируются через него.
@@ -24,7 +24,7 @@ ReadAnywhere FastAPI relay
 - войдите в аккаунт Tailscale;
 - убедитесь, что устройство видно в Tailscale admin console.
 
-## 2. Запустить локальный ReadAnywhere relay
+## 2. Запустить локальный ReadArc relay
 
 В корне проекта:
 
@@ -97,12 +97,12 @@ https://your-mac.your-tailnet.ts.net/health
 ./scripts/check_relay_health.sh https://your-mac.your-tailnet.ts.net
 ```
 
-## 6. Подключить ReadAnywhere
+## 6. Подключить ReadArc
 
 В приложении:
 
 ```text
-ReadAnywhere
+ReadArc
 → Синхронизация
 → Relay endpoint
 → Personal Hub / Tailscale Funnel
@@ -154,7 +154,7 @@ https://your-mac.your-tailnet.ts.net
 
 - Хаб-устройство должно быть включено.
 - Если хаб засыпает, синхронизация временно недоступна.
-- Funnel — транспортный сервис Tailscale; книги всё равно не хранятся в облачном хранилище ReadAnywhere.
+- Funnel — транспортный сервис Tailscale; книги всё равно не хранятся в облачном хранилище ReadArc.
 - Для production позже нужен либо официальный serverless relay, либо self-hosted relay, либо устойчивый Personal Hub/NAS.
 
 ## 9. Быстрая диагностика

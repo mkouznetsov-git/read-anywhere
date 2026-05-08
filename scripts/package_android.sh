@@ -7,7 +7,7 @@ DIST_DIR="$ROOT_DIR/dist/android"
 VERSION="${READ_ANYWHERE_VERSION:-0.1.0}"
 BUILD_DEBUG_ARTIFACTS="${BUILD_DEBUG_ARTIFACTS:-false}"
 
-export READ_ANYWHERE_PLATFORMS="android"
+export READARC_PLATFORMS="android"
 "$ROOT_DIR/scripts/prepare_flutter_platforms.sh"
 
 cd "$APP_DIR"
@@ -25,7 +25,7 @@ build_with_optional_define() {
 echo "Building Android universal release APK for simple sideload installation..."
 build_with_optional_define build apk --release
 if [[ -f build/app/outputs/flutter-apk/app-release.apk ]]; then
-  cp build/app/outputs/flutter-apk/app-release.apk "$DIST_DIR/ReadAnywhere-${VERSION}-android-universal-release.apk"
+  cp build/app/outputs/flutter-apk/app-release.apk "$DIST_DIR/ReadArc-${VERSION}-android-universal-release.apk"
 fi
 
 echo "Building Android release APKs split per ABI..."
@@ -36,16 +36,16 @@ for apk in build/app/outputs/flutter-apk/*-release.apk; do
   base="$(basename "$apk")"
   case "$base" in
     app-arm64-v8a-release.apk)
-      cp "$apk" "$DIST_DIR/ReadAnywhere-${VERSION}-android-arm64-v8a-release.apk"
+      cp "$apk" "$DIST_DIR/ReadArc-${VERSION}-android-arm64-v8a-release.apk"
       ;;
     app-armeabi-v7a-release.apk)
-      cp "$apk" "$DIST_DIR/ReadAnywhere-${VERSION}-android-armeabi-v7a-release.apk"
+      cp "$apk" "$DIST_DIR/ReadArc-${VERSION}-android-armeabi-v7a-release.apk"
       ;;
     app-x86_64-release.apk)
-      cp "$apk" "$DIST_DIR/ReadAnywhere-${VERSION}-android-x86_64-release.apk"
+      cp "$apk" "$DIST_DIR/ReadArc-${VERSION}-android-x86_64-release.apk"
       ;;
     *)
-      cp "$apk" "$DIST_DIR/ReadAnywhere-${VERSION}-${base}"
+      cp "$apk" "$DIST_DIR/ReadArc-${VERSION}-${base}"
       ;;
   esac
 done
@@ -53,13 +53,13 @@ done
 echo "Building Android release App Bundle..."
 build_with_optional_define build appbundle --release
 if [[ -f build/app/outputs/bundle/release/app-release.aab ]]; then
-  cp build/app/outputs/bundle/release/app-release.aab "$DIST_DIR/ReadAnywhere-${VERSION}-android-release.aab"
+  cp build/app/outputs/bundle/release/app-release.aab "$DIST_DIR/ReadArc-${VERSION}-android-release.aab"
 fi
 
 if [[ "$BUILD_DEBUG_ARTIFACTS" == "true" || "$BUILD_DEBUG_ARTIFACTS" == "1" ]]; then
   echo "Building optional Android debug APK..."
   build_with_optional_define build apk --debug
-  cp build/app/outputs/flutter-apk/app-debug.apk "$DIST_DIR/ReadAnywhere-${VERSION}-android-debug.apk"
+  cp build/app/outputs/flutter-apk/app-debug.apk "$DIST_DIR/ReadArc-${VERSION}-android-debug.apk"
 fi
 
 (

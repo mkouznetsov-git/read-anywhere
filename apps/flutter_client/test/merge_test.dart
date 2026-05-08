@@ -1,7 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:read_anywhere/models/book.dart';
-import 'package:read_anywhere/models/manifest.dart';
-import 'package:read_anywhere/services/sync/merge.dart';
+import 'package:readarc/models/book.dart';
+import 'package:readarc/models/manifest.dart';
+import 'package:readarc/services/sync/merge.dart';
 
 void main() {
   test('merge keeps local path but accepts newer progress', () {

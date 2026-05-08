@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLIST="$HOME/Library/LaunchAgents/app.readanywhere.relay.plist"
-LOG_DIR="$HOME/Library/Logs/ReadAnywhere"
+LOG_DIR="$HOME/Library/Logs/ReadArc"
 mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
 
 cat > "$PLIST" <<PLIST

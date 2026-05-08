@@ -13,6 +13,6 @@ cat <<'MSG'
 If Funnel is running, copy the HTTPS URL shown by Tailscale, for example:
   https://your-device.your-tailnet.ts.net
 
-Paste it in ReadAnywhere:
+Paste it in ReadArc:
   Синхронизация → Relay endpoint → Personal Hub / Tailscale Funnel
 MSG

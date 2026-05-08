@@ -43,17 +43,17 @@ GitHub repository → Releases → нужный тег
 
 ```text
 Android:
-  ReadAnywhere-...-android-arm64-v8a-release.apk
-  ReadAnywhere-...-android-armeabi-v7a-release.apk
-  ReadAnywhere-...-android-x86_64-release.apk
-  ReadAnywhere-...-android-release.aab
-  ReadAnywhere-android-release-SHA256SUMS.txt
+  ReadArc-...-android-arm64-v8a-release.apk
+  ReadArc-...-android-armeabi-v7a-release.apk
+  ReadArc-...-android-x86_64-release.apk
+  ReadArc-...-android-release.aab
+  ReadArc-android-release-SHA256SUMS.txt
 
 macOS:
-  ReadAnywhere-...-macos-release.dmg
-  ReadAnywhere-...-macos-release.pkg
-  ReadAnywhere-...-macos-release-app.zip
-  ReadAnywhere-macos-release-SHA256SUMS.txt
+  ReadArc-...-macos-release.dmg
+  ReadArc-...-macos-release.pkg
+  ReadArc-...-macos-release-app.zip
+  ReadArc-macos-release-SHA256SUMS.txt
 ```
 
 Для большинства современных Android-телефонов нужен `arm64-v8a` APK.

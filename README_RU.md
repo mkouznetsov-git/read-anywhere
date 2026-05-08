@@ -1,4 +1,4 @@
-# ReadAnywhere — MVP starter kit
+# ReadArc — MVP starter kit
 
 Цель проекта: приложение для чтения книг на Android, iOS, macOS, Windows и Linux с локальным хранением книг и синхронизацией прогресса/закладок между устройствами без сторонних облачных хранилищ.
 
@@ -113,7 +113,7 @@ TXT-reader больше не рендерит весь файл одним бо�
 
 Добавлена подготовка к zero-config sync endpoint:
 
-- режим **ReadAnywhere relay** — endpoint компилируется в приложение через `READANYWHERE_DEFAULT_RELAY_URL`;
+- режим **ReadArc relay** — endpoint компилируется в приложение через `READANYWHERE_DEFAULT_RELAY_URL`;
 - режим **Свой relay** — для Koyeb/VPS/Cloudflare Tunnel/self-hosted;
 - режим **Локальная разработка** — `http://127.0.0.1:8787`;
 - после успешного подключения включается автоподключение при следующем запуске;
@@ -198,14 +198,14 @@ docs/adr_004_transport_strategy_personal_hub.md
 CI теперь публикует release-артефакты вместо debug-сборок:
 
 ```text
-ReadAnywhere-android-release
+ReadArc-android-release
   arm64-v8a release APK
   armeabi-v7a release APK
   x86_64 release APK
   Android App Bundle .aab
   SHA256SUMS
 
-ReadAnywhere-macos-release-dmg-pkg
+ReadArc-macos-release-dmg-pkg
   release DMG
   release PKG
   release .app.zip
@@ -338,7 +338,7 @@ TXT-reader переведён на один обычный вертикальн�
 
 ## Sprint 12 Hotfix 01
 
-Исправлен relay-лог при штатных WebSocket disconnect/reconnect, добавлены PDF-закладки и новая тёплая иконка приложения ReadAnywhere. См. `docs/sprint_12_hotfix_01_relay_bookmarks_icon_ru.md`.
+Исправлен relay-лог при штатных WebSocket disconnect/reconnect, добавлены PDF-закладки и новая тёплая иконка приложения ReadArc. См. `docs/sprint_12_hotfix_01_relay_bookmarks_icon_ru.md`.
 
 ## Sprint 13 hotfix
 

@@ -8,7 +8,7 @@ mkdir -p "$SERVICE_DIR"
 
 cat > "$SERVICE_FILE" <<SERVICE
 [Unit]
-Description=ReadAnywhere local relay
+Description=ReadArc local relay
 After=network-online.target
 
 [Service]

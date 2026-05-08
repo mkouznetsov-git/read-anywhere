@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketState
 
-app = FastAPI(title="ReadAnywhere Rendezvous Relay", version="0.2.0")
+app = FastAPI(title="ReadArc Rendezvous Relay", version="0.2.0")
 
 # In-memory only. The relay intentionally stores no books and writes nothing to
 # disk. Sprint 3 hotfix 2 keeps the latest *metadata snapshots* in RAM so a newly
@@ -31,7 +31,7 @@ PAIRING_TTL_SECONDS = 5 * 60
 async def root() -> JSONResponse:
     return JSONResponse({
         "ok": True,
-        "service": "ReadAnywhere Rendezvous Relay",
+        "service": "ReadArc Rendezvous Relay",
         "version": app.version,
         "websocket": "/ws/{account_id}/{device_id}",
     })

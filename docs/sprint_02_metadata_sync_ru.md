@@ -70,8 +70,8 @@ http://YOUR_SERVER_IP:8787
 
 Соберите через GitHub Actions:
 
-- `ReadAnywhere-android-apk` для Android;
-- `ReadAnywhere-macos-dmg-pkg` для macOS.
+- `ReadArc-android-apk` для Android;
+- `ReadArc-macos-dmg-pkg` для macOS.
 
 ### 3. Настройте первое устройство
 

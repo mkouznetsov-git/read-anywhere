@@ -1,4 +1,4 @@
-# Развёртывание ReadAnywhere Relay на Koyeb
+# Развёртывание ReadArc Relay на Koyeb
 
 Этот документ описывает самый простой временный способ получить публичный relay без своего VPS.
 
@@ -20,7 +20,7 @@ Koyeb может собрать FastAPI-приложение из GitHub-реп�
 
 1. Зарегистрируйтесь или войдите в Koyeb.
 2. Нажмите **Create Web Service**.
-3. Выберите GitHub repository с проектом ReadAnywhere.
+3. Выберите GitHub repository с проектом ReadArc.
 4. В настройках build/deploy укажите:
 
 ```text
@@ -47,7 +47,7 @@ https://your-service-name.koyeb.app/health
 {"ok": true, "rooms": {}}
 ```
 
-7. В приложении ReadAnywhere откройте:
+7. В приложении ReadArc откройте:
 
 ```text
 Синхронизация → Relay endpoint → Свой relay
@@ -77,7 +77,7 @@ https://your-service-name.koyeb.app
 5. В приложении выберите режим:
 
 ```text
-ReadAnywhere relay
+ReadArc relay
 ```
 
 ### Через GitHub repository variable

@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:read_anywhere/models/sync_settings.dart';
+import 'package:readarc/models/sync_settings.dart';
 
 void main() {
   test('migrates legacy relayUrl settings to custom mode', () {

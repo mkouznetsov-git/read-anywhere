@@ -1,4 +1,4 @@
-# Тест-план ReadAnywhere
+# Тест-план ReadArc
 
 ## Unit
 
@@ -103,7 +103,7 @@ docker compose up --build relay
 
 2. In app select **Local development** on desktop and connect.
 3. In app select **Custom relay**, set a reachable URL, and connect.
-4. Build with `READANYWHERE_DEFAULT_RELAY_URL=https://your-service.koyeb.app` and select **ReadAnywhere relay**.
+4. Build with `READANYWHERE_DEFAULT_RELAY_URL=https://your-service.koyeb.app` and select **ReadArc relay**.
 5. Restart app and verify auto-connect is attempted after a successful connection.
 6. Press **Disconnect** and verify auto-connect is disabled.
 

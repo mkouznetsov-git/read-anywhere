@@ -1,5 +1,5 @@
-name: read_anywhere
-description: Local-first cross-platform reader MVP for ReadAnywhere.
+name: readarc
+description: Local-first cross-platform reader MVP for ReadArc.
 publish_to: 'none'
 version: 0.1.0+1
 
@@ -29,3 +29,6 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/brand/readarc_icon_128.png
+    - assets/brand/readarc_icon_1024.png

@@ -2,12 +2,12 @@
 
 ## Что изменено
 
-1. Пользовательское название приложения закреплено как `ReadAnywhere`:
+1. Пользовательское название приложения закреплено как `ReadArc`:
    - Flutter `MaterialApp.title`;
    - заголовок главного экрана;
    - macOS `CFBundleName` / `CFBundleDisplayName` при генерации platform-folder;
    - Android launcher label при генерации `AndroidManifest.xml`;
-   - имена DMG/PKG/APK artifacts уже используют `ReadAnywhere`.
+   - имена DMG/PKG/APK artifacts уже используют `ReadArc`.
 
 2. В GitHub Actions добавлен обязательный job `Flutter and relay tests`.
 

@@ -51,7 +51,7 @@ TXT-reader снова стал единым плавным вертикальн�
 
 Рекомендация для ручного sideload-тестирования:
 
-1. сначала пробовать `ReadAnywhere-...-android-universal-release.apk`;
+1. сначала пробовать `ReadArc-...-android-universal-release.apk`;
 2. если нужна минимальная загрузка — использовать `arm64-v8a` на современных телефонах;
 3. не устанавливать `.aab` вручную — это формат для Google Play / bundletool.
 

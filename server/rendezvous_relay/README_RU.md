@@ -1,4 +1,4 @@
-# ReadAnywhere Rendezvous Relay
+# ReadArc Rendezvous Relay
 
 Назначение: временно соединять устройства одного аккаунта, когда прямое LAN/P2P соединение недоступно.
 

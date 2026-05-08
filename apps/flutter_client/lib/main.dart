@@ -48,7 +48,7 @@ class _ReadAnywhereAppState extends State<ReadAnywhereApp> {
       if (settings.usesOfficialPlaceholder) return;
       await _sync.connect(relayUrl: settings.effectiveRelayUrl);
     } catch (error) {
-      debugPrint('ReadAnywhere auto-connect failed: $error');
+      debugPrint('ReadArc auto-connect failed: $error');
       final settings = await _storage.loadSyncSettings();
       if (settings.autoConnect && !settings.usesOfficialPlaceholder) {
         _sync.startAutoReconnect(relayUrl: settings.effectiveRelayUrl);
@@ -66,7 +66,7 @@ class _ReadAnywhereAppState extends State<ReadAnywhereApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'ReadAnywhere',
+      title: 'ReadArc',
       theme: ReadAnywhereTheme.light(),
       home: LibraryScreen(storage: _storage, sync: _sync),
     );
@@ -322,7 +322,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('ReadAnywhere'),
+        leading: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: Image.asset('assets/brand/readarc_icon_128.png'),
+          ),
+        ),
+        title: const Text('ReadArc'),
         actions: [
           IconButton(
             tooltip: 'Скачать всю библиотеку на устройство',
@@ -646,7 +653,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
   // source character of the line touching the top of the viewport.
   static const _fontSize = 18.0;
   static const _heightFactor = 1.65;
-  static const _readerTextStyle = TextStyle(fontSize: _fontSize, height: _heightFactor);
+  static const _readerTextStyle = TextStyle(fontSize: _fontSize, height: _heightFactor, color: Color(0xFF2A2F4A));
   static const _lineExtent = _fontSize * _heightFactor;
   static const _horizontalReaderPadding = 24.0;
   static const _topPadding = 18.0;
@@ -719,7 +726,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
         _TextSourceKind.epub => _extractEpubText(bytes),
         _TextSourceKind.docx => _extractDocxText(bytes),
         _TextSourceKind.doc => _extractLegacyBinaryText(bytes, 'DOC'),
-        _TextSourceKind.chm => _extractLegacyBinaryText(bytes, 'CHM'),
+        _TextSourceKind.chm => _extractChmText(bytes),
         _TextSourceKind.djvu => _extractLegacyBinaryText(bytes, 'DJVU'),
         _TextSourceKind.txt => _normalizeText(_decodeTextFile(bytes)),
       };
@@ -1000,6 +1007,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
     final raw = _rawText;
     final lines = _lines;
     return Scaffold(
+      backgroundColor: const Color(0xFFF3E7CF),
       appBar: _fullScreen
           ? null
           : AppBar(
@@ -1110,7 +1118,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
                                 child: LinearProgressIndicator(value: _lastProgress.clamp(0, 100) / 100),
                               ),
                               const SizedBox(width: 12),
-                              Text('${_lastProgress.clamp(0, 100).toStringAsFixed(1)}%'),
+                              Text('${_lastProgress.clamp(0, 100).toStringAsFixed(1)}%', style: const TextStyle(color: Color(0xFF2A2F4A))),
                             ],
                           ),
                         ),
@@ -1464,7 +1472,9 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     for (var i = start; i < units.length && copied < 40; i++) {
       final unit = units[i];
       if (unit.imageBytes != null) continue;
-      final text = unit.segments.map((segment) => segment.text).join('').trimRight();
+      final text = unit.tableRows.isNotEmpty
+          ? unit.tableRows.map((row) => row.join('\t')).join('\n')
+          : unit.segments.map((segment) => segment.text).join('').trimRight();
       if (text.isEmpty) continue;
       buffer.writeln(text);
       copied += 1;
@@ -1527,6 +1537,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     final document = _document;
     final units = _units;
     return Scaffold(
+      backgroundColor: const Color(0xFFF3E7CF),
       appBar: _fullScreen
           ? null
           : AppBar(
@@ -1632,7 +1643,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
                             children: [
                               Expanded(child: LinearProgressIndicator(value: _progress.clamp(0, 100) / 100)),
                               const SizedBox(width: 12),
-                              Text('${_progress.clamp(0, 100).toStringAsFixed(1)}%'),
+                              Text('${_progress.clamp(0, 100).toStringAsFixed(1)}%', style: const TextStyle(color: Color(0xFF2A2F4A))),
                             ],
                           ),
                         ),
@@ -1652,6 +1663,10 @@ class _Fb2UnitView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (unit.tableRows.isNotEmpty) {
+      return _DocxTableUnitView(rows: unit.tableRows, extent: unit.extent);
+    }
+
     if (unit.imageBytes != null) {
       final bytes = unit.imageBytes!;
       return SizedBox(
@@ -1682,10 +1697,15 @@ class _Fb2UnitView extends StatelessWidget {
             style: style,
             children: unit.segments.map((segment) {
               final href = segment.href;
-              if (href == null || href.isEmpty) return TextSpan(text: segment.text);
+              final segmentStyle = TextStyle(
+                fontWeight: segment.bold ? FontWeight.w700 : null,
+                fontStyle: segment.italic ? FontStyle.italic : null,
+                decoration: segment.underline ? TextDecoration.underline : null,
+              );
+              if (href == null || href.isEmpty) return TextSpan(text: segment.text, style: segmentStyle);
               return TextSpan(
                 text: segment.text,
-                style: _Fb2ReaderScreenState._linkStyle,
+                style: _Fb2ReaderScreenState._linkStyle.merge(segmentStyle),
                 recognizer: TapGestureRecognizer()..onTap = () => onOpenLink(href),
               );
             }).toList(),
@@ -1697,24 +1717,116 @@ class _Fb2UnitView extends StatelessWidget {
   }
 }
 
+class _DocxTableUnitView extends StatelessWidget {
+  const _DocxTableUnitView({required this.rows, required this.extent});
+
+  final List<List<String>> rows;
+  final double extent;
+
+  @override
+  Widget build(BuildContext context) {
+    final columnCount = rows.fold<int>(0, (max, row) => row.length > max ? row.length : max).clamp(1, 24).toInt();
+    return SizedBox(
+      height: extent,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFF7E8),
+            border: Border.all(color: const Color(0xFFC9AA78).withOpacity(0.65)),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(14),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minWidth: MediaQuery.of(context).size.width - 56),
+                child: Table(
+                  defaultColumnWidth: const IntrinsicColumnWidth(),
+                  border: TableBorder.symmetric(
+                    inside: BorderSide(color: const Color(0xFFC9AA78).withOpacity(0.35)),
+                  ),
+                  children: [
+                    for (var rowIndex = 0; rowIndex < rows.length; rowIndex++)
+                      TableRow(
+                        decoration: BoxDecoration(
+                          color: rowIndex == 0 ? const Color(0xFFF0DBAE).withOpacity(0.45) : Colors.transparent,
+                        ),
+                        children: [
+                          for (var column = 0; column < columnCount; column++)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                              child: Text(
+                                column < rows[rowIndex].length ? rows[rowIndex][column] : '',
+                                style: TextStyle(
+                                  fontSize: 15.5,
+                                  height: 1.35,
+                                  color: const Color(0xFF2A2F4A),
+                                  fontWeight: rowIndex == 0 ? FontWeight.w600 : FontWeight.w400,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _Fb2LineSegment {
-  const _Fb2LineSegment(this.text, {this.href});
+  const _Fb2LineSegment(
+    this.text, {
+    this.href,
+    this.bold = false,
+    this.italic = false,
+    this.underline = false,
+  });
+
   final String text;
   final String? href;
+  final bool bold;
+  final bool italic;
+  final bool underline;
 }
+
 
 class _Fb2RenderUnit {
   const _Fb2RenderUnit.text(this.segments, this.blockIndex, this.unitInBlock, this.isTitle)
       : imageBytes = null,
+        tableRows = const [],
         extent = isTitle ? _Fb2ReaderScreenState._titleExtent : _Fb2ReaderScreenState._lineExtent;
 
   const _Fb2RenderUnit.image(this.imageBytes, this.blockIndex, this.unitInBlock)
       : segments = const [],
+        tableRows = const [],
         isTitle = false,
         extent = _Fb2ReaderScreenState._imageExtent;
 
+  _Fb2RenderUnit.table(this.tableRows, this.blockIndex, this.unitInBlock)
+      : segments = const [],
+        imageBytes = null,
+        isTitle = false,
+        extent = _tableExtent(tableRows);
+
+  static double _tableExtent(List<List<String>> rows) {
+    if (rows.isEmpty) return _Fb2ReaderScreenState._lineExtent;
+    final widest = rows
+        .expand((row) => row)
+        .fold<int>(0, (max, cell) => cell.length > max ? cell.length : max);
+    final extraForWrappedCells = (widest / 48).floor().clamp(0, 4) * 14.0;
+    return (rows.length * (38.0 + extraForWrappedCells) + 22.0).clamp(58.0, 520.0).toDouble();
+  }
+
   final List<_Fb2LineSegment> segments;
   final Uint8List? imageBytes;
+  final List<List<String>> tableRows;
   final int blockIndex;
   final int unitInBlock;
   final bool isTitle;
@@ -1769,11 +1881,14 @@ List<_Fb2RenderUnit> _buildFb2RenderUnits(_Fb2Document document, double usableWi
         final bytes = block.imageBytes;
         if (bytes != null && bytes.isNotEmpty) units.add(_Fb2RenderUnit.image(bytes, blockIndex, 0));
         break;
+      case _Fb2BlockKind.table:
+        if (block.tableRows.isNotEmpty) units.add(_Fb2RenderUnit.table(block.tableRows, blockIndex, 0));
+        break;
       case _Fb2BlockKind.title:
         units.addAll(_wrapFb2Segments([_Fb2LineSegment(block.plainText)], blockIndex, true, charsPerLine));
         break;
       case _Fb2BlockKind.paragraph:
-        final segments = block.inlines.map((inline) => _Fb2LineSegment(inline.text, href: inline.href)).toList();
+        final segments = block.inlines.map((inline) => _Fb2LineSegment(inline.text, href: inline.href, bold: inline.bold, italic: inline.italic, underline: inline.underline)).toList();
         units.addAll(_wrapFb2Segments(segments, blockIndex, false, charsPerLine));
         break;
     }
@@ -1807,7 +1922,7 @@ List<_Fb2RenderUnit> _wrapFb2Segments(List<_Fb2LineSegment> source, int blockInd
         continue;
       }
       if (text.length <= remaining) {
-        current.add(_Fb2LineSegment(text, href: segment.href));
+        current.add(_Fb2LineSegment(text, href: segment.href, bold: segment.bold, italic: segment.italic, underline: segment.underline));
         currentLen += text.length;
         text = '';
       } else {
@@ -1815,7 +1930,7 @@ List<_Fb2RenderUnit> _wrapFb2Segments(List<_Fb2LineSegment> source, int blockInd
         if (cut <= 0 || cut < remaining * 0.45) cut = remaining;
         final part = text.substring(0, cut).trimRight();
         if (part.isNotEmpty) {
-          current.add(_Fb2LineSegment(part, href: segment.href));
+          current.add(_Fb2LineSegment(part, href: segment.href, bold: segment.bold, italic: segment.italic, underline: segment.underline));
           currentLen += part.length;
         }
         flush();
@@ -1837,36 +1952,59 @@ List<double> _buildFb2UnitOffsets(List<_Fb2RenderUnit> units) {
   return offsets;
 }
 
-enum _Fb2BlockKind { paragraph, title, image }
+enum _Fb2BlockKind { paragraph, title, image, table }
 
 class _Fb2Inline {
-  const _Fb2Inline(this.text, {this.href});
+  const _Fb2Inline(
+    this.text, {
+    this.href,
+    this.bold = false,
+    this.italic = false,
+    this.underline = false,
+  });
+
   final String text;
   final String? href;
+  final bool bold;
+  final bool italic;
+  final bool underline;
 }
 
 class _Fb2Block {
   const _Fb2Block.paragraph(this.inlines, {this.anchors = const []})
       : kind = _Fb2BlockKind.paragraph,
         imageBytes = null,
+        tableRows = const [],
         _titleText = '';
   const _Fb2Block.title(String text, {this.anchors = const []})
       : kind = _Fb2BlockKind.title,
         inlines = const [],
         imageBytes = null,
+        tableRows = const [],
         _titleText = text;
   const _Fb2Block.image(this.imageBytes, {this.anchors = const []})
       : kind = _Fb2BlockKind.image,
         inlines = const [],
+        tableRows = const [],
+        _titleText = '';
+  const _Fb2Block.table(this.tableRows, {this.anchors = const []})
+      : kind = _Fb2BlockKind.table,
+        inlines = const [],
+        imageBytes = null,
         _titleText = '';
 
   final _Fb2BlockKind kind;
   final List<_Fb2Inline> inlines;
   final Uint8List? imageBytes;
+  final List<List<String>> tableRows;
   final String _titleText;
   final List<String> anchors;
 
-  String get plainText => kind == _Fb2BlockKind.title ? _titleText : inlines.map((item) => item.text).join();
+  String get plainText => switch (kind) {
+        _Fb2BlockKind.title => _titleText,
+        _Fb2BlockKind.table => tableRows.map((row) => row.join('\t')).join('\n'),
+        _ => inlines.map((item) => item.text).join(),
+      };
 }
 
 class _Fb2Document {
@@ -2057,7 +2195,7 @@ _Fb2Document _parseDocDocument(Uint8List bytes) {
   return const _Fb2Document([
     _Fb2Block.paragraph([
       _Fb2Inline(
-        'Legacy binary DOC сохранён и синхронизируется как оригинал. Для встроенного просмотра нужен локальный конвертер DOC → HTML/текст. Пока ReadAnywhere не показывает бинарное содержимое как текст.',
+        'Legacy binary DOC сохранён и синхронизируется как оригинал. Для встроенного просмотра нужен локальный конвертер DOC → HTML/текст. Пока ReadArc не показывает бинарное содержимое как текст.',
       ),
     ]),
   ]);
@@ -2113,6 +2251,36 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     return buffer.toString().replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trim();
   }
 
+  bool hasOnFormatting(String xml, String tag) {
+    final re = RegExp('<w:$tag\\b[^>]*/?>', caseSensitive: false);
+    final match = re.firstMatch(xml);
+    if (match == null) return false;
+    final raw = match.group(0) ?? '';
+    return !RegExp(r'''w:val\s*=\s*["'](?:0|false|off)["']''', caseSensitive: false).hasMatch(raw);
+  }
+
+  List<_Fb2Inline> inlinesFromParagraphXml(String xml) {
+    final inlines = <_Fb2Inline>[];
+    final runRe = RegExp(r'<w:r\b[^>]*>.*?</w:r>', caseSensitive: false, dotAll: true);
+    for (final runMatch in runRe.allMatches(xml)) {
+      final run = runMatch.group(0) ?? '';
+      final text = textFromXml(run);
+      if (text.isEmpty) continue;
+      final rPr = RegExp(r'<w:rPr\b[^>]*>(.*?)</w:rPr>', caseSensitive: false, dotAll: true).firstMatch(run)?.group(1) ?? run;
+      inlines.add(_Fb2Inline(
+        text,
+        bold: hasOnFormatting(rPr, 'b'),
+        italic: hasOnFormatting(rPr, 'i'),
+        underline: RegExp(r'<w:u\b', caseSensitive: false).hasMatch(rPr),
+      ));
+    }
+    if (inlines.isEmpty) {
+      final text = textFromXml(xml);
+      if (text.isNotEmpty) inlines.add(_Fb2Inline(text));
+    }
+    return inlines;
+  }
+
   List<Uint8List> imagesFromXml(String xml, Map<String, String> rels) {
     final images = <Uint8List>[];
     final ids = <String>{};
@@ -2129,8 +2297,8 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     return images;
   }
 
-  List<String> tableRowsFromXml(String tblXml) {
-    final rows = <String>[];
+  List<List<String>> tableRowsFromXml(String tblXml) {
+    final rows = <List<String>>[];
     for (final row in RegExp(r'<w:tr\b[^>]*>(.*?)</w:tr>', caseSensitive: false, dotAll: true).allMatches(tblXml)) {
       final cells = <String>[];
       final rowBody = row.group(1) ?? '';
@@ -2138,7 +2306,7 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
         final cellText = textFromXml(cell.group(1) ?? '').replaceAll(RegExp(r'\s*\n\s*'), ' ').trim();
         cells.add(cellText.isEmpty ? ' ' : cellText);
       }
-      if (cells.any((cell) => cell.trim().isNotEmpty)) rows.add('│ ${cells.join(' │ ')} │');
+      if (cells.any((cell) => cell.trim().isNotEmpty)) rows.add(List.unmodifiable(cells));
     }
     return rows;
   }
@@ -2162,22 +2330,23 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
 
       if (raw.startsWith(RegExp(r'<w:tbl', caseSensitive: false))) {
         final rows = tableRowsFromXml(raw);
-        for (final row in rows) {
-          blocks.add(_Fb2Block.paragraph([_Fb2Inline(row)]));
-        }
+        if (rows.isNotEmpty) blocks.add(_Fb2Block.table(rows));
         continue;
       }
 
-      final isHeading = RegExp(r'''<w:pStyle\b[^>]*w:val\s*=\s*["']Heading[1-6]["']''', caseSensitive: false).hasMatch(raw) ||
+      final isHeading = RegExp(r'''<w:pStyle\b[^>]*w:val\s*=\s*["'](?:Heading[1-6]|heading[1-6]|Title|Subtitle)["']''', caseSensitive: false).hasMatch(raw) ||
           RegExp(r'<w:outlineLvl\b', caseSensitive: false).hasMatch(raw);
       final isList = RegExp(r'<w:numPr\b', caseSensitive: false).hasMatch(raw);
-      var text = textFromXml(raw);
-      if (text.isEmpty) continue;
-      if (isList) text = '• $text';
+      final inlines = inlinesFromParagraphXml(raw);
+      if (inlines.isEmpty) continue;
+      final text = inlines.map((inline) => inline.text).join();
+      if (text.trim().isEmpty) continue;
       if (isHeading) {
-        blocks.add(_Fb2Block.title(text));
+        blocks.add(_Fb2Block.title(text.trim()));
+      } else if (isList) {
+        blocks.add(_Fb2Block.paragraph([const _Fb2Inline('• '), ...inlines]));
       } else {
-        blocks.add(_Fb2Block.paragraph([_Fb2Inline(text)]));
+        blocks.add(_Fb2Block.paragraph(inlines));
       }
     }
   }
@@ -2392,8 +2561,10 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
   int _page = 1;
   int _pages = 0;
   String? _loadError;
+  String? _textLayer;
   Timer? _saveDebounce;
   bool _fullScreen = false;
+  bool _showTextLayer = false;
 
   BookRecord get _book => _runtimeBook ?? widget.book;
 
@@ -2429,6 +2600,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
       return;
     }
     final initialPage = _targetPageForBook(book);
+    final textLayer = await _extractPdfTextLayer(file);
     final controller = PdfController(
       document: PdfDocument.openFile(file.path),
       initialPage: initialPage,
@@ -2441,6 +2613,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
       _runtimeBook = book;
       _page = initialPage;
       _controller = controller;
+      _textLayer = textLayer;
       _loadError = null;
     });
   }
@@ -2515,15 +2688,38 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Закладка добавлена')));
   }
 
+  bool get _hasPdfTextLayer => (_textLayer ?? '').trim().isNotEmpty;
+
+  Future<void> _copyPdfTextLayer() async {
+    final text = (_textLayer ?? '').trim();
+    if (text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Текстовый слой PDF скопирован')),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final controller = _controller;
     return Scaffold(
+      backgroundColor: const Color(0xFFF3E7CF),
       appBar: _fullScreen
           ? null
           : AppBar(
               title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
               actions: [
+                IconButton(
+                  tooltip: _showTextLayer ? 'Показать PDF-страницы' : 'Показать текстовый слой',
+                  onPressed: _hasPdfTextLayer ? () => setState(() => _showTextLayer = !_showTextLayer) : null,
+                  icon: Icon(_showTextLayer ? Icons.picture_as_pdf_outlined : Icons.text_fields_rounded),
+                ),
+                IconButton(
+                  tooltip: 'Скопировать текст PDF',
+                  onPressed: _hasPdfTextLayer ? _copyPdfTextLayer : null,
+                  icon: const Icon(Icons.copy_all_rounded),
+                ),
                 IconButton(
                   tooltip: 'Полный экран',
                   onPressed: () => setState(() => _fullScreen = true),
@@ -2540,6 +2736,13 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
           ? Column(
               mainAxisSize: MainAxisSize.min,
               children: [
+                FloatingActionButton.small(
+                  heroTag: 'pdf-text-${widget.book.id}',
+                  tooltip: _showTextLayer ? 'Показать PDF-страницы' : 'Показать текстовый слой',
+                  onPressed: _hasPdfTextLayer ? () => setState(() => _showTextLayer = !_showTextLayer) : null,
+                  child: Icon(_showTextLayer ? Icons.picture_as_pdf_outlined : Icons.text_fields_rounded),
+                ),
+                const SizedBox(height: 8),
                 FloatingActionButton.small(
                   heroTag: 'pdf-bookmark-${widget.book.id}',
                   tooltip: 'Добавить закладку',
@@ -2568,13 +2771,20 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
               : Column(
                   children: [
                     Expanded(
-                      child: PdfView(
-                        controller: controller,
-                        scrollDirection: Axis.vertical,
-                        pageSnapping: false,
-                        onDocumentLoaded: _onDocumentLoaded,
-                        onPageChanged: _onPageChanged,
-                      ),
+                      child: _showTextLayer && _hasPdfTextLayer
+                          ? _PdfTextLayerView(text: _textLayer!, onCopyAll: _copyPdfTextLayer)
+                          : DecoratedBox(
+                              decoration: const BoxDecoration(color: Color(0xFFF3E7CF)),
+                              child: SizedBox.expand(
+                                child: PdfView(
+                                  controller: controller,
+                                  scrollDirection: Axis.vertical,
+                                  pageSnapping: false,
+                                  onDocumentLoaded: _onDocumentLoaded,
+                                  onPageChanged: _onPageChanged,
+                                ),
+                              ),
+                            ),
                     ),
                     if (!_fullScreen)
                       SafeArea(
@@ -2588,7 +2798,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                                 ),
                               ),
                               const SizedBox(width: 12),
-                              Text(_pages > 0 ? '$_page / $_pages' : '$_page'),
+                              Text(_pages > 0 ? '$_page / $_pages' : '$_page', style: const TextStyle(color: Color(0xFF2A2F4A))),
                             ],
                           ),
                         ),
@@ -2597,6 +2807,225 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                 ),
     );
   }
+}
+
+class _PdfTextLayerView extends StatelessWidget {
+  const _PdfTextLayerView({required this.text, required this.onCopyAll});
+
+  final String text;
+  final VoidCallback onCopyAll;
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: const Color(0xFFF3E7CF),
+      child: SelectionArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(24, 22, 24, 34),
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.text_fields_rounded, color: Color(0xFF2A2F4A)),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Текстовый слой PDF',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          color: const Color(0xFF2A2F4A),
+                          fontWeight: FontWeight.w700,
+                        ),
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: onCopyAll,
+                  icon: const Icon(Icons.copy_all_rounded),
+                  label: const Text('Копировать'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Text(
+              text,
+              style: const TextStyle(
+                fontSize: 18,
+                height: 1.58,
+                color: Color(0xFF2A2F4A),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+Future<String> _extractPdfTextLayer(File file) async {
+  try {
+    final bytes = await file.readAsBytes();
+    return _extractPdfTextFromBytes(bytes);
+  } catch (_) {
+    return '';
+  }
+}
+
+String _extractPdfTextFromBytes(Uint8List bytes) {
+  if (bytes.length < 16) return '';
+  final raw = latin1.decode(bytes, allowInvalid: true);
+  final sources = <String>[raw];
+
+  for (final match in RegExp(r'stream\r?\n(.*?)\r?\nendstream', dotAll: true).allMatches(raw)) {
+    final headerStart = (match.start - 900).clamp(0, raw.length).toInt();
+    final header = raw.substring(headerStart, match.start);
+    final streamBody = match.group(1) ?? '';
+    if (!header.contains('/FlateDecode')) continue;
+    try {
+      final decoded = ZLibDecoder().decodeBytes(latin1.encode(streamBody), verify: false);
+      sources.add(latin1.decode(decoded, allowInvalid: true));
+      try {
+        sources.add(utf8.decode(decoded, allowMalformed: true));
+      } catch (_) {}
+    } catch (_) {}
+  }
+
+  final chunks = <String>[];
+  for (final source in sources) {
+    final textObjects = RegExp(r'BT(.*?)ET', dotAll: true).allMatches(source).toList(growable: false);
+    if (textObjects.isNotEmpty) {
+      for (final object in textObjects) {
+        chunks.add(_extractPdfTextFromContent(object.group(1) ?? ''));
+      }
+    } else {
+      chunks.add(_extractPdfTextFromContent(source));
+    }
+  }
+
+  final normalized = _normalizeExtractedPdfText(chunks.where((chunk) => chunk.trim().isNotEmpty).join('\n'));
+  final letters = RegExp(r'[A-Za-zА-Яа-яЁё]').allMatches(normalized).length;
+  if (normalized.length < 24 || letters < 12) return '';
+  return normalized;
+}
+
+String _extractPdfTextFromContent(String content) {
+  final buffer = StringBuffer();
+
+  for (final match in RegExp(r'\((?:\\.|[^\\)])*\)\s*Tj').allMatches(content)) {
+    buffer.writeln(_decodePdfLiteral(match.group(0)!.replaceFirst(RegExp(r'\s*Tj$'), '')));
+  }
+  for (final match in RegExp(r'\[(.*?)\]\s*TJ', dotAll: true).allMatches(content)) {
+    final arrayBody = match.group(1) ?? '';
+    final line = StringBuffer();
+    for (final literal in RegExp(r'\((?:\\.|[^\\)])*\)|<([0-9A-Fa-f\s]+)>').allMatches(arrayBody)) {
+      final raw = literal.group(0) ?? '';
+      if (raw.startsWith('(')) {
+        line.write(_decodePdfLiteral(raw));
+      } else if (raw.startsWith('<')) {
+        line.write(_decodePdfHex(raw));
+      }
+    }
+    final text = line.toString().trim();
+    if (text.isNotEmpty) buffer.writeln(text);
+  }
+  for (final match in RegExp(r'''\((?:\\.|[^\\)])*\)\s*['"]''').allMatches(content)) {
+    final raw = match.group(0) ?? '';
+    final literal = raw.substring(0, raw.lastIndexOf(')') + 1);
+    buffer.writeln(_decodePdfLiteral(literal));
+  }
+  for (final match in RegExp(r'<([0-9A-Fa-f\s]+)>\s*Tj').allMatches(content)) {
+    buffer.writeln(_decodePdfHex(match.group(0)!.replaceFirst(RegExp(r'\s*Tj$'), '')));
+  }
+
+  return buffer.toString();
+}
+
+String _decodePdfLiteral(String raw) {
+  if (raw.length >= 2 && raw.startsWith('(') && raw.endsWith(')')) {
+    raw = raw.substring(1, raw.length - 1);
+  }
+  final out = StringBuffer();
+  for (var i = 0; i < raw.length; i++) {
+    final ch = raw[i];
+    if (ch != '\\' || i + 1 >= raw.length) {
+      out.write(ch);
+      continue;
+    }
+    final next = raw[++i];
+    switch (next) {
+      case 'n':
+        out.write('\n');
+        break;
+      case 'r':
+        out.write('\n');
+        break;
+      case 't':
+        out.write('\t');
+        break;
+      case 'b':
+      case 'f':
+        break;
+      case '(':
+      case ')':
+      case '\\':
+        out.write(next);
+        break;
+      case '\n':
+      case '\r':
+        break;
+      default:
+        if (RegExp(r'[0-7]').hasMatch(next)) {
+          var octal = next;
+          while (i + 1 < raw.length && octal.length < 3 && RegExp(r'[0-7]').hasMatch(raw[i + 1])) {
+            octal += raw[++i];
+          }
+          final value = int.tryParse(octal, radix: 8);
+          if (value != null) out.writeCharCode(value);
+        } else {
+          out.write(next);
+        }
+    }
+  }
+  return out.toString();
+}
+
+String _decodePdfHex(String raw) {
+  var hex = raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
+  if (hex.length.isOdd) hex += '0';
+  final bytes = <int>[];
+  for (var i = 0; i + 1 < hex.length; i += 2) {
+    final value = int.tryParse(hex.substring(i, i + 2), radix: 16);
+    if (value != null) bytes.add(value);
+  }
+  if (bytes.length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF) {
+    final codes = <int>[];
+    for (var i = 2; i + 1 < bytes.length; i += 2) {
+      codes.add((bytes[i] << 8) | bytes[i + 1]);
+    }
+    return String.fromCharCodes(codes);
+  }
+  if (bytes.length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE) {
+    final codes = <int>[];
+    for (var i = 2; i + 1 < bytes.length; i += 2) {
+      codes.add(bytes[i] | (bytes[i + 1] << 8));
+    }
+    return String.fromCharCodes(codes);
+  }
+  return latin1.decode(bytes, allowInvalid: true).replaceAll('\x00', '');
+}
+
+String _normalizeExtractedPdfText(String text) {
+  final lines = _normalizeText(text)
+      .replaceAll('\x00', '')
+      .split('\n')
+      .map((line) => line.replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trim())
+      .where((line) => line.length >= 2)
+      .toList(growable: false);
+  final deduped = <String>[];
+  String? previous;
+  for (final line in lines) {
+    if (line == previous) continue;
+    previous = line;
+    deduped.add(line);
+  }
+  return deduped.join('\n').replaceAll(RegExp(r'\n{3,}'), '\n\n').trim();
 }
 
 class _TextLine {
@@ -2850,6 +3279,122 @@ String _extractLegacyBinaryText(Uint8List bytes, String formatLabel) {
   return lines.take(20000).join('\n');
 }
 
+String _extractChmText(Uint8List bytes) {
+  // CHM is a compressed ITSF container. A full reader needs a native CHM/LZX
+  // adapter, but this function avoids the previous binary mojibake by extracting
+  // only high-confidence readable runs from HTML/index/string tables.
+  final candidates = <String>[];
+
+  void addCandidate(String text) {
+    final normalized = _normalizeText(text)
+        .replaceAll('\x00', '')
+        .split('\n')
+        .map((line) => line.replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trim())
+        .where(_looksReadableChmLine)
+        .toList(growable: false);
+    candidates.addAll(normalized);
+  }
+
+  // Some CHM files contain uncompressed HTML fragments or TOC/index entries.
+  final cp1251 = _decodeWindows1251(bytes);
+  final utf8Text = utf8.decode(bytes, allowMalformed: true);
+  for (final source in [cp1251, utf8Text]) {
+    for (final html in RegExp(r'<(?:html|body|h[1-6]|p|li|object)\b[^>]*>.*?(?:</(?:html|body|h[1-6]|p|li|object)>|$)', caseSensitive: false, dotAll: true).allMatches(source)) {
+      final text = _htmlToPlainText(html.group(0) ?? '');
+      addCandidate(text);
+    }
+  }
+
+  addCandidate(_extractSingleByteRuns(bytes, minLength: 12));
+  addCandidate(_extractUtf16LeRuns(bytes, minLength: 8));
+
+  final deduped = <String>[];
+  final seen = <String>{};
+  for (final line in candidates) {
+    final key = line.toLowerCase();
+    if (seen.add(key)) deduped.add(line);
+  }
+
+  if (deduped.length < 6) {
+    return 'CHM-файл сохранён и синхронизируется как оригинал. Внутренний CHM-контент сжат в ITSF/LZX, поэтому без нативного CHM-адаптера безопасно извлечь текст не удалось. Чтобы не показывать “кракозябры”, ReadArc отображает это сообщение вместо бинарного мусора.';
+  }
+
+  return deduped.take(20000).join('\n');
+}
+
+String _extractSingleByteRuns(Uint8List bytes, {required int minLength}) {
+  final lines = <String>[];
+  final current = <int>[];
+  void flush() {
+    if (current.length >= minLength) {
+      final decoded = _decodeWindows1251(current);
+      lines.add(decoded);
+    }
+    current.clear();
+  }
+
+  for (final byte in bytes) {
+    final printable = byte == 0x09 || byte == 0x0A || byte == 0x0D || (byte >= 0x20 && byte <= 0x7E) || byte >= 0x80;
+    if (printable) {
+      current.add(byte);
+    } else {
+      flush();
+    }
+  }
+  flush();
+  return lines.join('\n');
+}
+
+String _extractUtf16LeRuns(Uint8List bytes, {required int minLength}) {
+  final lines = <String>[];
+  final codes = <int>[];
+
+  bool allowed(int code) =>
+      code == 0x09 ||
+      code == 0x0A ||
+      code == 0x0D ||
+      (code >= 0x20 && code <= 0x7E) ||
+      (code >= 0x0400 && code <= 0x052F) ||
+      code == 0x00A0 ||
+      code == 0x00AB ||
+      code == 0x00BB ||
+      code == 0x2013 ||
+      code == 0x2014 ||
+      code == 0x2026 ||
+      code == 0x2116;
+
+  void flush() {
+    if (codes.length >= minLength) lines.add(String.fromCharCodes(codes));
+    codes.clear();
+  }
+
+  for (var i = 0; i + 1 < bytes.length; i += 2) {
+    final code = bytes[i] | (bytes[i + 1] << 8);
+    if (allowed(code)) {
+      codes.add(code);
+    } else {
+      flush();
+    }
+  }
+  flush();
+  return lines.join('\n');
+}
+
+bool _looksReadableChmLine(String line) {
+  final text = line.trim();
+  if (text.length < 8 || text.length > 360) return false;
+  if (RegExp(r'^[\W_\d]+$').hasMatch(text)) return false;
+  if (RegExp(r'(?:[A-Za-z]:\\|/)[^ ]{20,}').hasMatch(text)) return false;
+  final letters = RegExp(r'[A-Za-zА-Яа-яЁё]').allMatches(text).length;
+  final bad = RegExp(r'[�\x00-\x08\x0B\x0C\x0E-\x1F]').allMatches(text).length;
+  final symbols = RegExp(r'''[^A-Za-zА-Яа-яЁё0-9 .,;:!?()\[\]{}<>«»"'\-–—/\n\t]''').allMatches(text).length;
+  final len = text.length;
+  if (letters / len < 0.35) return false;
+  if (bad / len > 0.02) return false;
+  if (symbols / len > 0.14) return false;
+  return true;
+}
+
 Uint8List _archiveFileBytes(ArchiveFile file) {
   final content = file.content;
   if (content is Uint8List) return content;
@@ -3038,7 +3583,7 @@ class _ConversionNeededReaderScreen extends StatelessWidget {
               const SizedBox(height: 12),
               Text(
                 'Встроенный просмотр $formatLabel требует локального адаптера $adapterName. '
-                'Пока ReadAnywhere не будет показывать бинарные “кракозябры” как текст. '
+                'Пока ReadArc не будет показывать бинарные “кракозябры” как текст. '
                 'Следующий production-шаг для этого формата — подключить нативный конвертер/renderer.',
                 textAlign: TextAlign.center,
               ),
@@ -3289,7 +3834,7 @@ class _SyncScreenState extends State<SyncScreen> {
             Text('Код: ${invite.displayCode}'),
             const SizedBox(height: 4),
             Text(
-              'Отсканируйте QR-код на новом устройстве в ReadAnywhere.',
+              'Отсканируйте QR-код на новом устройстве в ReadArc.',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodySmall,
             ),
@@ -3474,7 +4019,7 @@ class _SyncScreenState extends State<SyncScreen> {
                     _RelayModeOption(
                       value: RelayEndpointMode.official,
                       groupValue: _endpointMode,
-                      title: 'ReadAnywhere relay',
+                      title: 'ReadArc relay',
                       subtitle: ReadAnywhereRelayConfig.officialRelayUrl,
                       onChanged: (value) => setState(() => _endpointMode = value),
                     ),
@@ -3834,7 +4379,7 @@ class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Text(
-                'Наведите камеру на QR-код подключения ReadAnywhere.',
+                'Наведите камеру на QR-код подключения ReadArc.',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.bodyMedium,
               ),

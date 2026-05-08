@@ -11,11 +11,11 @@
 Скрипт `scripts/package_android.sh` теперь собирает:
 
 - release APK отдельно по ABI:
-  - `ReadAnywhere-<version>-android-arm64-v8a-release.apk`
-  - `ReadAnywhere-<version>-android-armeabi-v7a-release.apk`
-  - `ReadAnywhere-<version>-android-x86_64-release.apk`
+  - `ReadArc-<version>-android-arm64-v8a-release.apk`
+  - `ReadArc-<version>-android-armeabi-v7a-release.apk`
+  - `ReadArc-<version>-android-x86_64-release.apk`
 - release App Bundle:
-  - `ReadAnywhere-<version>-android-release.aab`
+  - `ReadArc-<version>-android-release.aab`
 - `SHA256SUMS` для проверки целостности.
 
 Debug APK больше не собирается по умолчанию. Его можно включить вручную через параметр GitHub Actions `build_debug_artifacts=true`.
@@ -24,9 +24,9 @@ Debug APK больше не собирается по умолчанию. Его
 
 Скрипт `scripts/package_macos.sh` собирает только release-приложение:
 
-- `ReadAnywhere-<version>-macos-release.dmg`
-- `ReadAnywhere-<version>-macos-release.pkg`
-- `ReadAnywhere-<version>-macos-release-app.zip`
+- `ReadArc-<version>-macos-release.dmg`
+- `ReadArc-<version>-macos-release.pkg`
+- `ReadArc-<version>-macos-release-app.zip`
 - `SHA256SUMS`.
 
 Debug app zip можно включить только вручную через `build_debug_artifacts=true`.

@@ -35,7 +35,7 @@ MSG
 fi
 
 cat <<MSG
-This will publish local ReadAnywhere relay port $PORT to the public internet using Tailscale Funnel.
+This will publish local ReadArc relay port $PORT to the public internet using Tailscale Funnel.
 
 Keep the local relay running in another terminal:
   ./scripts/run_local_relay.sh
@@ -46,7 +46,7 @@ This script will run:
 Tailscale will print a public HTTPS URL like:
   https://your-device.your-tailnet.ts.net
 
-Use that URL in ReadAnywhere → Синхронизация → Personal Hub / Tailscale Funnel.
+Use that URL in ReadArc → Синхронизация → Personal Hub / Tailscale Funnel.
 
 MSG
 

@@ -94,7 +94,7 @@ jobs:
       - name: Upload Android release artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: ReadAnywhere-android-release
+          name: ReadArc-android-release
           path: dist/android/*
           retention-days: 7
 
@@ -118,7 +118,7 @@ jobs:
       - name: Upload macOS release packages
         uses: actions/upload-artifact@v6
         with:
-          name: ReadAnywhere-macos-release-dmg-pkg
+          name: ReadArc-macos-release-dmg-pkg
           path: dist/macos/*
           retention-days: 7
 
@@ -143,13 +143,13 @@ jobs:
       - name: Download Android release artifacts
         uses: actions/download-artifact@v6
         with:
-          name: ReadAnywhere-android-release
+          name: ReadArc-android-release
           path: release-assets/android
 
       - name: Download macOS release artifacts
         uses: actions/download-artifact@v6
         with:
-          name: ReadAnywhere-macos-release-dmg-pkg
+          name: ReadArc-macos-release-dmg-pkg
           path: release-assets/macos
 
       - name: Decide release channel
@@ -165,17 +165,17 @@ jobs:
 
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             TAG="${GITHUB_REF_NAME}"
-            TITLE="ReadAnywhere ${TAG}"
+            TITLE="ReadArc ${TAG}"
             PRERELEASE="false"
             ROLLING="false"
           elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && -n "${{ github.event.inputs.release_tag }}" ]]; then
             TAG="${{ github.event.inputs.release_tag }}"
-            TITLE="ReadAnywhere ${TAG}"
+            TITLE="ReadArc ${TAG}"
             PRERELEASE="${{ github.event.inputs.release_prerelease }}"
             ROLLING="false"
           else
             TAG="main-latest"
-            TITLE="ReadAnywhere main-latest"
+            TITLE="ReadArc main-latest"
             PRERELEASE="true"
             ROLLING="true"
           fi
@@ -200,16 +200,16 @@ jobs:
           ROLLING="${{ steps.release_channel.outputs.rolling }}"
 
           if [[ -f release-assets/android/SHA256SUMS ]]; then
-            mv release-assets/android/SHA256SUMS release-assets/android/ReadAnywhere-android-release-SHA256SUMS.txt
+            mv release-assets/android/SHA256SUMS release-assets/android/ReadArc-android-release-SHA256SUMS.txt
           fi
           if [[ -f release-assets/macos/SHA256SUMS ]]; then
-            mv release-assets/macos/SHA256SUMS release-assets/macos/ReadAnywhere-macos-release-SHA256SUMS.txt
+            mv release-assets/macos/SHA256SUMS release-assets/macos/ReadArc-macos-release-SHA256SUMS.txt
           fi
 
           if [[ "$ROLLING" == "true" ]]; then
             CHANNEL_TEXT="Автоматическая rolling-сборка из ветки ${GITHUB_REF_NAME}. Этот релиз обновляется при каждом push в main/master."
           else
-            CHANNEL_TEXT="Автоматическая тестовая сборка ReadAnywhere."
+            CHANNEL_TEXT="Автоматическая тестовая сборка ReadArc."
           fi
 
           cat > RELEASE_NOTES.md <<EOF

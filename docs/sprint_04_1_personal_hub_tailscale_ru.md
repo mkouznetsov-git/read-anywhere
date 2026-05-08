@@ -37,7 +37,7 @@
 1. На Mac/PC запускаем локальный relay.
 2. Публикуем его через Tailscale Funnel.
 3. Получаем HTTPS URL *.ts.net.
-4. В ReadAnywhere выбираем Personal Hub.
+4. В ReadArc выбираем Personal Hub.
 5. На других устройствах вставляем тот же URL и accountId.
 6. Библиотека, прогресс и скачивание книг работают через хаб.
 ```

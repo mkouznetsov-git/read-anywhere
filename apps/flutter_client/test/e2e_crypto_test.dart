@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:read_anywhere/services/sync/e2e_crypto.dart';
+import 'package:readarc/services/sync/e2e_crypto.dart';
 
 String _key() {
   final random = Random(42);

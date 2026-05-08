@@ -9,7 +9,7 @@
 В приложении появились режимы:
 
 ```text
-ReadAnywhere relay
+ReadArc relay
 Свой relay
 Локальная разработка
 ```
@@ -102,7 +102,7 @@ READANYWHERE_DEFAULT_RELAY_URL=https://your-service.koyeb.app ./scripts/package_
 В приложении выбрать:
 
 ```text
-ReadAnywhere relay
+ReadArc relay
 ```
 
 ## Следующий спринт

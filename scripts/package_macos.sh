@@ -4,13 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="$ROOT_DIR/apps/flutter_client"
 DIST_DIR="$ROOT_DIR/dist/macos"
-APP_NAME="ReadAnywhere"
+APP_NAME="ReadArc"
 VERSION="${READ_ANYWHERE_VERSION:-0.1.0}"
 BUILD_DEBUG_ARTIFACTS="${BUILD_DEBUG_ARTIFACTS:-false}"
-DMG_NAME="ReadAnywhere-${VERSION}-macos-release.dmg"
-PKG_NAME="ReadAnywhere-${VERSION}-macos-release.pkg"
+DMG_NAME="ReadArc-${VERSION}-macos-release.dmg"
+PKG_NAME="ReadArc-${VERSION}-macos-release.pkg"
 
-export READ_ANYWHERE_PLATFORMS="macos"
+export READARC_PLATFORMS="macos"
 "$ROOT_DIR/scripts/prepare_flutter_platforms.sh"
 
 cd "$APP_DIR"
@@ -41,7 +41,7 @@ STAGED_APP="$STAGE_ROOT/$APP_NAME.app"
 cp -R "$APP_PATH" "$STAGED_APP"
 
 # Plain release .app zip, useful for quick testing.
-ditto -c -k --keepParent "$STAGED_APP" "$DIST_DIR/ReadAnywhere-${VERSION}-macos-release-app.zip"
+ditto -c -k --keepParent "$STAGED_APP" "$DIST_DIR/ReadArc-${VERSION}-macos-release-app.zip"
 
 # Unsigned release PKG for local/internal testing. Public distribution should use Developer ID signing + notarization.
 productbuild --component "$STAGED_APP" /Applications "$DIST_DIR/$PKG_NAME"
@@ -65,7 +65,7 @@ if [[ "$BUILD_DEBUG_ARTIFACTS" == "true" || "$BUILD_DEBUG_ARTIFACTS" == "1" ]]; 
   if [[ -n "${DEBUG_APP_PATH:-}" && -d "$DEBUG_APP_PATH" ]]; then
     DEBUG_STAGE="$STAGE_ROOT/${APP_NAME}-debug.app"
     cp -R "$DEBUG_APP_PATH" "$DEBUG_STAGE"
-    ditto -c -k --keepParent "$DEBUG_STAGE" "$DIST_DIR/ReadAnywhere-${VERSION}-macos-debug-app.zip"
+    ditto -c -k --keepParent "$DEBUG_STAGE" "$DIST_DIR/ReadArc-${VERSION}-macos-debug-app.zip"
   fi
 fi
 
