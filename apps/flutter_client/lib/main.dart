@@ -49,6 +49,10 @@ class _ReadAnywhereAppState extends State<ReadAnywhereApp> {
       await _sync.connect(relayUrl: settings.effectiveRelayUrl);
     } catch (error) {
       debugPrint('ReadAnywhere auto-connect failed: $error');
+      final settings = await _storage.loadSyncSettings();
+      if (settings.autoConnect && !settings.usesOfficialPlaceholder) {
+        _sync.startAutoReconnect(relayUrl: settings.effectiveRelayUrl);
+      }
     }
   }
 
@@ -481,7 +485,16 @@ class ReaderScreen extends StatelessWidget {
       case 'fb2':
         return _Fb2ReaderScreen(book: book, storage: storage, sync: sync);
       case 'epub':
-        return _TxtReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _TextSourceKind.epub);
+        return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.epub);
+      case 'docx':
+        return _TxtReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _TextSourceKind.docx);
+      case 'doc':
+        return _TxtReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _TextSourceKind.doc);
+      case 'chm':
+        return _TxtReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _TextSourceKind.chm);
+      case 'djvu':
+      case 'djv':
+        return _TxtReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _TextSourceKind.djvu);
       case 'pdf':
         return _PdfReaderScreen(book: book, storage: storage, sync: sync);
       default:
@@ -493,7 +506,7 @@ class ReaderScreen extends StatelessWidget {
   }
 }
 
-enum _TextSourceKind { txt, fb2, epub }
+enum _TextSourceKind { txt, fb2, epub, docx, doc, chm, djvu }
 
 class _TxtReaderScreen extends StatefulWidget {
   const _TxtReaderScreen({
@@ -590,6 +603,10 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
       final raw = switch (widget.sourceKind) {
         _TextSourceKind.fb2 => _extractFb2Text(_decodeTextFile(bytes)),
         _TextSourceKind.epub => _extractEpubText(bytes),
+        _TextSourceKind.docx => _extractDocxText(bytes),
+        _TextSourceKind.doc => _extractLegacyBinaryText(bytes, 'DOC'),
+        _TextSourceKind.chm => _extractLegacyBinaryText(bytes, 'CHM'),
+        _TextSourceKind.djvu => _extractLegacyBinaryText(bytes, 'DJVU'),
         _TextSourceKind.txt => _normalizeText(_decodeTextFile(bytes)),
       };
       final totalChars = raw.length;
@@ -610,6 +627,10 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
       final label = switch (widget.sourceKind) {
         _TextSourceKind.fb2 => 'FB2',
         _TextSourceKind.epub => 'EPUB',
+        _TextSourceKind.docx => 'DOCX',
+        _TextSourceKind.doc => 'DOC',
+        _TextSourceKind.chm => 'CHM',
+        _TextSourceKind.djvu => 'DJVU',
         _TextSourceKind.txt => 'TXT',
       };
       setState(() => _loadError = 'Не удалось открыть $label: $error');
@@ -669,6 +690,10 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
       if (type == 'txt-line-anchor-v1' ||
           type == 'fb2-line-anchor-v1' ||
           type == 'epub-line-anchor-v1' ||
+          type == 'docx-line-anchor-v1' ||
+          type == 'doc-line-anchor-v1' ||
+          type == 'chm-line-anchor-v1' ||
+          type == 'djvu-line-anchor-v1' ||
           type == 'txt-top-anchor-v3' ||
           type == 'txt-top-anchor-v2' ||
           type == 'txt-top-anchor-v1' ||
@@ -796,12 +821,20 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
   String get _textLocatorType => switch (widget.sourceKind) {
         _TextSourceKind.fb2 => 'fb2-line-anchor-v1',
         _TextSourceKind.epub => 'epub-line-anchor-v1',
+        _TextSourceKind.docx => 'docx-line-anchor-v1',
+        _TextSourceKind.doc => 'doc-line-anchor-v1',
+        _TextSourceKind.chm => 'chm-line-anchor-v1',
+        _TextSourceKind.djvu => 'djvu-line-anchor-v1',
         _TextSourceKind.txt => 'txt-line-anchor-v1',
       };
 
   String get _textReaderLabel => switch (widget.sourceKind) {
         _TextSourceKind.fb2 => 'FB2',
         _TextSourceKind.epub => 'EPUB',
+        _TextSourceKind.docx => 'DOCX',
+        _TextSourceKind.doc => 'DOC',
+        _TextSourceKind.chm => 'CHM',
+        _TextSourceKind.djvu => 'DJVU',
         _TextSourceKind.txt => 'TXT',
       };
 
@@ -942,6 +975,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
                                   return Text(
                                     line.text,
                                     maxLines: 1,
+          overflow: TextOverflow.clip,
                                     overflow: TextOverflow.clip,
                                     softWrap: false,
                                     style: _readerTextStyle,
@@ -976,12 +1010,15 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
 
 
 
+enum _RichSourceKind { fb2, epub }
+
 class _Fb2ReaderScreen extends StatefulWidget {
-  const _Fb2ReaderScreen({required this.book, required this.storage, required this.sync});
+  const _Fb2ReaderScreen({required this.book, required this.storage, required this.sync, this.sourceKind = _RichSourceKind.fb2});
 
   final BookRecord book;
   final StorageService storage;
   final SyncService sync;
+  final _RichSourceKind sourceKind;
 
   @override
   State<_Fb2ReaderScreen> createState() => _Fb2ReaderScreenState();
@@ -1055,18 +1092,21 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
         break;
       }
     }
+    final formatLabel = widget.sourceKind == _RichSourceKind.epub ? 'EPUB' : 'FB2';
     if (book.localPath == null) {
-      if (mounted) setState(() => _loadError = 'Файл FB2 не скачан на это устройство');
+      if (mounted) setState(() => _loadError = 'Файл $formatLabel не скачан на это устройство');
       return;
     }
     final file = File(book.localPath!);
     if (!await file.exists()) {
-      if (mounted) setState(() => _loadError = 'Файл FB2 отсутствует: ${book.localPath}');
+      if (mounted) setState(() => _loadError = 'Файл $formatLabel отсутствует: ${book.localPath}');
       return;
     }
     try {
-      final xml = _decodeTextFile(await file.readAsBytes());
-      final document = _parseFb2Document(xml);
+      final bytes = await file.readAsBytes();
+      final document = widget.sourceKind == _RichSourceKind.epub
+          ? _parseEpubDocument(Uint8List.fromList(bytes))
+          : _parseFb2Document(_decodeTextFile(bytes));
       if (!mounted) return;
       setState(() {
         _runtimeBook = book;
@@ -1074,7 +1114,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
         _loadError = null;
       });
     } catch (error) {
-      if (mounted) setState(() => _loadError = 'Не удалось открыть FB2: $error');
+      if (mounted) setState(() => _loadError = 'Не удалось открыть $formatLabel: $error');
     }
   }
 
@@ -1120,7 +1160,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
           return byProgress();
         }
 
-        if (type == 'fb2-unit-anchor-v3' || type == 'fb2-unit-anchor-v2') {
+        if (type == 'fb2-unit-anchor-v3' || type == 'fb2-unit-anchor-v2' || type == 'epub-unit-anchor-v1') {
           final unitIndex = (decoded['unitIndex'] as num?)?.round();
           final unitCount = (decoded['unitCount'] as num?)?.round();
           if (unitIndex != null && unitCount != null && unitCount > 0) {
@@ -1270,7 +1310,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     final manifest = await widget.storage.updateProgress(
       bookId: widget.book.id,
       progressPercent: locator.progressPercent,
-      locator: locator.toJsonString(),
+      locator: locator.toJsonString(type: widget.sourceKind == _RichSourceKind.epub ? 'epub-unit-anchor-v1' : 'fb2-unit-anchor-v3'),
     );
     for (final book in manifest.books) {
       if (book.id == widget.book.id) {
@@ -1286,7 +1326,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     await widget.storage.addBookmark(
       bookId: widget.book.id,
       label: 'Закладка ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
-      locator: locator?.toJsonString() ?? _book.currentLocator,
+      locator: locator?.toJsonString(type: widget.sourceKind == _RichSourceKind.epub ? 'epub-unit-anchor-v1' : 'fb2-unit-anchor-v3') ?? _book.currentLocator,
     );
     await widget.sync.broadcastLibrarySnapshot(reason: 'bookmark_added');
     if (!mounted) return;
@@ -1313,7 +1353,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Скопирован фрагмент FB2 ($copied строк)')),
+      SnackBar(content: Text('Скопирован фрагмент ${widget.sourceKind == _RichSourceKind.epub ? 'EPUB' : 'FB2'} ($copied строк)')),
     );
   }
 
@@ -1407,24 +1447,26 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
                             controller: _scrollController,
                             thumbVisibility: true,
                             interactive: true,
-                            child: ListView.builder(
-                              controller: _scrollController,
-                              padding: const EdgeInsets.fromLTRB(
-                                _horizontalReaderPadding,
-                                _topPadding,
-                                _horizontalReaderPadding,
-                                _bottomPadding,
+                            child: SelectionArea(
+                              child: ListView.builder(
+                                controller: _scrollController,
+                                padding: const EdgeInsets.fromLTRB(
+                                  _horizontalReaderPadding,
+                                  _topPadding,
+                                  _horizontalReaderPadding,
+                                  _bottomPadding,
+                                ),
+                                cacheExtent: _lineExtent * 120,
+                                itemExtentBuilder: (index, dimensions) => currentUnits[index].extent,
+                                itemCount: currentUnits.length,
+                                itemBuilder: (context, index) {
+                                  final unit = currentUnits[index];
+                                  return _Fb2UnitView(
+                                    unit: unit,
+                                    onOpenLink: _openExternalLink,
+                                  );
+                                },
                               ),
-                              cacheExtent: _lineExtent * 120,
-                              itemExtentBuilder: (index, dimensions) => currentUnits[index].extent,
-                              itemCount: currentUnits.length,
-                              itemBuilder: (context, index) {
-                                final unit = currentUnits[index];
-                                return _Fb2UnitView(
-                                  unit: unit,
-                                  onOpenLink: _openExternalLink,
-                                );
-                              },
                             ),
                           );
                         },
@@ -1483,7 +1525,7 @@ class _Fb2UnitView extends StatelessWidget {
       height: unit.extent,
       child: Align(
         alignment: Alignment.centerLeft,
-        child: SelectableText.rich(
+        child: Text.rich(
           TextSpan(
             style: style,
             children: unit.segments.map((segment) {
@@ -1551,8 +1593,8 @@ class _Fb2UnitLocator {
     return ((unitIndex / (unitCount - 1)) * 100).clamp(0.0, 100.0).toDouble();
   }
 
-  String toJsonString() => jsonEncode({
-        'type': 'fb2-unit-anchor-v3',
+  String toJsonString({String type = 'fb2-unit-anchor-v3'}) => jsonEncode({
+        'type': type,
         'unitIndex': unitIndex,
         'unitCount': unitCount,
         'blockIndex': blockIndex,
@@ -1696,6 +1738,121 @@ class _Fb2Locator {
         'progressPercent': progressPercent,
         'updatedAt': DateTime.now().toUtc().toIso8601String(),
       });
+}
+
+
+_Fb2Document _parseEpubDocument(Uint8List bytes) {
+  final archive = ZipDecoder().decodeBytes(bytes, verify: false);
+  ArchiveFile? findFile(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    for (final file in archive.files) {
+      if (!file.isFile) continue;
+      if (file.name.replaceAll('\\', '/') == normalized) return file;
+    }
+    return null;
+  }
+
+  String fileText(ArchiveFile file) => _decodeTextFile(_archiveFileBytes(file));
+  final container = findFile('META-INF/container.xml');
+  var opfPath = '';
+  if (container != null) {
+    final match = RegExp("full-path\\s*=\\s*[\"']([^\"']+)[\"']", caseSensitive: false).firstMatch(fileText(container));
+    opfPath = match?.group(1) ?? '';
+  }
+  if (opfPath.isEmpty) {
+    for (final file in archive.files) {
+      if (file.isFile && file.name.toLowerCase().endsWith('.opf')) {
+        opfPath = file.name;
+        break;
+      }
+    }
+  }
+  final orderedPaths = <String>[];
+  final imagePaths = <String, Uint8List>{};
+  final opf = opfPath.isEmpty ? null : findFile(opfPath);
+  if (opf != null) {
+    final opfText = fileText(opf);
+    final baseDir = _zipDirName(opfPath);
+    final manifest = <String, String>{};
+    for (final match in RegExp(r'<item\b[^>]*>', caseSensitive: false).allMatches(opfText)) {
+      final tag = match.group(0) ?? '';
+      final id = _xmlAttr(tag, 'id');
+      final href = _xmlAttr(tag, 'href');
+      final mediaType = (_xmlAttr(tag, 'media-type') ?? '').toLowerCase();
+      if (id == null || href == null) continue;
+      final path = _joinZipPath(baseDir, href);
+      final lower = href.toLowerCase();
+      final looksReadable = mediaType.contains('xhtml') || mediaType.contains('html') || lower.endsWith('.xhtml') || lower.endsWith('.html') || lower.endsWith('.htm');
+      final looksImage = mediaType.startsWith('image/') || lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.gif') || lower.endsWith('.webp');
+      if (looksReadable) manifest[id] = path;
+      if (looksImage) {
+        final image = findFile(path);
+        if (image != null) imagePaths[path] = _archiveFileBytes(image);
+      }
+    }
+    for (final match in RegExp(r'<itemref\b[^>]*>', caseSensitive: false).allMatches(opfText)) {
+      final idref = _xmlAttr(match.group(0) ?? '', 'idref');
+      final path = idref == null ? null : manifest[idref];
+      if (path != null) orderedPaths.add(path);
+    }
+    if (orderedPaths.isEmpty) orderedPaths.addAll(manifest.values);
+  }
+  if (orderedPaths.isEmpty) {
+    for (final file in archive.files) {
+      final name = file.name.toLowerCase();
+      if (file.isFile && (name.endsWith('.xhtml') || name.endsWith('.html') || name.endsWith('.htm'))) orderedPaths.add(file.name);
+      if (file.isFile && (name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.gif') || name.endsWith('.webp'))) imagePaths[file.name] = _archiveFileBytes(file);
+    }
+    orderedPaths.sort();
+  }
+
+  final blocks = <_Fb2Block>[];
+  for (final path in orderedPaths) {
+    final file = findFile(path);
+    if (file == null) continue;
+    final baseDir = _zipDirName(path);
+    var html = fileText(file);
+    html = html.replaceAll(RegExp(r'<script\b[^>]*>.*?</script>', caseSensitive: false, dotAll: true), '');
+    html = html.replaceAll(RegExp(r'<style\b[^>]*>.*?</style>', caseSensitive: false, dotAll: true), '');
+
+    final blockRe = RegExp(r'<(h[1-6]|title|p|div|section|li|blockquote)\b[^>]*>(.*?)</\1>', caseSensitive: false, dotAll: true);
+    for (final match in blockRe.allMatches(html)) {
+      final tag = (match.group(1) ?? '').toLowerCase();
+      final body = match.group(2) ?? '';
+      for (final img in RegExp(r'<img\b[^>]*\bsrc\s*=\s*["\']([^"\']+)["\'][^>]*>', caseSensitive: false).allMatches(body)) {
+        final src = _joinZipPath(baseDir, img.group(1) ?? '');
+        final bytes = imagePaths[src] ?? (findFile(src) == null ? null : _archiveFileBytes(findFile(src)!));
+        if (bytes != null) blocks.add(_Fb2Block.image(bytes));
+      }
+      final inlines = _parseHtmlInlines(body, baseDir);
+      final text = inlines.map((item) => item.text).join().replaceAll(RegExp(r'\s+'), ' ').trim();
+      if (text.isEmpty) continue;
+      if (tag.startsWith('h') || tag == 'title') {
+        blocks.add(_Fb2Block.title(text));
+      } else {
+        blocks.add(_Fb2Block.paragraph(inlines));
+      }
+    }
+  }
+  return _Fb2Document(blocks.isEmpty ? [_Fb2Block.paragraph(const [_Fb2Inline('Не удалось извлечь содержимое EPUB.')])] : blocks);
+}
+
+List<_Fb2Inline> _parseHtmlInlines(String html, String baseDir) {
+  final result = <_Fb2Inline>[];
+  var cursor = 0;
+  final linkRe = RegExp(r'<a\b[^>]*\bhref\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>', caseSensitive: false, dotAll: true);
+  for (final match in linkRe.allMatches(html)) {
+    final before = _htmlToPlainText(html.substring(cursor, match.start)).trim();
+    if (before.isNotEmpty) result.add(_Fb2Inline('$before '));
+    final hrefRaw = match.group(1) ?? '';
+    final href = hrefRaw.startsWith('http') || hrefRaw.startsWith('#') ? hrefRaw : _joinZipPath(baseDir, hrefRaw);
+    final text = _htmlToPlainText(match.group(2) ?? '').trim();
+    if (text.isNotEmpty) result.add(_Fb2Inline(text, href: href));
+    cursor = match.end;
+  }
+  final rest = _htmlToPlainText(html.substring(cursor)).trim();
+  if (rest.isNotEmpty) result.add(_Fb2Inline(rest));
+  return result.isEmpty ? const [_Fb2Inline('')] : result;
 }
 
 _Fb2Document _parseFb2Document(String xmlText) {
@@ -2236,6 +2393,57 @@ String _extractEpubText(Uint8List bytes) {
   final result = _normalizeText(buffer.toString());
   if (result.trim().isEmpty) throw StateError('EPUB не содержит читаемого XHTML/HTML текста');
   return result;
+}
+
+
+String _extractDocxText(Uint8List bytes) {
+  final archive = ZipDecoder().decodeBytes(bytes, verify: false);
+  ArchiveFile? findFile(String path) {
+    for (final file in archive.files) {
+      if (file.isFile && file.name.replaceAll('\\', '/') == path) return file;
+    }
+    return null;
+  }
+
+  final parts = <String>[];
+  for (final path in const [
+    'word/document.xml',
+    'word/footnotes.xml',
+    'word/endnotes.xml',
+  ]) {
+    final file = findFile(path);
+    if (file == null) continue;
+    var xml = _decodeTextFile(_archiveFileBytes(file));
+    xml = xml.replaceAll(RegExp(r'<w:tab\b[^>]*/>', caseSensitive: false), '\t');
+    xml = xml.replaceAll(RegExp(r'<w:br\b[^>]*/>', caseSensitive: false), '\n');
+    xml = xml.replaceAll(RegExp(r'</w:p>', caseSensitive: false), '\n');
+    final buffer = StringBuffer();
+    for (final match in RegExp(r'<w:t\b[^>]*>(.*?)</w:t>', caseSensitive: false, dotAll: true).allMatches(xml)) {
+      buffer.write(_decodeXmlEntities(match.group(1) ?? ''));
+    }
+    final text = buffer.toString().replaceAll(RegExp(r'\n{3,}'), '\n\n').trim();
+    if (text.isNotEmpty) parts.add(text);
+  }
+  final result = _normalizeText(parts.join('\n\n'));
+  if (result.trim().isEmpty) throw StateError('DOCX не содержит извлекаемого текста');
+  return result;
+}
+
+String _extractLegacyBinaryText(Uint8List bytes, String formatLabel) {
+  // MVP adapter for formats that require native converters in production
+  // (CHM/DJVU/legacy binary DOC). It extracts readable string runs so the file
+  // can at least be indexed/opened while the original remains available for
+  // transfer. Proper renderers/converters should replace this adapter later.
+  final decoded = _decodeTextFile(bytes);
+  final lines = <String>[];
+  for (final match in RegExp(r'[\x09\x0A\x0D\x20-\x7EА-Яа-яЁё№«»—–…]{8,}').allMatches(decoded)) {
+    final line = match.group(0)!.replaceAll(RegExp(r'[ \t\x00]+'), ' ').trim();
+    if (line.length >= 8) lines.add(line);
+  }
+  if (lines.isEmpty) {
+    return 'Формат $formatLabel добавлен как MVP-адаптер. Текст не удалось извлечь без локального конвертера. Оригинальный файл сохранён и синхронизируется между устройствами.';
+  }
+  return lines.take(20000).join('\n');
 }
 
 Uint8List _archiveFileBytes(ArchiveFile file) {

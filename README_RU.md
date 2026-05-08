@@ -352,3 +352,7 @@ TXT-reader переведён на один обычный вертикальн�
 ## Sprint 16: EPUB, копирование текста и ускорение передачи
 
 Добавлена первая поддержка EPUB в текстовом режиме, копирование видимого многострочного фрагмента для TXT/FB2/EPUB, отключено копирование FB2-картинок как data URI, binary chunk увеличен до 1 MiB.
+
+## Sprint 17
+
+Добавлены: устойчивое автопереподключение при старте без relay, Direct/LAN file endpoint для ускоренного скачивания в Personal Hub/LAN/Tailscale сценариях, rich EPUB MVP с изображениями/ссылками/заголовками, DOCX text extraction и MVP fallback для CHM/DOC/DJVU. См. `docs/sprint_17_autoreconnect_direct_epub_chm_docx_djvu_ru.md`.

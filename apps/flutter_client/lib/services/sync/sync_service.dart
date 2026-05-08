@@ -198,7 +198,30 @@ class SyncService {
   int _reconnectAttempt = 0;
   String? _lastRelayUrl;
 
+  HttpServer? _directFileServer;
+  int? _directFileServerPort;
+  final _directShares = <String, _DirectFileShare>{};
+
   Stream<LibraryManifest> get manifestChanges => _manifestChanges.stream;
+
+  /// Start persistent reconnect loop without requiring the first connection to
+  /// succeed. This is used on app startup when autoConnect=true and the
+  /// Personal Hub/relay is still offline.
+  void startAutoReconnect({required String relayUrl}) {
+    if (relayUrl.trim().isEmpty || _manualDisconnect == false && _lastRelayUrl == relayUrl && _reconnectTimer != null) {
+      return;
+    }
+    _manualDisconnect = false;
+    _lastRelayUrl = relayUrl;
+    _reconnectAttempt = 0;
+    _appendRelayUnavailableLogOnce();
+    _setState(state.value.copyWith(
+      connected: false,
+      relayUrl: relayUrl,
+      statusText: 'Relay недоступен. Переподключаемся...',
+    ));
+    _scheduleReconnect(immediate: true);
+  }
 
   Future<void> connect({required String relayUrl}) async {
     _manualDisconnect = false;
@@ -261,6 +284,7 @@ class SyncService {
       state.value.copyWith(connected: true, statusText: 'Подключено'),
     );
     _startHealthMonitor(relayUrl);
+    unawaited(_ensureDirectFileServer());
 
     await refreshMetadata(reason: 'connected');
     _scheduleStartupMetadataRefresh(client);
@@ -298,15 +322,15 @@ class SyncService {
     _scheduleReconnect();
   }
 
-  void _scheduleReconnect() {
+  void _scheduleReconnect({bool immediate = false}) {
     if (_manualDisconnect || _reconnectInProgress) return;
     final relayUrl = _lastRelayUrl;
     if (relayUrl == null || relayUrl.trim().isEmpty) return;
     _reconnectTimer?.cancel();
-    final seconds = _reconnectDelaySeconds(_reconnectAttempt);
+    final seconds = immediate ? 0 : _reconnectDelaySeconds(_reconnectAttempt);
     _setState(state.value.copyWith(
       connected: false,
-      statusText: 'Relay недоступен. Повтор через ${seconds}с',
+      statusText: seconds <= 0 ? 'Relay недоступен. Переподключаемся...' : 'Relay недоступен. Повтор через ${seconds}с',
       relayUrl: relayUrl,
     ));
     _reconnectTimer = Timer(Duration(seconds: seconds), () {
@@ -943,6 +967,7 @@ class SyncService {
       (payload['preferredChunkSize'] as num?)?.toInt() ?? _defaultChunkSize,
       _defaultChunkSize,
     );
+    final directUrls = await _createDirectShareUrls(book: book, file: file);
 
     await _sendEnvelope(
       SyncEnvelope(
@@ -960,6 +985,8 @@ class SyncService {
           'sha256': book.contentSha256,
           'chunkSize': chunkSize,
           'binaryTransfer': true,
+          'directDownloadUrls': directUrls,
+          'directTransfer': directUrls.isNotEmpty,
         },
       ),
     );
@@ -1029,6 +1056,23 @@ class SyncService {
             clearError: true,
           ),
     );
+
+    final directUrls = ((payload['directDownloadUrls'] as List?) ?? const [])
+        .map((item) => item.toString())
+        .where((url) => url.trim().isNotEmpty)
+        .toList();
+    if (directUrls.isNotEmpty) {
+      final directOk = await _tryDirectDownload(session, directUrls);
+      if (directOk) return;
+      final existing = state.value.downloadForBook(session.bookId);
+      if (existing != null) {
+        _setDownloadSnapshot(existing.copyWith(
+          statusText: 'Direct/LAN недоступен, используем relay...',
+          active: true,
+          clearError: true,
+        ));
+      }
+    }
 
     await _sendEnvelope(
       SyncEnvelope(
@@ -1604,6 +1648,190 @@ class SyncService {
     return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 
+
+  Future<void> _ensureDirectFileServer() async {
+    if (_directFileServer != null) return;
+    for (final port in const [8790, 8791, 0]) {
+      try {
+        final server = await HttpServer.bind(InternetAddress.anyIPv4, port, shared: true);
+        _directFileServer = server;
+        _directFileServerPort = server.port;
+        server.listen(
+          (request) => unawaited(_handleDirectFileRequest(request)),
+          onError: (Object error) => debugPrint('Direct file server error: $error'),
+          cancelOnError: false,
+        );
+        _appendLog('Direct/LAN file endpoint: port ${server.port}');
+        return;
+      } catch (_) {
+        if (port == 0) rethrow;
+      }
+    }
+  }
+
+  Future<List<String>> _createDirectShareUrls({required BookRecord book, required File file}) async {
+    try {
+      await _ensureDirectFileServer();
+      final port = _directFileServerPort;
+      if (port == null) return const [];
+      final token = _uuid.v4().replaceAll('-', '');
+      _directShares[token] = _DirectFileShare(
+        token: token,
+        bookId: book.id,
+        file: file,
+        fileName: book.fileName,
+        sha256: book.contentSha256,
+        sizeBytes: await file.length(),
+        expiresAt: DateTime.now().toUtc().add(const Duration(minutes: 15)),
+      );
+      _directShares.removeWhere((_, share) => share.expiresAt.isBefore(DateTime.now().toUtc()));
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+        includeLoopback: false,
+      );
+      final urls = <String>[];
+      for (final interface in interfaces) {
+        for (final address in interface.addresses) {
+          final host = address.address;
+          if (host.startsWith('169.254.')) continue;
+          urls.add('http://$host:$port/direct-file/$token');
+        }
+      }
+      return urls.toSet().toList()..sort();
+    } catch (error) {
+      debugPrint('Cannot create Direct/LAN share: $error');
+      return const [];
+    }
+  }
+
+  Future<void> _handleDirectFileRequest(HttpRequest request) async {
+    try {
+      final segments = request.uri.pathSegments;
+      if (request.method != 'GET' || segments.length != 2 || segments[0] != 'direct-file') {
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+        return;
+      }
+      final token = segments[1];
+      final share = _directShares[token];
+      if (share == null || share.expiresAt.isBefore(DateTime.now().toUtc()) || !await share.file.exists()) {
+        _directShares.remove(token);
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+        return;
+      }
+      final size = await share.file.length();
+      var start = 0;
+      final range = request.headers.value(HttpHeaders.rangeHeader);
+      if (range != null) {
+        final match = RegExp(r'bytes=(\d+)-').firstMatch(range);
+        if (match != null) start = int.tryParse(match.group(1) ?? '0') ?? 0;
+      }
+      start = start.clamp(0, size).toInt();
+      request.response.headers
+        ..set(HttpHeaders.acceptRangesHeader, 'bytes')
+        ..set(HttpHeaders.contentTypeHeader, 'application/octet-stream')
+        ..set('X-ReadAnywhere-Book-Id', share.bookId)
+        ..set('X-ReadAnywhere-Sha256', share.sha256)
+        ..set('X-ReadAnywhere-File-Name', Uri.encodeComponent(share.fileName));
+      if (start > 0) {
+        request.response.statusCode = HttpStatus.partialContent;
+        request.response.headers.set(HttpHeaders.contentRangeHeader, 'bytes $start-${size - 1}/$size');
+      } else {
+        request.response.statusCode = HttpStatus.ok;
+      }
+      request.response.contentLength = size - start;
+      await share.file.openRead(start).pipe(request.response);
+    } catch (error) {
+      try {
+        request.response.statusCode = HttpStatus.internalServerError;
+        await request.response.close();
+      } catch (_) {}
+      debugPrint('Direct file request failed: $error');
+    }
+  }
+
+  Future<bool> _tryDirectDownload(_DownloadSession session, List<String> urls) async {
+    final tempFile = session.tempFile;
+    if (tempFile == null) return false;
+    session.watchdog?.cancel();
+    for (final rawUrl in urls) {
+      final uri = Uri.tryParse(rawUrl);
+      if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) continue;
+      final existing = state.value.downloadForBook(session.bookId);
+      if (existing != null) {
+        _setDownloadSnapshot(existing.copyWith(
+          statusText: 'Пробуем Direct/LAN скачивание...',
+          active: true,
+          clearError: true,
+        ));
+      }
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 4);
+      IOSink? sink;
+      try {
+        var resumeBytes = await tempFile.exists() ? await tempFile.length() : 0;
+        if (resumeBytes > session.expectedBytes) {
+          await tempFile.writeAsBytes(const [], flush: true);
+          resumeBytes = 0;
+        }
+        final request = await client.getUrl(uri).timeout(const Duration(seconds: 5));
+        if (resumeBytes > 0) request.headers.set(HttpHeaders.rangeHeader, 'bytes=$resumeBytes-');
+        final response = await request.close().timeout(const Duration(seconds: 8));
+        if (response.statusCode != HttpStatus.ok && response.statusCode != HttpStatus.partialContent) {
+          await response.drain();
+          continue;
+        }
+        if (response.statusCode == HttpStatus.ok && resumeBytes > 0) {
+          await tempFile.writeAsBytes(const [], flush: true);
+          resumeBytes = 0;
+        }
+        session.receivedBytes = resumeBytes;
+        sink = tempFile.openWrite(mode: FileMode.append);
+        final startedAt = DateTime.now();
+        var lastUi = DateTime.fromMillisecondsSinceEpoch(0);
+        await for (final chunk in response.timeout(const Duration(seconds: 30))) {
+          sink.add(chunk);
+          session.receivedBytes += chunk.length;
+          final now = DateTime.now();
+          if (now.difference(lastUi).inMilliseconds > 250) {
+            lastUi = now;
+            final progress = session.expectedBytes <= 0 ? 0.0 : (session.receivedBytes / session.expectedBytes) * 100;
+            final elapsed = now.difference(startedAt).inMilliseconds.clamp(1, 1 << 31);
+            final mbps = ((session.receivedBytes - resumeBytes) / (1024 * 1024)) / (elapsed / 1000.0);
+            final snap = state.value.downloadForBook(session.bookId);
+            if (snap != null) {
+              _setDownloadSnapshot(snap.copyWith(
+                statusText: 'Direct/LAN: ${progress.clamp(0, 100).toStringAsFixed(1)}% • ${mbps.toStringAsFixed(1)} MB/s',
+                progressPercent: progress.clamp(0, 100).toDouble(),
+                transferredBytes: session.receivedBytes,
+                totalBytes: session.expectedBytes,
+                active: true,
+              ));
+            }
+          }
+        }
+        await sink.flush();
+        await sink.close();
+        sink = null;
+        if (session.expectedBytes <= 0 || session.receivedBytes >= session.expectedBytes) {
+          final snap = state.value.downloadForBook(session.bookId);
+          if (snap != null) {
+            _setDownloadSnapshot(snap.copyWith(statusText: 'Проверяем SHA-256...', active: true));
+          }
+          await _finalizeDownload(session);
+          return true;
+        }
+      } catch (error) {
+        debugPrint('Direct/LAN download failed from $rawUrl: $error');
+      } finally {
+        try { await sink?.close(); } catch (_) {}
+        client.close(force: true);
+      }
+    }
+    _resetDownloadWatchdog(session);
+    return false;
+  }
+
   Future<void> _sendFileError(
     LibraryManifest local,
     String transferId,
@@ -1698,6 +1926,9 @@ class SyncService {
   Future<void> dispose() async {
     await disconnect(manual: true);
     _reconnectTimer?.cancel();
+    await _directFileServer?.close(force: true);
+    _directFileServer = null;
+    _directShares.clear();
     await _manifestChanges.close();
     state.dispose();
   }
@@ -1728,4 +1959,25 @@ class _DownloadSession {
   int? totalChunks;
   Timer? watchdog;
   final DateTime startedAt = DateTime.now();
+}
+
+
+class _DirectFileShare {
+  const _DirectFileShare({
+    required this.token,
+    required this.bookId,
+    required this.file,
+    required this.fileName,
+    required this.sha256,
+    required this.sizeBytes,
+    required this.expiresAt,
+  });
+
+  final String token;
+  final String bookId;
+  final File file;
+  final String fileName;
+  final String sha256;
+  final int sizeBytes;
+  final DateTime expiresAt;
 }
