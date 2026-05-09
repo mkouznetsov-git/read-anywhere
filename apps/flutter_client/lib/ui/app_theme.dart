@@ -2,9 +2,9 @@ import 'package:flutter/material.dart';
 
 class ReadAnywhereTheme {
   static ThemeData light() {
-    const deepIndigo = Color(0xFF1A1630);
-    const indigoSurface = Color(0xFF211C36);
-    const indigoCard = Color(0xFF28213F);
+    const deepIndigo = Color(0xFF211B36);
+    const indigoSurface = Color(0xFF2A2340);
+    const indigoCard = Color(0xFF302849);
     const warmGold = Color(0xFFC9AA78);
     const paper = Color(0xFFF3E7CF);
     const inkBlue = Color(0xFF2A2F4A);
@@ -55,7 +55,7 @@ class ReadAnywhereTheme {
       ),
       progressIndicatorTheme: const ProgressIndicatorThemeData(
         color: warmGold,
-        linearTrackColor: Color(0xFF3A334D),
+        linearTrackColor: Color(0xFF4A405F),
       ),
       iconTheme: const IconThemeData(color: warmGold),
       listTileTheme: const ListTileThemeData(

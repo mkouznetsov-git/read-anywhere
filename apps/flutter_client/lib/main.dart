@@ -91,7 +91,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
   late final _importService = BookImportService(widget.storage);
   LibraryManifest? _manifest;
   bool _busy = false;
-  bool _healthBusy = false;
   bool _pairingBusy = false;
   bool _bulkDownloadBusy = false;
   bool _logExpanded = false;
@@ -608,18 +607,14 @@ class ReaderScreen extends StatelessWidget {
       case 'epub':
         return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.epub);
       case 'docx':
-        return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.docx);
+        return _DocxReaderScreen(book: book, storage: storage, sync: sync);
       case 'doc':
         return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.doc);
       case 'chm':
-        return _TxtReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _TextSourceKind.chm);
+        return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.chm);
       case 'djvu':
       case 'djv':
-        return _ConversionNeededReaderScreen(
-          book: book,
-          formatLabel: 'DJVU',
-          adapterName: 'DjVuLibre/нативный DJVU renderer',
-        );
+        return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.djvu);
       case 'pdf':
         return _PdfReaderScreen(book: book, storage: storage, sync: sync);
       default:
@@ -1135,7 +1130,393 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
 
 
 
-enum _RichSourceKind { fb2, epub, docx, doc }
+
+class _DocxReaderScreen extends StatefulWidget {
+  const _DocxReaderScreen({required this.book, required this.storage, required this.sync});
+
+  final BookRecord book;
+  final StorageService storage;
+  final SyncService sync;
+
+  @override
+  State<_DocxReaderScreen> createState() => _DocxReaderScreenState();
+}
+
+class _DocxReaderScreenState extends State<_DocxReaderScreen> {
+  final _scrollController = ScrollController();
+  BookRecord? _runtimeBook;
+  _Fb2Document? _document;
+  String? _loadError;
+  bool _fullScreen = false;
+  bool _restoring = false;
+  Timer? _saveDebounce;
+  Timer? _redrawThrottle;
+  double _progress = 0;
+
+  BookRecord get _book => _runtimeBook ?? widget.book;
+
+  @override
+  void initState() {
+    super.initState();
+    _progress = widget.book.progressPercent;
+    _scrollController.addListener(_onScroll);
+    unawaited(_load());
+  }
+
+  @override
+  void dispose() {
+    _saveDebounce?.cancel();
+    _redrawThrottle?.cancel();
+    if (_document != null) {
+      final progress = _currentProgress();
+      unawaited(_saveProgress(progress));
+    }
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final manifest = await widget.storage.loadManifest();
+    var book = widget.book;
+    for (final candidate in manifest.books) {
+      if (candidate.id == widget.book.id) {
+        book = candidate;
+        break;
+      }
+    }
+    if (book.localPath == null) {
+      if (mounted) setState(() => _loadError = 'Файл DOCX не скачан на это устройство');
+      return;
+    }
+    final file = File(book.localPath!);
+    if (!await file.exists()) {
+      if (mounted) setState(() => _loadError = 'Файл DOCX отсутствует: ${book.localPath}');
+      return;
+    }
+    try {
+      final document = _parseDocxDocument(await file.readAsBytes());
+      if (!mounted) return;
+      setState(() {
+        _runtimeBook = book;
+        _document = document;
+        _progress = book.progressPercent.clamp(0.0, 100.0).toDouble();
+        _loadError = null;
+      });
+      _restoreScroll(_targetProgressForBook(book));
+    } catch (error) {
+      if (mounted) setState(() => _loadError = 'Не удалось открыть DOCX: $error');
+    }
+  }
+
+  double _targetProgressForBook(BookRecord book) {
+    try {
+      final decoded = jsonDecode(book.currentLocator);
+      if (decoded is Map && decoded['type'] == 'docx-rich-scroll-v1') {
+        return ((decoded['progressPercent'] as num?)?.toDouble() ?? book.progressPercent).clamp(0.0, 100.0).toDouble();
+      }
+    } catch (_) {}
+    return book.progressPercent.clamp(0.0, 100.0).toDouble();
+  }
+
+  void _restoreScroll(double progress) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted || !_scrollController.hasClients) return;
+      _restoring = true;
+      try {
+        for (var attempt = 0; attempt < 20; attempt++) {
+          await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 24 : 40));
+          if (!mounted || !_scrollController.hasClients) continue;
+          final max = _scrollController.position.maxScrollExtent;
+          if (max <= 0 && attempt < 8) continue;
+          _scrollController.jumpTo((max * (progress / 100.0)).clamp(0.0, max));
+          break;
+        }
+      } finally {
+        _restoring = false;
+      }
+    });
+  }
+
+  double _currentProgress() {
+    if (!_scrollController.hasClients) return _progress;
+    final position = _scrollController.position;
+    if (position.maxScrollExtent <= 0) return 0;
+    return ((position.pixels / position.maxScrollExtent) * 100).clamp(0.0, 100.0).toDouble();
+  }
+
+  void _onScroll() {
+    if (_restoring || !_scrollController.hasClients) return;
+    final progress = _currentProgress();
+    _progress = progress;
+    if (!(_redrawThrottle?.isActive ?? false)) {
+      _redrawThrottle = Timer(const Duration(milliseconds: 90), () {
+        if (mounted) setState(() {});
+      });
+    }
+    _saveDebounce?.cancel();
+    _saveDebounce = Timer(const Duration(milliseconds: 600), () {
+      unawaited(_saveProgress(progress));
+    });
+  }
+
+  String _locatorJson(double progress) => jsonEncode({
+        'type': 'docx-rich-scroll-v1',
+        'progressPercent': progress.clamp(0.0, 100.0),
+        'updatedAt': DateTime.now().toUtc().toIso8601String(),
+      });
+
+  Future<void> _saveProgress(double progress) async {
+    await widget.storage.updateProgress(
+      bookId: widget.book.id,
+      progressPercent: progress.clamp(0.0, 100.0).toDouble(),
+      locator: _locatorJson(progress),
+    );
+    await widget.sync.broadcastLibrarySnapshot(reason: 'docx_progress_updated');
+  }
+
+  Future<void> _copyAll() async {
+    final doc = _document;
+    if (doc == null) return;
+    final text = doc.blocks.map((block) => block.plainText).where((line) => line.trim().isNotEmpty).join('\n\n');
+    if (text.trim().isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Текст DOCX скопирован')));
+  }
+
+  Future<void> _addBookmark() async {
+    final progress = _currentProgress();
+    await widget.storage.addBookmark(
+      bookId: widget.book.id,
+      label: 'Закладка DOCX ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
+      locator: _locatorJson(progress),
+    );
+    await widget.sync.broadcastLibrarySnapshot(reason: 'bookmark_added');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Закладка добавлена')));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final document = _document;
+    return Scaffold(
+      backgroundColor: const Color(0xFFF3E7CF),
+      appBar: _fullScreen
+          ? null
+          : AppBar(
+              title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+              actions: [
+                IconButton(
+                  tooltip: 'Скопировать текст документа',
+                  onPressed: document == null ? null : _copyAll,
+                  icon: const Icon(Icons.copy_all_rounded),
+                ),
+                IconButton(
+                  tooltip: 'Полный экран',
+                  onPressed: () => setState(() => _fullScreen = true),
+                  icon: const Icon(Icons.fullscreen_rounded),
+                ),
+                IconButton(
+                  tooltip: 'Добавить закладку',
+                  onPressed: document == null ? null : _addBookmark,
+                  icon: const Icon(Icons.bookmark_add_outlined),
+                ),
+              ],
+            ),
+      floatingActionButton: _fullScreen
+          ? FloatingActionButton.small(
+              tooltip: 'Выйти из полного экрана',
+              onPressed: () => setState(() => _fullScreen = false),
+              child: const Icon(Icons.fullscreen_exit_rounded),
+            )
+          : null,
+      body: _loadError != null
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(28),
+                child: Text(_loadError!, textAlign: TextAlign.center),
+              ),
+            )
+          : document == null
+              ? const Center(child: CircularProgressIndicator())
+              : Column(
+                  children: [
+                    Expanded(
+                      child: ColoredBox(
+                        color: const Color(0xFFF3E7CF),
+                        child: SelectionArea(
+                          child: Scrollbar(
+                            controller: _scrollController,
+                            thumbVisibility: true,
+                            interactive: true,
+                            child: ListView.builder(
+                              controller: _scrollController,
+                              padding: const EdgeInsets.fromLTRB(22, 22, 22, 34),
+                              cacheExtent: 2400,
+                              itemCount: document.blocks.length,
+                              itemBuilder: (context, index) => _DocxBlockView(block: document.blocks[index]),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (!_fullScreen)
+                      SafeArea(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
+                          child: Row(
+                            children: [
+                              Expanded(child: LinearProgressIndicator(value: _progress.clamp(0, 100) / 100)),
+                              const SizedBox(width: 12),
+                              Text('${_progress.clamp(0, 100).toStringAsFixed(1)}%', style: const TextStyle(color: Color(0xFF2A2F4A))),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+    );
+  }
+}
+
+class _DocxBlockView extends StatelessWidget {
+  const _DocxBlockView({required this.block});
+
+  final _Fb2Block block;
+
+  @override
+  Widget build(BuildContext context) {
+    switch (block.kind) {
+      case _Fb2BlockKind.image:
+        final bytes = block.imageBytes;
+        if (bytes == null || bytes.isEmpty) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 560),
+              child: Image.memory(bytes, fit: BoxFit.contain, errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined)),
+            ),
+          ),
+        );
+      case _Fb2BlockKind.table:
+        return _DocxDocumentTableView(rows: block.tableRows);
+      case _Fb2BlockKind.title:
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(0, 20, 0, 10),
+          child: Text(
+            block.plainText,
+            style: const TextStyle(
+              color: Color(0xFF2F261F),
+              fontSize: 24,
+              height: 1.25,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        );
+      case _Fb2BlockKind.paragraph:
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: Text.rich(
+            TextSpan(
+              style: const TextStyle(color: Color(0xFF2F261F), fontSize: 18, height: 1.48),
+              children: block.inlines.map(_docxInlineSpan).toList(),
+            ),
+            textAlign: TextAlign.start,
+          ),
+        );
+    }
+  }
+}
+
+InlineSpan _docxInlineSpan(_Fb2Inline inline) {
+  return TextSpan(
+    text: inline.text,
+    style: TextStyle(
+      color: const Color(0xFF2F261F),
+      fontWeight: inline.bold ? FontWeight.w700 : FontWeight.w400,
+      fontStyle: inline.italic ? FontStyle.italic : FontStyle.normal,
+      decoration: inline.underline ? TextDecoration.underline : TextDecoration.none,
+    ),
+  );
+}
+
+class _DocxDocumentTableView extends StatelessWidget {
+  const _DocxDocumentTableView({required this.rows});
+
+  final List<List<String>> rows;
+
+  @override
+  Widget build(BuildContext context) {
+    if (rows.isEmpty) return const SizedBox.shrink();
+    final columnCount = rows.fold<int>(0, (max, row) => row.length > max ? row.length : max).clamp(1, 24).toInt();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFF8EA),
+          border: Border.all(color: const Color(0xFFC9AA78).withOpacity(0.65)),
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.08),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minWidth: MediaQuery.of(context).size.width - 44),
+              child: Table(
+                defaultColumnWidth: const IntrinsicColumnWidth(),
+                border: TableBorder.all(color: const Color(0xFFC9AA78).withOpacity(0.35), width: 0.8),
+                children: [
+                  for (var rowIndex = 0; rowIndex < rows.length; rowIndex++)
+                    TableRow(
+                      decoration: BoxDecoration(
+                        color: rowIndex == 0 ? const Color(0xFFF0DBAE).withOpacity(0.50) : Colors.transparent,
+                      ),
+                      children: [
+                        for (var column = 0; column < columnCount; column++)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                            child: Text(
+                              column < rows[rowIndex].length ? rows[rowIndex][column] : '',
+                              style: TextStyle(
+                                color: const Color(0xFF2A2F4A),
+                                fontSize: 15.5,
+                                height: 1.35,
+                                fontWeight: rowIndex == 0 ? FontWeight.w600 : FontWeight.w400,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+enum _RichSourceKind { fb2, epub, docx, doc, chm, djvu }
+
+String _richFormatLabel(_RichSourceKind kind) => switch (kind) {
+      _RichSourceKind.fb2 => 'FB2',
+      _RichSourceKind.epub => 'EPUB',
+      _RichSourceKind.docx => 'DOCX',
+      _RichSourceKind.doc => 'DOC',
+      _RichSourceKind.chm => 'CHM',
+      _RichSourceKind.djvu => 'DJVU',
+    };
 
 class _Fb2ReaderScreen extends StatefulWidget {
   const _Fb2ReaderScreen({required this.book, required this.storage, required this.sync, this.sourceKind = _RichSourceKind.fb2});
@@ -1157,7 +1538,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
   static const _heightFactor = 1.55;
   static const _lineExtent = _fontSize * _heightFactor;
   static const _titleExtent = 38.0;
-  static const _imageExtent = 300.0;
+  static const _imageExtent = 480.0;
   static const _horizontalReaderPadding = 22.0;
   static const _topPadding = 18.0;
   static const _bottomPadding = 28.0;
@@ -1221,6 +1602,8 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
       _RichSourceKind.epub => 'EPUB',
       _RichSourceKind.docx => 'DOCX',
       _RichSourceKind.doc => 'DOC',
+      _RichSourceKind.chm => 'CHM',
+      _RichSourceKind.djvu => 'DJVU',
       _RichSourceKind.fb2 => 'FB2',
     };
     if (book.localPath == null) {
@@ -1238,6 +1621,8 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
         _RichSourceKind.epub => _parseEpubDocument(Uint8List.fromList(bytes)),
         _RichSourceKind.docx => _parseDocxDocument(Uint8List.fromList(bytes)),
         _RichSourceKind.doc => _parseDocDocument(Uint8List.fromList(bytes)),
+        _RichSourceKind.chm => await _parseChmDocumentFromFile(file, Uint8List.fromList(bytes)),
+        _RichSourceKind.djvu => await _parseDjvuDocumentFromFile(file),
         _RichSourceKind.fb2 => _parseFb2Document(_decodeTextFile(bytes)),
       };
       if (!mounted) return;
@@ -1296,7 +1681,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
         final locatorProgress = (decoded['progressPercent'] as num?)?.toDouble();
         final anchorChar = (decoded['anchorChar'] as num?)?.round();
         final totalChars = (_document?.totalTextChars ?? (decoded['totalChars'] as num?)?.round() ?? 0);
-        if ((type == 'fb2-unit-anchor-v4' || type == 'epub-unit-anchor-v2' || type == 'docx-unit-anchor-v1') && anchorChar != null) {
+        if ((type == 'fb2-unit-anchor-v4' || type == 'epub-unit-anchor-v2' || type == 'docx-unit-anchor-v1' || type == 'chm-unit-anchor-v1' || type == 'djvu-unit-anchor-v1') && anchorChar != null) {
           return _unitIndexForAnchorChar(anchorChar.clamp(0, totalChars > 0 ? totalChars : 1 << 30).toInt(), units);
         }
         // If manifest.progressPercent and currentLocator disagree, trust the
@@ -1488,6 +1873,8 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
         _RichSourceKind.epub => 'epub-unit-anchor-v2',
         _RichSourceKind.docx => 'docx-unit-anchor-v1',
         _RichSourceKind.doc => 'doc-unit-anchor-v1',
+        _RichSourceKind.chm => 'chm-unit-anchor-v1',
+        _RichSourceKind.djvu => 'djvu-unit-anchor-v1',
         _RichSourceKind.fb2 => 'fb2-unit-anchor-v4',
       }),
     );
@@ -1509,6 +1896,8 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
             _RichSourceKind.epub => 'epub-unit-anchor-v2',
             _RichSourceKind.docx => 'docx-unit-anchor-v1',
             _RichSourceKind.doc => 'doc-unit-anchor-v1',
+            _RichSourceKind.chm => 'chm-unit-anchor-v1',
+            _RichSourceKind.djvu => 'djvu-unit-anchor-v1',
             _RichSourceKind.fb2 => 'fb2-unit-anchor-v4',
           }) ??
           _book.currentLocator,
@@ -1540,7 +1929,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Скопирован фрагмент ${widget.sourceKind == _RichSourceKind.epub ? 'EPUB' : 'FB2'} ($copied строк)')),
+      SnackBar(content: Text('Скопирован фрагмент ${_richFormatLabel(widget.sourceKind)} ($copied строк)')),
     );
   }
 
@@ -1729,13 +2118,12 @@ class _Fb2UnitView extends StatelessWidget {
         height: unit.extent,
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 8),
-          child: Center(
-            child: Image.memory(
-              bytes,
-              fit: BoxFit.contain,
-              height: _Fb2ReaderScreenState._imageExtent - 16,
-              errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined),
-            ),
+          child: Image.memory(
+            bytes,
+            fit: BoxFit.contain,
+            width: double.infinity,
+            height: _Fb2ReaderScreenState._imageExtent - 16,
+            errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined),
           ),
         ),
       );
@@ -2962,7 +3350,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                           : LayoutBuilder(
                               builder: (context, constraints) {
                                 _lastViewportWidth = constraints.maxWidth;
-                                final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, 3.0).toDouble();
+                                final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, 2.0).toDouble();
                                 return ColoredBox(
                                   color: const Color(0xFFF3E7CF),
                                   child: Scrollbar(
@@ -2972,6 +3360,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                                     child: ListView.builder(
                                       controller: _scrollController,
                                       padding: const EdgeInsets.only(top: 12),
+                                      cacheExtent: constraints.maxHeight * 2.2,
                                       itemCount: _pages,
                                       itemBuilder: (context, index) {
                                         final geometry = index < _pageGeometries.length
@@ -3046,12 +3435,15 @@ class _PdfFitWidthPage extends StatefulWidget {
 }
 
 class _PdfFitWidthPageState extends State<_PdfFitWidthPage> {
+  static final Map<String, Future<Uint8List?>> _renderCache = <String, Future<Uint8List?>>{};
+  static final List<String> _renderCacheOrder = <String>[];
+
   late Future<Uint8List?> _imageFuture;
 
   @override
   void initState() {
     super.initState();
-    _imageFuture = _render();
+    _imageFuture = _cachedRender();
   }
 
   @override
@@ -3061,15 +3453,29 @@ class _PdfFitWidthPageState extends State<_PdfFitWidthPage> {
         oldWidget.pageNumber != widget.pageNumber ||
         (oldWidget.displayWidth - widget.displayWidth).abs() > 2 ||
         (oldWidget.devicePixelRatio - widget.devicePixelRatio).abs() > 0.1) {
-      _imageFuture = _render();
+      _imageFuture = _cachedRender();
     }
   }
 
-  Future<Uint8List?> _render() async {
+  Future<Uint8List?> _cachedRender() {
+    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio).round().clamp(320, 4096);
+    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio).round().clamp(320, 8192);
+    final key = '${identityHashCode(widget.document)}:${widget.pageNumber}:$pixelWidth:$pixelHeight';
+    final existing = _renderCache[key];
+    if (existing != null) return existing;
+    while (_renderCacheOrder.length >= 28) {
+      final oldest = _renderCacheOrder.removeAt(0);
+      _renderCache.remove(oldest);
+    }
+    final future = _render(pixelWidth.toDouble(), pixelHeight.toDouble());
+    _renderCache[key] = future;
+    _renderCacheOrder.add(key);
+    return future;
+  }
+
+  Future<Uint8List?> _render(double pixelWidth, double pixelHeight) async {
     final page = await widget.document.getPage(widget.pageNumber);
     try {
-      final pixelWidth = (widget.displayWidth * widget.devicePixelRatio).round().clamp(320, 4096).toDouble();
-      final pixelHeight = (widget.displayHeight * widget.devicePixelRatio).round().clamp(320, 8192).toDouble();
       final image = await page.render(
         width: pixelWidth,
         height: pixelHeight,
@@ -3637,6 +4043,228 @@ String _extractChmText(Uint8List bytes) {
   return preview;
 }
 
+
+Future<_Fb2Document> _parseChmDocumentFromFile(File sourceFile, Uint8List bytes) async {
+  final extracted = await _tryExtractChmWithNativeTools(sourceFile);
+  if (extracted.isNotEmpty) {
+    final doc = _parseExtractedHtmlDocument(extracted, formatLabel: 'CHM');
+    if (doc.blocks.length > 1 || (doc.blocks.isNotEmpty && doc.blocks.first.plainText.length > 120)) {
+      return doc;
+    }
+  }
+
+  final preview = _extractChmText(bytes);
+  final blocks = preview
+      .split(RegExp(r'\n{2,}'))
+      .map((part) => part.trim())
+      .where((part) => part.isNotEmpty)
+      .map((part) => _Fb2Block.paragraph([_Fb2Inline(part)]))
+      .toList(growable: false);
+  return _makeFb2Document(blocks.isEmpty
+      ? [_Fb2Block.paragraph([_Fb2Inline(_safeUnsupportedBinaryPreview('CHM'))])]
+      : blocks);
+}
+
+Future<List<File>> _tryExtractChmWithNativeTools(File sourceFile) async {
+  if (!(Platform.isMacOS || Platform.isLinux || Platform.isWindows)) return const [];
+  Directory? tempDir;
+  try {
+    tempDir = await Directory.systemTemp.createTemp('readarc_chm_');
+    final attempts = <Future<ProcessResult> Function()>[
+      () => _runNativeTool('extract_chmLib', [sourceFile.path, tempDir!.path], timeout: const Duration(seconds: 30)),
+      () => _runNativeTool('7z', ['x', '-y', '-o${tempDir!.path}', sourceFile.path], timeout: const Duration(seconds: 30)),
+      () => _runNativeTool('7zz', ['x', '-y', '-o${tempDir!.path}', sourceFile.path], timeout: const Duration(seconds: 30)),
+      () => _runNativeTool('unar', ['-quiet', '-o', tempDir!.path, sourceFile.path], timeout: const Duration(seconds: 30)),
+    ];
+    for (final attempt in attempts) {
+      try {
+        final result = await attempt();
+        if (result.exitCode == 0) {
+          final files = await _collectReadableDocumentFiles(tempDir);
+          if (files.isNotEmpty) return files;
+        }
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return const [];
+}
+
+Future<_Fb2Document> _parseDjvuDocumentFromFile(File sourceFile) async {
+  final textDoc = await _tryExtractDjvuText(sourceFile);
+  if (textDoc != null && textDoc.totalTextChars > 120) return textDoc;
+
+  final imageDoc = await _tryRenderDjvuPagesWithNativeTools(sourceFile);
+  if (imageDoc != null && imageDoc.blocks.isNotEmpty) return imageDoc;
+
+  return _makeFb2Document([
+    _Fb2Block.paragraph([
+      _Fb2Inline(
+        'DJVU-файл сохранён и синхронизируется как оригинал. Для полноценного просмотра ReadArc теперь ищет нативные инструменты DjVuLibre (djvutxt/ddjvu/djvused). На этом устройстве они не найдены или не смогли открыть файл, поэтому бинарные данные не показываются как текст.',
+      ),
+    ]),
+  ]);
+}
+
+Future<_Fb2Document?> _tryExtractDjvuText(File sourceFile) async {
+  if (!(Platform.isMacOS || Platform.isLinux || Platform.isWindows)) return null;
+  for (final command in const ['djvutxt', 'djvused']) {
+    try {
+      final args = command == 'djvutxt' ? [sourceFile.path] : ['-e', 'print-pure-txt', sourceFile.path];
+      final result = await _runNativeTool(command, args, timeout: const Duration(seconds: 25));
+      if (result.exitCode != 0) continue;
+      final text = _normalizeText('${result.stdout}');
+      if (!_looksLikeReadableDocumentPreview(text, minLetters: 80, minWords: 18)) continue;
+      final blocks = text
+          .split(RegExp(r'\n{2,}'))
+          .map((part) => part.trim())
+          .where((part) => part.isNotEmpty)
+          .map((part) => _Fb2Block.paragraph([_Fb2Inline(part)]))
+          .toList(growable: false);
+      return _makeFb2Document(blocks);
+    } catch (_) {}
+  }
+  return null;
+}
+
+Future<_Fb2Document?> _tryRenderDjvuPagesWithNativeTools(File sourceFile) async {
+  if (!(Platform.isMacOS || Platform.isLinux || Platform.isWindows)) return null;
+  Directory? tempDir;
+  try {
+    tempDir = await Directory.systemTemp.createTemp('readarc_djvu_');
+    final pages = await _readDjvuPageCount(sourceFile) ?? 24;
+    final maxPages = pages.clamp(1, 80).toInt();
+    final blocks = <_Fb2Block>[];
+    blocks.add(_Fb2Block.title('DJVU'));
+    for (var page = 1; page <= maxPages; page++) {
+      final out = File('${tempDir.path}${Platform.pathSeparator}page_${page.toString().padLeft(4, '0')}.png');
+      var rendered = false;
+      for (final command in const ['ddjvu']) {
+        try {
+          final result = await _runNativeTool(command, ['-format=png', '-page=$page', sourceFile.path, out.path], timeout: const Duration(seconds: 18));
+          if (result.exitCode == 0 && await out.exists() && await out.length() > 0) {
+            rendered = true;
+            break;
+          }
+        } catch (_) {}
+      }
+      if (!rendered) break;
+      blocks.add(_Fb2Block.title('Страница $page'));
+      blocks.add(_Fb2Block.image(await out.readAsBytes()));
+    }
+    if (blocks.length > 1) return _makeFb2Document(blocks);
+  } catch (_) {}
+  return null;
+}
+
+Future<int?> _readDjvuPageCount(File sourceFile) async {
+  try {
+    final result = await _runNativeTool('djvused', ['-e', 'n', sourceFile.path], timeout: const Duration(seconds: 8));
+    if (result.exitCode == 0) {
+      final parsed = int.tryParse('${result.stdout}'.trim());
+      if (parsed != null && parsed > 0) return parsed;
+    }
+  } catch (_) {}
+  return null;
+}
+
+Future<ProcessResult> _runNativeTool(String executable, List<String> arguments, {Duration timeout = const Duration(seconds: 20)}) {
+  return Process.run(executable, arguments, runInShell: Platform.isWindows).timeout(timeout);
+}
+
+Future<List<File>> _collectReadableDocumentFiles(Directory root) async {
+  final files = <File>[];
+  if (!await root.exists()) return files;
+  await for (final entity in root.list(recursive: true, followLinks: false)) {
+    if (entity is! File) continue;
+    final lower = entity.path.toLowerCase();
+    if (lower.endsWith('.html') || lower.endsWith('.htm') || lower.endsWith('.xhtml') || lower.endsWith('.hhc') || lower.endsWith('.hhk')) {
+      files.add(entity);
+    }
+  }
+  files.sort((a, b) {
+    final an = a.uri.pathSegments.isEmpty ? a.path.toLowerCase() : a.uri.pathSegments.last.toLowerCase();
+    final bn = b.uri.pathSegments.isEmpty ? b.path.toLowerCase() : b.uri.pathSegments.last.toLowerCase();
+    int rank(String name) {
+      if (name.contains('index') || name.contains('default') || name.endsWith('.hhc')) return 0;
+      if (name.contains('toc') || name.contains('contents')) return 1;
+      return 2;
+    }
+    final r = rank(an).compareTo(rank(bn));
+    return r != 0 ? r : an.compareTo(bn);
+  });
+  return files.take(200).toList(growable: false);
+}
+
+_Fb2Document _parseExtractedHtmlDocument(List<File> files, {required String formatLabel}) {
+  final blocks = <_Fb2Block>[];
+  for (final file in files) {
+    final html = _decodeTextFile(file.readAsBytesSync());
+    final title = _htmlTitle(html) ?? file.uri.pathSegments.last;
+    final clean = html
+        .replaceAll(RegExp(r'<script\b[^>]*>.*?</script>', caseSensitive: false, dotAll: true), ' ')
+        .replaceAll(RegExp(r'<style\b[^>]*>.*?</style>', caseSensitive: false, dotAll: true), ' ');
+    if (title.trim().isNotEmpty) blocks.add(_Fb2Block.title(_decodeXmlEntities(title).trim()));
+    for (final img in RegExp("""<img\\b[^>]*\\bsrc\\s*=\\s*[\'\"]([^\'\"]+)[\'\"][^>]*>""", caseSensitive: false).allMatches(clean)) {
+      final image = _readImageNearHtml(file, img.group(1) ?? '');
+      if (image != null) blocks.add(_Fb2Block.image(image));
+    }
+    final blockRe = RegExp(
+      r'<h[1-6]\b[^>]*>.*?</h[1-6]>|<p\b[^>]*>.*?</p>|<li\b[^>]*>.*?</li>|<tr\b[^>]*>.*?</tr>|<div\b[^>]*>.*?</div>',
+      caseSensitive: false,
+      dotAll: true,
+    );
+    var found = false;
+    for (final match in blockRe.allMatches(clean)) {
+      final raw = match.group(0) ?? '';
+      final text = _htmlToPlainText(raw).replaceAll(RegExp(r'\s+'), ' ').trim();
+      if (text.isEmpty || text.length < 2) continue;
+      found = true;
+      if (raw.startsWith(RegExp(r'<h[1-6]', caseSensitive: false))) {
+        blocks.add(_Fb2Block.title(text));
+      } else if (raw.startsWith(RegExp(r'<li', caseSensitive: false))) {
+        blocks.add(_Fb2Block.paragraph([_Fb2Inline('• $text')]));
+      } else {
+        blocks.add(_Fb2Block.paragraph(_parseHtmlInlines(raw, file.path)));
+      }
+    }
+    if (!found) {
+      final text = _htmlToPlainText(clean).replaceAll(RegExp(r'\s+'), ' ').trim();
+      if (text.isNotEmpty) blocks.add(_Fb2Block.paragraph([_Fb2Inline(text)]));
+    }
+  }
+  if (blocks.isEmpty) {
+    return _makeFb2Document([_Fb2Block.paragraph([_Fb2Inline('Не удалось извлечь HTML-главы из $formatLabel.')])]);
+  }
+  return _makeFb2Document(blocks);
+}
+
+String? _htmlTitle(String html) {
+  final title = RegExp(r'<title\b[^>]*>(.*?)</title>', caseSensitive: false, dotAll: true).firstMatch(html)?.group(1);
+  if (title != null && title.trim().isNotEmpty) return _htmlToPlainText(title).trim();
+  final heading = RegExp(r'<h1\b[^>]*>(.*?)</h1>', caseSensitive: false, dotAll: true).firstMatch(html)?.group(1);
+  if (heading != null && heading.trim().isNotEmpty) return _htmlToPlainText(heading).trim();
+  return null;
+}
+
+Uint8List? _readImageNearHtml(File htmlFile, String srcRaw) {
+  var src = _decodeXmlEntities(srcRaw).trim();
+  if (src.isEmpty || src.startsWith('http://') || src.startsWith('https://') || src.startsWith('data:')) return null;
+  final hash = src.indexOf('#');
+  if (hash >= 0) src = src.substring(0, hash);
+  final query = src.indexOf('?');
+  if (query >= 0) src = src.substring(0, query);
+  try {
+    src = Uri.decodeFull(src);
+  } catch (_) {}
+  final base = htmlFile.parent.uri;
+  final resolved = base.resolve(src).toFilePath();
+  final file = File(resolved);
+  try {
+    if (file.existsSync() && file.lengthSync() <= 20 * 1024 * 1024) return file.readAsBytesSync();
+  } catch (_) {}
+  return null;
+}
+
 bool _looksLikeReadableDocumentPreview(String text, {required int minLetters, required int minWords}) {
   final normalized = text.trim();
   if (normalized.length < 80) return false;
@@ -3950,7 +4578,6 @@ class _SyncScreenState extends State<SyncScreen> {
   SyncSettings? _settings;
   RelayEndpointMode _endpointMode = RelayEndpointMode.custom;
   bool _busy = false;
-  bool _healthBusy = false;
   bool _pairingBusy = false;
   bool _logExpanded = false;
   PairingInvite? _pairingInvite;
@@ -3977,8 +4604,10 @@ class _SyncScreenState extends State<SyncScreen> {
     if (!mounted) return;
     _manifest = manifest;
     _settings = settings;
-    _endpointMode = settings.endpointMode;
-    _relayController.text = settings.customRelayUrl;
+    _endpointMode = settings.endpointMode == RelayEndpointMode.localDevelopment ? RelayEndpointMode.custom : settings.endpointMode;
+    _relayController.text = settings.endpointMode == RelayEndpointMode.localDevelopment
+        ? ReadAnywhereRelayConfig.localDevelopmentRelayUrl
+        : settings.customRelayUrl;
     _personalHubRelayController.text = settings.personalHubRelayUrl;
     _accountController.text = manifest.accountId;
     _deviceNameController.text = manifest.deviceName;
@@ -4013,13 +4642,13 @@ class _SyncScreenState extends State<SyncScreen> {
     }
   }
 
-  Future<void> _connect() async {
+  Future<void> _saveConnectionSettings() async {
     setState(() => _busy = true);
     try {
       final settings = _settingsFromForm(autoConnect: true);
       if (settings.usesOfficialPlaceholder) {
         throw StateError(
-          'Официальный relay ещё не настроен в этой сборке. Выберите “Свой relay”, “Personal Hub” или соберите приложение с READANYWHERE_DEFAULT_RELAY_URL.',
+          'Официальный relay ещё не настроен в этой сборке. Выберите Personal Hub или свой relay.',
         );
       }
       if (settings.usesPersonalHubPlaceholder) {
@@ -4028,70 +4657,25 @@ class _SyncScreenState extends State<SyncScreen> {
         );
       }
       await widget.storage.saveSyncSettings(settings);
-      await widget.sync.connect(relayUrl: settings.effectiveRelayUrl);
+      try {
+        await widget.sync.connect(relayUrl: settings.effectiveRelayUrl);
+      } catch (_) {
+        widget.sync.startAutoReconnect(relayUrl: settings.effectiveRelayUrl);
+      }
       _settings = await widget.storage.loadSyncSettings();
       _manifest = await widget.storage.loadManifest();
-      if (mounted) setState(() {});
+      if (!mounted) return;
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Соединение сохранено. Автоподключение включено.')),
+      );
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не удалось подключиться: $error')),
+        SnackBar(content: Text('Не удалось сохранить соединение: $error')),
       );
     } finally {
       if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _disconnect() async {
-    await widget.sync.disconnect();
-    final settings = await widget.storage.loadSyncSettings();
-    await widget.storage.saveSyncSettings(settings.copyWith(autoConnect: false));
-    if (!mounted) return;
-    setState(() => _settings = settings.copyWith(autoConnect: false));
-  }
-
-  Future<void> _checkRelayHealth() async {
-    setState(() => _healthBusy = true);
-    final settings = _settingsFromForm();
-    try {
-      if (settings.usesOfficialPlaceholder) {
-        throw StateError('Официальный relay ещё не настроен в этой сборке.');
-      }
-      if (settings.usesPersonalHubPlaceholder) {
-        throw StateError('Укажите реальный URL Personal Hub/Funnel.');
-      }
-      final base = Uri.parse(settings.effectiveRelayUrl);
-      final healthUri = base.replace(
-        scheme: base.scheme == 'ws'
-            ? 'http'
-            : base.scheme == 'wss'
-                ? 'https'
-                : base.scheme,
-        path: '${base.path.replaceAll(RegExp(r'/+$'), '')}/health'.replaceAll('//health', '/health'),
-        query: '',
-      );
-      final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
-      final request = await client.getUrl(healthUri);
-      final response = await request.close().timeout(const Duration(seconds: 10));
-      final body = await response.transform(utf8.decoder).join();
-      client.close(force: true);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            response.statusCode >= 200 && response.statusCode < 300
-                ? 'Relay доступен: HTTP ${response.statusCode}'
-                : 'Relay ответил с ошибкой HTTP ${response.statusCode}: $body',
-          ),
-        ),
-      );
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Relay недоступен: $error')),
-      );
-    } finally {
-      if (mounted) setState(() => _healthBusy = false);
     }
   }
 
@@ -4229,28 +4813,11 @@ class _SyncScreenState extends State<SyncScreen> {
     );
   }
 
-  Future<void> _sendSnapshot() async {
-    final sent = await widget.sync.broadcastLibrarySnapshot(reason: 'manual');
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(sent ? 'Snapshot отправлен' : 'Сначала подключитесь к relay')),
-    );
-  }
-
-  Future<void> _requestSnapshot() async {
-    await widget.sync.refreshMetadata(reason: 'manual');
-    final sent = true;
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(sent ? 'Snapshot запрошен' : 'Сначала подключитесь к relay')),
-    );
-  }
-
   Future<void> _copyAccountId() async {
     await Clipboard.setData(ClipboardData(text: _accountController.text.trim()));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('accountId скопирован')),
+      const SnackBar(content: Text('Аккаунт скопирован')),
     );
   }
 
@@ -4329,22 +4896,24 @@ class _SyncScreenState extends State<SyncScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(syncState.statusText),
-                    const SizedBox(height: 8),
-                    SelectableText('accountId: ${manifest.accountId}'),
-                    Text('device: ${manifest.deviceName}'),
-                    const SizedBox(height: 8),
-                    Text('Отправлено событий: ${syncState.sentEvents}'),
-                    Text('Получено событий: ${syncState.receivedEvents}'),
+                    const SizedBox(height: 10),
+                    SelectableText('Аккаунт: ${manifest.accountId}'),
+                    Text('Название устройства: ${manifest.deviceName}'),
+                    SelectableText('Идентификатор устройства: ${manifest.deviceId}'),
                   ],
                 ),
               ),
               _SectionCard(
-                title: 'Relay endpoint',
+                title: 'Соединение',
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'Обычно пользователь не должен вводить IP-адрес. Сейчас можно использовать Personal Hub через Tailscale Funnel/Cloudflare Tunnel, локальный relay для разработки или свой relay. В продуктовой сборке официальный endpoint задается через dart-define.',
+                    Text(
+                      syncState.connected
+                          ? 'Соединение активно. ReadArc синхронизирует библиотеку автоматически.'
+                          : (_settings?.autoConnect == true
+                              ? 'Автоподключение включено. Если связи нет, ReadArc будет переподключаться сам.'
+                              : 'Выберите endpoint и сохраните соединение, чтобы включить автоподключение.'),
                     ),
                     const SizedBox(height: 12),
                     _RelayModeOption(
@@ -4358,7 +4927,7 @@ class _SyncScreenState extends State<SyncScreen> {
                       value: RelayEndpointMode.personalHub,
                       groupValue: _endpointMode,
                       title: 'Personal Hub / Tailscale Funnel',
-                      subtitle: 'Relay запущен на вашем устройстве и опубликован через Funnel/Tunnel',
+                      subtitle: 'Ваш relay, опубликованный через Tailscale Funnel/Cloudflare Tunnel',
                       onChanged: (value) => setState(() => _endpointMode = value),
                     ),
                     if (_endpointMode == RelayEndpointMode.personalHub) ...[
@@ -4375,7 +4944,7 @@ class _SyncScreenState extends State<SyncScreen> {
                       value: RelayEndpointMode.custom,
                       groupValue: _endpointMode,
                       title: 'Свой relay',
-                      subtitle: 'VPS, Cloudflare Tunnel, домашний сервер, другой WebSocket relay',
+                      subtitle: 'VPS, Cloudflare Tunnel, домашний сервер или LAN/VPN endpoint',
                       onChanged: (value) => setState(() => _endpointMode = value),
                     ),
                     if (_endpointMode == RelayEndpointMode.custom) ...[
@@ -4383,66 +4952,22 @@ class _SyncScreenState extends State<SyncScreen> {
                       TextField(
                         controller: _relayController,
                         decoration: const InputDecoration(
-                          labelText: 'Custom Relay URL',
+                          labelText: 'URL соединения',
                           helperText: 'Например: https://relay.example.com или http://192.168.1.10:8787',
                         ),
                       ),
                     ],
-                    _RelayModeOption(
-                      value: RelayEndpointMode.localDevelopment,
-                      groupValue: _endpointMode,
-                      title: 'Локальная разработка',
-                      subtitle: ReadAnywhereRelayConfig.localDevelopmentRelayUrl,
-                      onChanged: (value) => setState(() => _endpointMode = value),
+                    const SizedBox(height: 12),
+                    SelectableText(
+                      'Сейчас: ${SyncSettings(endpointMode: _endpointMode, customRelayUrl: _relayController.text, personalHubRelayUrl: _personalHubRelayController.text).effectiveRelayUrl}',
                     ),
                     const SizedBox(height: 12),
-                    Text(
-                      'Текущий endpoint: ${SyncSettings(endpointMode: _endpointMode, customRelayUrl: _relayController.text, personalHubRelayUrl: _personalHubRelayController.text).effectiveRelayUrl}',
-                    ),
-                    Text("Автоподключение: ${_settings?.autoConnect == true ? 'включено' : 'выключено'}"),
-                    const SizedBox(height: 12),
-                    OutlinedButton.icon(
-                      onPressed: _healthBusy ? null : _checkRelayHealth,
-                      icon: _healthBusy
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.health_and_safety_outlined),
-                      label: const Text('Проверить relay'),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: FilledButton.icon(
-                            onPressed: _busy ? null : _connect,
-                            icon: const Icon(Icons.link_rounded),
-                            label: const Text('Подключиться'),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: _disconnect,
-                            icon: const Icon(Icons.link_off_rounded),
-                            label: const Text('Отключиться'),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    OutlinedButton.icon(
-                      onPressed: _sendSnapshot,
-                      icon: const Icon(Icons.upload_rounded),
-                      label: const Text('Отправить snapshot библиотеки'),
-                    ),
-                    const SizedBox(height: 8),
-                    OutlinedButton.icon(
-                      onPressed: _requestSnapshot,
-                      icon: const Icon(Icons.download_rounded),
-                      label: const Text('Запросить snapshot у других устройств'),
+                    FilledButton.icon(
+                      onPressed: _busy ? null : _saveConnectionSettings,
+                      icon: _busy
+                          ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.save_rounded),
+                      label: const Text('Сохранить соединение'),
                     ),
                   ],
                 ),
@@ -4453,7 +4978,7 @@ class _SyncScreenState extends State<SyncScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'Теперь accountId не нужно копировать вручную. На первом устройстве создайте код, на новом устройстве введите код или вставьте приглашение.',
+                      'На первом устройстве создайте код, на новом устройстве введите код или вставьте приглашение. Аккаунт будет перенесён автоматически.',
                     ),
                     const SizedBox(height: 12),
                     Row(
@@ -4504,7 +5029,7 @@ class _SyncScreenState extends State<SyncScreen> {
                             const SizedBox(height: 8),
                             Text('Действует до: ${_pairingInvite!.expiresAt.toLocal()}'),
                             const SizedBox(height: 8),
-                            SelectableText('Relay: ${_pairingInvite!.relayUrl}'),
+                            SelectableText('Соединение: ${_pairingInvite!.relayUrl}'),
                             const SizedBox(height: 12),
                             OutlinedButton.icon(
                               onPressed: _copyPairingInvite,
@@ -4520,7 +5045,7 @@ class _SyncScreenState extends State<SyncScreen> {
                       controller: _pairingInputController,
                       decoration: const InputDecoration(
                         labelText: 'Код или приглашение',
-                        helperText: 'Например: 483-921 или readanywhere://pair?...',
+                        helperText: 'Например: 483-921 или readarc://pair?...',
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -4548,16 +5073,24 @@ class _SyncScreenState extends State<SyncScreen> {
                   ],
                 ),
               ),
-              _SectionCard(
-                title: 'Доверенные устройства',
-                child: manifest.activeTrustedDevices.isEmpty
-                    ? const Text('Пока только текущее устройство')
-                    : Column(
+              Card(
+                child: ExpansionTile(
+                  title: const Text('Доверенные устройства'),
+                  subtitle: Text(manifest.activeTrustedDevices.isEmpty
+                      ? 'Пока только текущее устройство'
+                      : 'Устройств: ${manifest.activeTrustedDevices.length}${hiddenTrustedDevices > 0 ? ', скрытых: $hiddenTrustedDevices' : ''}'),
+                  childrenPadding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
+                  children: [
+                    if (manifest.activeTrustedDevices.isEmpty)
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text('Пока только текущее устройство'),
+                      )
+                    else
+                      Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            'Удалённые устройства скрываются из списка и синхронизируются как отозванные. Текущее устройство удалить нельзя.${hiddenTrustedDevices > 0 ? ' Скрытых записей: $hiddenTrustedDevices.' : ''}',
-                          ),
+                          const Text('Удалённые устройства скрываются из списка и синхронизируются как отозванные. Текущее устройство удалить нельзя.'),
                           const SizedBox(height: 8),
                           ...manifest.activeTrustedDevices.map((device) {
                             final isCurrent = device.deviceId == manifest.deviceId;
@@ -4583,26 +5116,23 @@ class _SyncScreenState extends State<SyncScreen> {
                           ),
                         ],
                       ),
+                  ],
+                ),
               ),
-              _SectionCard(
-                title: 'Дополнительно: ручной accountId',
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              Card(
+                child: ExpansionTile(
+                  title: const Text('Дополнительно'),
+                  subtitle: const Text('Ручное изменение аккаунта и названия устройства'),
+                  childrenPadding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
                   children: [
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(16),
-                        color: Theme.of(context).colorScheme.tertiaryContainer,
-                      ),
-                      child: const Text(
-                        'Ручной accountId оставлен только как fallback для разработки. В обычном сценарии используйте подключение по коду выше.',
-                      ),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text('Этот раздел нужен только как fallback. В обычном сценарии используйте подключение по коду выше.'),
                     ),
                     const SizedBox(height: 12),
                     TextField(
                       controller: _accountController,
-                      decoration: const InputDecoration(labelText: 'accountId'),
+                      decoration: const InputDecoration(labelText: 'Аккаунт'),
                     ),
                     const SizedBox(height: 8),
                     TextField(
@@ -4624,13 +5154,11 @@ class _SyncScreenState extends State<SyncScreen> {
                           child: OutlinedButton.icon(
                             onPressed: _copyAccountId,
                             icon: const Icon(Icons.copy_rounded),
-                            label: const Text('Скопировать'),
+                            label: const Text('Скопировать аккаунт'),
                           ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 10),
-                    SelectableText('deviceId: ${manifest.deviceId}'),
                   ],
                 ),
               ),

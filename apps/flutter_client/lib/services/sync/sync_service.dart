@@ -485,7 +485,7 @@ class SyncService {
             isUtc: true,
           );
     final inviteLink = Uri(
-      scheme: 'readanywhere',
+      scheme: 'readarc',
       host: 'pair',
       queryParameters: {
         'relay': settings.effectiveRelayUrl,
@@ -607,7 +607,7 @@ class SyncService {
     if (raw.isEmpty) {
       throw ArgumentError('Введите pairing-код или приглашение');
     }
-    if (raw.startsWith('readanywhere://')) {
+    if (raw.startsWith('readarc://') || raw.startsWith('readanywhere://')) {
       final uri = Uri.parse(raw);
       final code = _normalizePairingCode(uri.queryParameters['code'] ?? '');
       final relay = uri.queryParameters['relay']?.trim();

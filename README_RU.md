@@ -85,7 +85,7 @@ curl http://127.0.0.1:8787/health
 
 ## Hotfix Sprint 3.1
 
-Добавлено исправление для metadata-sync после Sprint 3: приложение теперь явно запрашивает `library_snapshot_requested` при подключении и на `peer_joined`, а экран синхронизации получил кнопку **Запросить snapshot у других устройств**.
+Добавлено исправление для metadata-sync после Sprint 3: приложение теперь явно запрашивает `library_snapshot_requested` при подключении и на `peer_joined`, а экран синхронизации автоматически запрашивает актуальное состояние при подключении.
 
 TXT-reader больше не рендерит весь файл одним большим `SelectableText`; текст читается как bytes, поддерживает fallback Windows-1251 и отображается чанками через `ListView.builder`.
 
@@ -115,7 +115,6 @@ TXT-reader больше не рендерит весь файл одним бо�
 
 - режим **ReadArc relay** — endpoint компилируется в приложение через `READANYWHERE_DEFAULT_RELAY_URL`;
 - режим **Свой relay** — для Koyeb/VPS/Cloudflare Tunnel/self-hosted;
-- режим **Локальная разработка** — `http://127.0.0.1:8787`;
 - после успешного подключения включается автоподключение при следующем запуске;
 - relay теперь можно запускать через Docker/Docker Compose.
 
@@ -186,10 +185,10 @@ docs/adr_004_transport_strategy_personal_hub.md
 В приложении:
 
 ```text
-Синхронизация → Relay endpoint → Personal Hub / Tailscale Funnel
+Синхронизация → Соединение → Personal Hub / Tailscale Funnel
 ```
 
-Вставьте HTTPS URL, который покажет Tailscale, нажмите **Проверить relay**, затем **Подключиться**.
+Вставьте HTTPS URL, который покажет Tailscale, затем нажмите **Сохранить соединение**. ReadArc подключится автоматически.
 
 Подробная инструкция: `docs/relay_hosting_tailscale_funnel_ru.md`.
 
@@ -228,7 +227,7 @@ build_debug_artifacts = true
 
 ## Sprint 4.2: подключение по коду
 
-Добавлен MVP-pairing: первое устройство создаёт 6-значный код подключения, новое устройство вводит код или вставляет `readanywhere://pair?...` приглашение и автоматически получает `accountId` и relay endpoint. Ручной ввод `accountId` оставлен только как fallback для разработки. Relay хранит pairing-коды только в памяти и удаляет их после первого использования или истечения срока. Подробности: `docs/sprint_04_2_pairing_codes_ru.md`.
+Добавлен MVP-pairing: первое устройство создаёт 6-значный код подключения, новое устройство вводит код или вставляет `readarc://pair?...` приглашение и автоматически получает `accountId` и соединение. Ручной ввод `accountId` оставлен только как fallback для разработки. Relay хранит pairing-коды только в памяти и удаляет их после первого использования или истечения срока. Подробности: `docs/sprint_04_2_pairing_codes_ru.md`.
 
 
 ## Sprint 4.2 cleanup: публикация GitHub Releases

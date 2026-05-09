@@ -11,10 +11,13 @@ class ReadAnywhereRelayConfig {
   /// Compile-time default for product builds.
   ///
   /// Override during builds with:
-  ///   flutter build ... --dart-define=READANYWHERE_DEFAULT_RELAY_URL=https://your-relay.example.com
+  ///   flutter build ... --dart-define=READARC_DEFAULT_RELAY_URL=https://your-relay.example.com
   static const officialRelayUrl = String.fromEnvironment(
-    'READANYWHERE_DEFAULT_RELAY_URL',
-    defaultValue: 'https://readanywhere-relay.example.com',
+    'READARC_DEFAULT_RELAY_URL',
+    defaultValue: String.fromEnvironment(
+      'READANYWHERE_DEFAULT_RELAY_URL',
+      defaultValue: 'https://readarc-relay.example.com',
+    ),
   );
 
   static const localDevelopmentRelayUrl = 'http://127.0.0.1:8787';
