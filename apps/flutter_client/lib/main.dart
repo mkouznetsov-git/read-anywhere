@@ -4703,8 +4703,9 @@ class _SyncScreenState extends State<SyncScreen> {
     }
   }
 
-  Future<PairingInvite?> _ensurePairingInvite() async {
-    if (_pairingInvite != null) return _pairingInvite;
+  Future<PairingInvite?> _ensurePairingInvite({bool forceFresh = false}) async {
+    final existing = _pairingInvite;
+    if (!forceFresh && existing != null && !existing.isNearExpiry) return existing;
     setState(() => _pairingBusy = true);
     try {
       final settings = _settingsFromForm(autoConnect: _settings?.autoConnect ?? false);
@@ -4728,7 +4729,7 @@ class _SyncScreenState extends State<SyncScreen> {
   }
 
   Future<void> _showPairingQrCode() async {
-    final invite = await _ensurePairingInvite();
+    final invite = await _ensurePairingInvite(forceFresh: true);
     if (!mounted || invite == null) return;
     await showDialog<void>(
       context: context,
@@ -4978,7 +4979,7 @@ class _SyncScreenState extends State<SyncScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'На первом устройстве создайте код, на новом устройстве введите код или вставьте приглашение. Аккаунт будет перенесён автоматически.',
+                      'QR-код уже содержит всю информацию для подключения: адрес соединения, аккаунт и защищённый ключ. На новом устройстве достаточно отсканировать QR. Короткий код оставлен как запасной вариант.',
                     ),
                     const SizedBox(height: 12),
                     Row(
@@ -5045,7 +5046,7 @@ class _SyncScreenState extends State<SyncScreen> {
                       controller: _pairingInputController,
                       decoration: const InputDecoration(
                         labelText: 'Код или приглашение',
-                        helperText: 'Например: 483-921 или readarc://pair?...',
+                        helperText: 'Например: 483-921 или полное приглашение readarc://pair?...',
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -5238,7 +5239,7 @@ class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Text(
-                'Наведите камеру на QR-код подключения ReadArc.',
+                'Наведите камеру на QR-код ReadArc. Выбирать тип соединения на этом устройстве не нужно.',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.bodyMedium,
               ),

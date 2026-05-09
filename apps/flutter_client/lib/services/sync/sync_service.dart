@@ -37,7 +37,12 @@ class PairingInvite {
   final String accountEncryptionKey;
 
   String get displayCode => '${code.substring(0, 3)}-${code.substring(3)}';
+
+  bool get isExpired => DateTime.now().toUtc().isAfter(expiresAt);
+
+  bool get isNearExpiry => DateTime.now().toUtc().add(const Duration(seconds: 20)).isAfter(expiresAt);
 }
+
 
 class PairingClaimResult {
   const PairingClaimResult({
@@ -56,12 +61,31 @@ class PairingClaimResult {
 }
 
 class _ParsedPairingInput {
-  const _ParsedPairingInput({required this.code, this.relayUrl, this.accountEncryptionKey, this.ownerDeviceName});
+  const _ParsedPairingInput({
+    required this.code,
+    this.relayUrl,
+    this.accountEncryptionKey,
+    this.ownerDeviceName,
+    this.accountId,
+    this.ownerDeviceId,
+    this.expiresAt,
+  });
 
   final String code;
   final String? relayUrl;
   final String? accountEncryptionKey;
   final String? ownerDeviceName;
+  final String? accountId;
+  final String? ownerDeviceId;
+  final DateTime? expiresAt;
+
+  bool get hasEmbeddedAccountInvite =>
+      (accountId?.isNotEmpty ?? false) &&
+      (ownerDeviceId?.isNotEmpty ?? false) &&
+      (accountEncryptionKey?.isNotEmpty ?? false);
+
+  bool get embeddedInviteExpired =>
+      expiresAt != null && DateTime.now().toUtc().isAfter(expiresAt!);
 }
 
 class FileTransferSnapshot {
@@ -488,10 +512,15 @@ class SyncService {
       scheme: 'readarc',
       host: 'pair',
       queryParameters: {
+        'v': '2',
+        'mode': settings.endpointMode.name,
         'relay': settings.effectiveRelayUrl,
         'code': code,
+        'accountId': manifest.accountId,
+        'ownerDeviceId': manifest.deviceId,
         'deviceName': manifest.deviceName,
         'key': manifest.accountEncryptionKey,
+        'expiresAt': expiresAt.toIso8601String(),
       },
     ).toString();
     _appendLog('Создан pairing-код ${code.substring(0, 3)}-${code.substring(3)}');
@@ -516,22 +545,40 @@ class SyncService {
 
     final local = await _storage.loadManifest();
     final uri = _buildEndpointUri(relayUrl, '/pairing/claim');
-    final response = await _postJson(uri, {
-      'code': parsed.code,
-      'deviceId': local.deviceId,
-      'deviceName': local.deviceName,
-    });
-    if (response['ok'] != true) {
-      throw StateError(response['message']?.toString() ?? 'Pairing-код не принят relay');
+    Map<String, dynamic>? response;
+    Object? claimError;
+    try {
+      response = await _postJson(uri, {
+        'code': parsed.code,
+        'deviceId': local.deviceId,
+        'deviceName': local.deviceName,
+      });
+      if (response['ok'] != true) {
+        throw StateError(response['message']?.toString() ?? 'Pairing-код не принят relay');
+      }
+    } catch (error) {
+      claimError = error;
+      if (!parsed.hasEmbeddedAccountInvite || parsed.embeddedInviteExpired) {
+        rethrow;
+      }
+      // QR-v2 carries the full encrypted account invite. This keeps pairing
+      // working when the relay was restarted, a Tailscale/Funnel endpoint was
+      // corrected between creating and scanning the code, or a mobile client
+      // accidentally tries an older relay first. Manual 6-digit codes still use
+      // the relay as a one-time gate.
+      _appendLog('Relay не принял короткий код, используем полное QR-приглашение: $error');
     }
 
-    final accountId = response['accountId']?.toString() ?? '';
-    final ownerDeviceId = response['ownerDeviceId']?.toString() ?? '';
-    final ownerDeviceName = response['ownerDeviceName']?.toString() ?? parsed.ownerDeviceName ?? 'Устройство';
-    final accountEncryptionKey = parsed.accountEncryptionKey ?? response['accountEncryptionKey']?.toString() ?? '';
-    final returnedRelayUrl = response['relayUrl']?.toString() ?? relayUrl;
+    final accountId = response?['accountId']?.toString() ?? parsed.accountId ?? '';
+    final ownerDeviceId = response?['ownerDeviceId']?.toString() ?? parsed.ownerDeviceId ?? '';
+    final ownerDeviceName = response?['ownerDeviceName']?.toString() ?? parsed.ownerDeviceName ?? 'Устройство';
+    final accountEncryptionKey = parsed.accountEncryptionKey ?? response?['accountEncryptionKey']?.toString() ?? '';
+    final returnedRelayUrl = response?['relayUrl']?.toString() ?? relayUrl;
     if (accountId.isEmpty || ownerDeviceId.isEmpty) {
-      throw StateError('Relay вернул неполные pairing-данные');
+      throw StateError('Relay вернул неполные pairing-данные${claimError == null ? '' : ': $claimError'}');
+    }
+    if (accountEncryptionKey.isEmpty) {
+      throw StateError('В приглашении нет ключа шифрования аккаунта');
     }
 
     await disconnect(manual: false);
@@ -613,6 +660,10 @@ class SyncService {
       final relay = uri.queryParameters['relay']?.trim();
       final accountKey = uri.queryParameters['key']?.trim();
       final ownerDeviceName = uri.queryParameters['deviceName']?.trim();
+      final accountId = uri.queryParameters['accountId']?.trim();
+      final ownerDeviceId = uri.queryParameters['ownerDeviceId']?.trim();
+      final expiresAtRaw = uri.queryParameters['expiresAt']?.trim();
+      final expiresAt = expiresAtRaw == null || expiresAtRaw.isEmpty ? null : DateTime.tryParse(expiresAtRaw)?.toUtc();
       if (code.length != 6) {
         throw ArgumentError('В приглашении нет корректного 6-значного кода');
       }
@@ -621,6 +672,9 @@ class SyncService {
         relayUrl: relay?.isEmpty == true ? null : relay,
         accountEncryptionKey: accountKey?.isEmpty == true ? null : accountKey,
         ownerDeviceName: ownerDeviceName?.isEmpty == true ? null : ownerDeviceName,
+        accountId: accountId?.isEmpty == true ? null : accountId,
+        ownerDeviceId: ownerDeviceId?.isEmpty == true ? null : ownerDeviceId,
+        expiresAt: expiresAt,
       );
     }
     final code = _normalizePairingCode(raw);

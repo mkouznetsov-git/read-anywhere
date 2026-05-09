@@ -36,6 +36,59 @@ if [[ -f "$ANDROID_MANIFEST" ]] && ! grep -q "usesCleartextTraffic" "$ANDROID_MA
   perl -0pi -e 's#<application#<application android:usesCleartextTraffic="true"#' "$ANDROID_MANIFEST"
 fi
 
+
+# Stable internal Android release signing. This is a checked-in DEV key only for
+# sideloadable snapshot builds, so Android can update ReadArc over a previous
+# CI build without uninstalling. Replace it with a private production keystore
+# before Play Store / public distribution.
+DEV_KEY_SRC="$ROOT_DIR/assets/signing/readarc-dev-upload.jks"
+DEV_KEY_DST="android/app/readarc-dev-upload.jks"
+if [[ -f "$DEV_KEY_SRC" && -d "android/app" ]]; then
+  cp "$DEV_KEY_SRC" "$DEV_KEY_DST"
+fi
+
+python3 - <<'PY_ANDROID_SIGNING'
+from pathlib import Path
+
+kts = Path('android/app/build.gradle.kts')
+groovy = Path('android/app/build.gradle')
+
+if kts.exists():
+    p = kts
+    text = p.read_text()
+    if 'readarcDevRelease' not in text:
+        text = text.replace('android {', '''android {
+    signingConfigs {
+        create("readarcDevRelease") {
+            storeFile = file("readarc-dev-upload.jks")
+            storePassword = "readarc-dev"
+            keyAlias = "readarc-dev"
+            keyPassword = "readarc-dev"
+        }
+    }
+''', 1)
+    text = text.replace('signingConfig = signingConfigs.getByName("debug")', 'signingConfig = signingConfigs.getByName("readarcDevRelease")')
+    text = text.replace('signingConfig = signingConfigs.debug', 'signingConfig = signingConfigs.getByName("readarcDevRelease")')
+    p.write_text(text)
+elif groovy.exists():
+    p = groovy
+    text = p.read_text()
+    if 'readarcDevRelease' not in text:
+        text = text.replace('android {', '''android {
+    signingConfigs {
+        readarcDevRelease {
+            storeFile file('readarc-dev-upload.jks')
+            storePassword 'readarc-dev'
+            keyAlias 'readarc-dev'
+            keyPassword 'readarc-dev'
+        }
+    }
+''', 1)
+    text = text.replace('signingConfig signingConfigs.debug', 'signingConfig signingConfigs.readarcDevRelease')
+    text = text.replace('signingConfig = signingConfigs.debug', 'signingConfig signingConfigs.readarcDevRelease')
+    p.write_text(text)
+PY_ANDROID_SIGNING
+
 # Friendly macOS app name.
 if [[ -f macos/Runner/Info.plist && -x /usr/libexec/PlistBuddy ]]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleName ReadArc" macos/Runner/Info.plist 2>/dev/null || \

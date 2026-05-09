@@ -35,6 +35,14 @@ on:
         options:
           - 'true'
           - 'false'
+      cleanup_legacy_releases:
+        description: 'Delete legacy Read Anywhere releases/assets when publishing'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
   push:
     branches: [ main, master ]
     tags:
@@ -46,9 +54,12 @@ permissions:
   contents: read
 
 env:
-  # Set repository variable READANYWHERE_DEFAULT_RELAY_URL after choosing a relay,
+  # Set repository variable READARC_DEFAULT_RELAY_URL after choosing a relay,
   # or pass default_relay_url when manually running this workflow.
-  READANYWHERE_DEFAULT_RELAY_URL: ${{ github.event.inputs.default_relay_url || vars.READANYWHERE_DEFAULT_RELAY_URL || '' }}
+  READARC_DEFAULT_RELAY_URL: ${{ github.event.inputs.default_relay_url || vars.READARC_DEFAULT_RELAY_URL || vars.READANYWHERE_DEFAULT_RELAY_URL || '' }}
+  READANYWHERE_DEFAULT_RELAY_URL: ${{ github.event.inputs.default_relay_url || vars.READARC_DEFAULT_RELAY_URL || vars.READANYWHERE_DEFAULT_RELAY_URL || '' }}
+  READARC_BASE_VERSION: '0.1.0'
+  READARC_BUILD_NUMBER: ${{ github.run_number }}
   BUILD_DEBUG_ARTIFACTS: ${{ github.event.inputs.build_debug_artifacts || 'false' }}
 
 jobs:
@@ -220,6 +231,7 @@ jobs:
           ## Commit
 
           - SHA: \`${GITHUB_SHA}\`
+          - Snapshot/build number: \`${GITHUB_RUN_NUMBER}\`
           - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 
           ## Что внутри
@@ -271,6 +283,48 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -f "$TAG" "$GITHUB_SHA"
           git push --force origin "refs/tags/${TAG}"
+
+      - name: Remove legacy Read Anywhere releases and assets
+        if: github.event.inputs.cleanup_legacy_releases != 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY}"
+          TARGET_TAG="${{ steps.release_channel.outputs.tag }}"
+
+          echo "Removing legacy Read Anywhere releases, if any..."
+          mapfile -t LEGACY_TAGS < <(gh release list --repo "$REPO" --limit 100 --json tagName,name --jq '.[] | select(((.name // "") | test("Read Anywhere|ReadAnywhere|read_anywhere|read-anywhere"; "i")) or ((.tagName // "") | test("readanywhere|read-anywhere|read_anywhere"; "i"))) | .tagName')
+          for legacy_tag in "${LEGACY_TAGS[@]:-}"; do
+            [[ -n "$legacy_tag" ]] || continue
+            if [[ "$legacy_tag" == "$TARGET_TAG" ]]; then
+              continue
+            fi
+            echo "Deleting legacy release: $legacy_tag"
+            gh release delete "$legacy_tag" --repo "$REPO" --cleanup-tag --yes || true
+          done
+
+          if gh release view "$TARGET_TAG" --repo "$REPO" >/dev/null 2>&1; then
+            if [[ "${{ steps.release_channel.outputs.rolling }}" == "true" ]]; then
+              echo "Rolling release: removing all previous assets from target release before uploading the fresh snapshot."
+              mapfile -t OLD_ASSETS < <(gh release view "$TARGET_TAG" --repo "$REPO" --json assets --jq '.assets[].name')
+              for asset in "${OLD_ASSETS[@]:-}"; do
+                [[ -n "$asset" ]] || continue
+                echo "Deleting old rolling asset: $asset"
+                gh release delete-asset "$TARGET_TAG" "$asset" --repo "$REPO" --yes || true
+              done
+            else
+              echo "Removing legacy assets from target release: $TARGET_TAG"
+              mapfile -t LEGACY_ASSETS < <(gh release view "$TARGET_TAG" --repo "$REPO" --json assets --jq '.assets[].name | select(test("Read Anywhere|ReadAnywhere|read_anywhere|read-anywhere"; "i"))')
+              for asset in "${LEGACY_ASSETS[@]:-}"; do
+                [[ -n "$asset" ]] || continue
+                echo "Deleting legacy asset: $asset"
+                gh release delete-asset "$TARGET_TAG" "$asset" --repo "$REPO" --yes || true
+              done
+            fi
+          fi
 
       - name: Publish or update release
         shell: bash

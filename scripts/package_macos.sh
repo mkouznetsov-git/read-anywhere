@@ -5,7 +5,18 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="$ROOT_DIR/apps/flutter_client"
 DIST_DIR="$ROOT_DIR/dist/macos"
 APP_NAME="ReadArc"
-VERSION="${READ_ANYWHERE_VERSION:-0.1.0}"
+BASE_VERSION="${READARC_BASE_VERSION:-${READ_ANYWHERE_BASE_VERSION:-0.1.0}}"
+BUILD_NUMBER="${READARC_BUILD_NUMBER:-${GITHUB_RUN_NUMBER:-}}"
+if [[ -z "$BUILD_NUMBER" ]]; then
+  BUILD_NUMBER="$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || echo 23)"
+fi
+if [[ "${GITHUB_REF_NAME:-}" == v* ]]; then
+  BUILD_NAME="${READARC_BUILD_NAME:-${GITHUB_REF_NAME#v}}"
+  VERSION="${READARC_VERSION:-$BUILD_NAME}"
+else
+  BUILD_NAME="${READARC_BUILD_NAME:-$BASE_VERSION}"
+  VERSION="${READARC_VERSION:-$BASE_VERSION-snapshot.$BUILD_NUMBER}"
+fi
 BUILD_DEBUG_ARTIFACTS="${BUILD_DEBUG_ARTIFACTS:-false}"
 DMG_NAME="ReadArc-${VERSION}-macos-release.dmg"
 PKG_NAME="ReadArc-${VERSION}-macos-release.pkg"
@@ -16,15 +27,17 @@ export READARC_PLATFORMS="macos"
 cd "$APP_DIR"
 
 build_with_optional_define() {
-  if [[ -n "${READANYWHERE_DEFAULT_RELAY_URL:-}" ]]; then
-    flutter "$@" --dart-define="READANYWHERE_DEFAULT_RELAY_URL=${READANYWHERE_DEFAULT_RELAY_URL}"
-  else
-    flutter "$@"
+  local relay_define="${READARC_DEFAULT_RELAY_URL:-${READANYWHERE_DEFAULT_RELAY_URL:-}}"
+  local args=("$@")
+  if [[ -n "$relay_define" ]]; then
+    args+=(--dart-define="READARC_DEFAULT_RELAY_URL=$relay_define")
+    args+=(--dart-define="READANYWHERE_DEFAULT_RELAY_URL=$relay_define")
   fi
+  flutter "${args[@]}"
 }
 
 echo "Building macOS release app..."
-build_with_optional_define build macos --release
+build_with_optional_define build macos --release --build-name "$BUILD_NAME" --build-number "$BUILD_NUMBER"
 
 APP_PATH="$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' -print -quit)"
 if [[ -z "${APP_PATH:-}" || ! -d "$APP_PATH" ]]; then
@@ -60,7 +73,7 @@ hdiutil create \
 
 if [[ "$BUILD_DEBUG_ARTIFACTS" == "true" || "$BUILD_DEBUG_ARTIFACTS" == "1" ]]; then
   echo "Building optional macOS debug app zip..."
-  build_with_optional_define build macos --debug
+  build_with_optional_define build macos --debug --build-name "$BUILD_NAME" --build-number "$BUILD_NUMBER"
   DEBUG_APP_PATH="$(find build/macos/Build/Products/Debug -maxdepth 1 -name '*.app' -print -quit)"
   if [[ -n "${DEBUG_APP_PATH:-}" && -d "$DEBUG_APP_PATH" ]]; then
     DEBUG_STAGE="$STAGE_ROOT/${APP_NAME}-debug.app"
