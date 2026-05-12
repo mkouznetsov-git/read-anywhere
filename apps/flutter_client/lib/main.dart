@@ -2995,6 +2995,7 @@ _Fb2Document _parseFb2Document(String xmlText) {
   body = body.replaceAll(RegExp(r'<empty-line\s*/?>', caseSensitive: false), '<p> </p>');
 
   final blocks = <_Fb2Block>[];
+  var imageBudgetBytes = 24 * 1024 * 1024;
   final blockRe = RegExp(
     r'<image\b[^>]*/>|<title\b[^>]*>.*?</title>|<subtitle\b[^>]*>.*?</subtitle>|<p\b[^>]*>.*?</p>|<v\b[^>]*>.*?</v>',
     caseSensitive: false,
@@ -3022,9 +3023,9 @@ _Fb2Document _parseFb2Document(String xmlText) {
         final id = href?.replaceFirst('#', '');
         final image = id == null ? null : binaries[id];
         if (image != null && imageBudgetBytes > 0) {
-        imageBudgetBytes -= image.length;
-        blocks.add(_Fb2Block.image(image));
-      }
+          imageBudgetBytes -= image.length;
+          blocks.add(_Fb2Block.image(image));
+        }
       }
       continue;
     }
@@ -3667,7 +3668,7 @@ List<String> _extractPdfDecodedStreams(Uint8List bytes) {
     Uint8List decoded;
     if (RegExp(r'/FlateDecode\b').hasMatch(dict)) {
       try {
-        decoded = Uint8List.fromList(ZLibDecoder().convert(raw));
+        decoded = Uint8List.fromList(ZLibCodec().decode(raw));
       } catch (_) {
         continue;
       }
