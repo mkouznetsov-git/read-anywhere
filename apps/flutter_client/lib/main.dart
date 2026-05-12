@@ -926,14 +926,14 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
     _lastProgress = locator.progressPercent;
     _scheduleProgressRedraw();
     _saveDebounce?.cancel();
-    _saveDebounce = Timer(const Duration(milliseconds: 450), () {
+    _saveDebounce = Timer(const Duration(milliseconds: 1100), () {
       unawaited(_saveProgress(locator));
     });
   }
 
   void _scheduleProgressRedraw() {
     if (_progressRedrawThrottle?.isActive ?? false) return;
-    _progressRedrawThrottle = Timer(const Duration(milliseconds: 80), () {
+    _progressRedrawThrottle = Timer(const Duration(milliseconds: 140), () {
       if (mounted) setState(() {});
     });
   }
@@ -1344,18 +1344,49 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
                   children: [
                     Expanded(
                       child: ColoredBox(
-                        color: const Color(0xFFF3E7CF),
+                        color: const Color(0xFFE7D7B9),
                         child: SelectionArea(
                           child: Scrollbar(
                             controller: _scrollController,
                             thumbVisibility: true,
-                            interactive: true,
-                            child: ListView.builder(
+                            interactive: !Platform.isAndroid && !Platform.isIOS,
+                            child: ListView(
                               controller: _scrollController,
-                              padding: const EdgeInsets.fromLTRB(22, 22, 22, 34),
-                              cacheExtent: 2400,
-                              itemCount: document.blocks.length,
-                              itemBuilder: (context, index) => _DocxBlockView(block: document.blocks[index]),
+                              padding: const EdgeInsets.fromLTRB(14, 18, 14, 32),
+                              cacheExtent: 3600,
+                              children: [
+                                Center(
+                                  child: ConstrainedBox(
+                                    constraints: const BoxConstraints(maxWidth: 860),
+                                    child: DecoratedBox(
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFFFFFCF4),
+                                        border: Border.all(color: const Color(0xFFC9AA78).withOpacity(0.38)),
+                                        borderRadius: BorderRadius.circular(8),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.black.withOpacity(0.16),
+                                            blurRadius: 24,
+                                            offset: const Offset(0, 10),
+                                          ),
+                                        ],
+                                      ),
+                                      child: Padding(
+                                        padding: EdgeInsets.symmetric(
+                                          horizontal: MediaQuery.of(context).size.width < 560 ? 24 : 58,
+                                          vertical: MediaQuery.of(context).size.width < 560 ? 28 : 54,
+                                        ),
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                                          children: [
+                                            for (final block in document.blocks) _DocxBlockView(block: block),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ),
@@ -1409,8 +1440,8 @@ class _DocxBlockView extends StatelessWidget {
             block.plainText,
             style: const TextStyle(
               color: Color(0xFF2F261F),
-              fontSize: 24,
-              height: 1.25,
+              fontSize: 25,
+              height: 1.22,
               fontWeight: FontWeight.w700,
             ),
           ),
@@ -1420,7 +1451,7 @@ class _DocxBlockView extends StatelessWidget {
           padding: const EdgeInsets.only(bottom: 10),
           child: Text.rich(
             TextSpan(
-              style: const TextStyle(color: Color(0xFF2F261F), fontSize: 18, height: 1.48),
+              style: const TextStyle(color: Color(0xFF2F261F), fontSize: 17.2, height: 1.55),
               children: block.inlines.map(_docxInlineSpan).toList(),
             ),
             textAlign: TextAlign.start,
@@ -1517,6 +1548,18 @@ String _richFormatLabel(_RichSourceKind kind) => switch (kind) {
       _RichSourceKind.chm => 'CHM',
       _RichSourceKind.djvu => 'DJVU',
     };
+
+
+_Fb2Document _parseRichDocumentFromBytes(_RichSourceKind kind, Uint8List bytes) => switch (kind) {
+      _RichSourceKind.epub => _parseEpubDocument(bytes),
+      _RichSourceKind.docx => _parseDocxDocument(bytes),
+      _RichSourceKind.doc => _parseDocDocument(bytes),
+      _RichSourceKind.fb2 => _parseFb2Document(_decodeTextFile(bytes)),
+      _RichSourceKind.chm => _makeFb2Document([_Fb2Block.paragraph([_Fb2Inline(_safeUnsupportedBinaryPreview('CHM'))])]),
+      _RichSourceKind.djvu => _makeFb2Document([_Fb2Block.paragraph([_Fb2Inline(_safeUnsupportedBinaryPreview('DJVU'))])]),
+    };
+
+bool _selectionAreaIsCheapForRichReader() => Platform.isMacOS || Platform.isWindows || Platform.isLinux;
 
 class _Fb2ReaderScreen extends StatefulWidget {
   const _Fb2ReaderScreen({required this.book, required this.storage, required this.sync, this.sourceKind = _RichSourceKind.fb2});
@@ -1616,14 +1659,10 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
       return;
     }
     try {
-      final bytes = await file.readAsBytes();
       final document = switch (widget.sourceKind) {
-        _RichSourceKind.epub => _parseEpubDocument(Uint8List.fromList(bytes)),
-        _RichSourceKind.docx => _parseDocxDocument(Uint8List.fromList(bytes)),
-        _RichSourceKind.doc => _parseDocDocument(Uint8List.fromList(bytes)),
-        _RichSourceKind.chm => await _parseChmDocumentFromFile(file, Uint8List.fromList(bytes)),
+        _RichSourceKind.chm => await _parseChmDocumentFromFile(file),
         _RichSourceKind.djvu => await _parseDjvuDocumentFromFile(file),
-        _RichSourceKind.fb2 => _parseFb2Document(_decodeTextFile(bytes)),
+        _ => _parseRichDocumentFromBytes(widget.sourceKind, await file.readAsBytes()),
       };
       if (!mounted) return;
       setState(() {
@@ -1852,12 +1891,12 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     _pendingUnitIndex = locator.unitIndex;
     _progress = locator.progressPercent;
     if (!(_progressRedrawThrottle?.isActive ?? false)) {
-      _progressRedrawThrottle = Timer(const Duration(milliseconds: 80), () {
+      _progressRedrawThrottle = Timer(const Duration(milliseconds: 140), () {
         if (mounted) setState(() {});
       });
     }
     _saveDebounce?.cancel();
-    _saveDebounce = Timer(const Duration(milliseconds: 450), () {
+    _saveDebounce = Timer(const Duration(milliseconds: 1100), () {
       unawaited(_saveProgress(locator));
     });
   }
@@ -2051,31 +2090,32 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
                           if (currentUnits == null) {
                             return const Center(child: CircularProgressIndicator());
                           }
+                          final readerList = ListView.builder(
+                            controller: _scrollController,
+                            padding: const EdgeInsets.fromLTRB(
+                              _horizontalReaderPadding,
+                              _topPadding,
+                              _horizontalReaderPadding,
+                              _bottomPadding,
+                            ),
+                            cacheExtent: _lineExtent * 220,
+                            itemExtentBuilder: (index, dimensions) => currentUnits[index].extent,
+                            itemCount: currentUnits.length,
+                            itemBuilder: (context, index) {
+                              final unit = currentUnits[index];
+                              return RepaintBoundary(
+                                child: _Fb2UnitView(
+                                  unit: unit,
+                                  onOpenLink: _openExternalLink,
+                                ),
+                              );
+                            },
+                          );
                           return Scrollbar(
                             controller: _scrollController,
                             thumbVisibility: true,
-                            interactive: true,
-                            child: SelectionArea(
-                              child: ListView.builder(
-                                controller: _scrollController,
-                                padding: const EdgeInsets.fromLTRB(
-                                  _horizontalReaderPadding,
-                                  _topPadding,
-                                  _horizontalReaderPadding,
-                                  _bottomPadding,
-                                ),
-                                cacheExtent: _lineExtent * 120,
-                                itemExtentBuilder: (index, dimensions) => currentUnits[index].extent,
-                                itemCount: currentUnits.length,
-                                itemBuilder: (context, index) {
-                                  final unit = currentUnits[index];
-                                  return _Fb2UnitView(
-                                    unit: unit,
-                                    onOpenLink: _openExternalLink,
-                                  );
-                                },
-                              ),
-                            ),
+                            interactive: !Platform.isAndroid && !Platform.isIOS,
+                            child: _selectionAreaIsCheapForRichReader() ? SelectionArea(child: readerList) : readerList,
                           );
                         },
                       ),
@@ -2966,7 +3006,10 @@ _Fb2Document _parseFb2Document(String xmlText) {
       final href = _hrefFromTag(raw);
       final id = href?.replaceFirst('#', '');
       final image = id == null ? null : binaries[id];
-      if (image != null) blocks.add(_Fb2Block.image(image));
+      if (image != null && imageBudgetBytes > 0) {
+        imageBudgetBytes -= image.length;
+        blocks.add(_Fb2Block.image(image));
+      }
       continue;
     }
     final isTitle = raw.startsWith(RegExp(r'<title|<subtitle', caseSensitive: false));
@@ -2978,7 +3021,10 @@ _Fb2Document _parseFb2Document(String xmlText) {
         final href = _hrefFromTag(imageMatch.group(0) ?? '');
         final id = href?.replaceFirst('#', '');
         final image = id == null ? null : binaries[id];
-        if (image != null) blocks.add(_Fb2Block.image(image));
+        if (image != null && imageBudgetBytes > 0) {
+        imageBudgetBytes -= image.length;
+        blocks.add(_Fb2Block.image(image));
+      }
       }
       continue;
     }
@@ -2987,7 +3033,10 @@ _Fb2Document _parseFb2Document(String xmlText) {
       final href = _hrefFromTag(imageMatch.group(0) ?? '');
       final id = href?.replaceFirst('#', '');
       final image = id == null ? null : binaries[id];
-      if (image != null) blocks.add(_Fb2Block.image(image));
+      if (image != null && imageBudgetBytes > 0) {
+        imageBudgetBytes -= image.length;
+        blocks.add(_Fb2Block.image(image));
+      }
     }
     final inlines = _parseFb2Inlines(raw);
     final text = inlines.map((item) => item.text).join().trim();
@@ -3576,40 +3625,60 @@ Future<String> _extractPdfTextLayer(File file) async {
 }
 
 String _extractPdfTextFromBytes(Uint8List bytes) {
-  if (bytes.length < 16) return '';
-  final raw = latin1.decode(bytes, allowInvalid: true);
-  final sources = <String>[raw];
+  final chunks = <String>[];
 
-  for (final match in RegExp(r'stream\r?\n(.*?)\r?\nendstream', dotAll: true).allMatches(raw)) {
-    final headerStart = (match.start - 900).clamp(0, raw.length).toInt();
-    final header = raw.substring(headerStart, match.start);
-    final streamBody = match.group(1) ?? '';
-    if (!header.contains('/FlateDecode')) continue;
-    try {
-      final decoded = ZLibDecoder().decodeBytes(latin1.encode(streamBody), verify: false);
-      sources.add(latin1.decode(decoded, allowInvalid: true));
-      try {
-        sources.add(utf8.decode(decoded, allowMalformed: true));
-      } catch (_) {}
-    } catch (_) {}
+  // First pass: PDF content streams are very often compressed with FlateDecode.
+  // The previous extractor only scanned the raw PDF bytes, so the copy button
+  // stayed disabled for most real text PDFs. Decode streams in pure Dart and
+  // extract BT/ET text operators from the decompressed page content.
+  for (final stream in _extractPdfDecodedStreams(bytes)) {
+    final text = _extractPdfTextFromContent(stream);
+    if (text.trim().isNotEmpty) chunks.add(text);
   }
 
-  final chunks = <String>[];
-  for (final source in sources) {
-    final textObjects = RegExp(r'BT(.*?)ET', dotAll: true).allMatches(source).toList(growable: false);
-    if (textObjects.isNotEmpty) {
-      for (final object in textObjects) {
-        chunks.add(_extractPdfTextFromContent(object.group(1) ?? ''));
+  // Fallback for uncompressed/simple PDFs and metadata text.
+  final source = latin1.decode(bytes, allowInvalid: true);
+  for (final object in RegExp(r'BT\b(.*?)\bET', dotAll: true).allMatches(source)) {
+    chunks.add(_extractPdfTextFromContent(object.group(1) ?? ''));
+  }
+  if (chunks.isEmpty) {
+    chunks.add(_extractPdfTextFromContent(source));
+  }
+  final normalized = _normalizeExtractedPdfText(chunks.where((chunk) => chunk.trim().isNotEmpty).join('\n'));
+  if (!_looksLikeReadableDocumentPreview(normalized, minLetters: 30, minWords: 8)) return '';
+  return normalized;
+}
+
+List<String> _extractPdfDecodedStreams(Uint8List bytes) {
+  final result = <String>[];
+  final source = latin1.decode(bytes, allowInvalid: true);
+  final streamRe = RegExp(r'<<(.*?)>>\s*stream\r?\n', dotAll: true);
+  for (final match in streamRe.allMatches(source)) {
+    final dict = match.group(1) ?? '';
+    final streamStart = match.end;
+    final endMarker = source.indexOf('endstream', streamStart);
+    if (endMarker <= streamStart) continue;
+    var dataStart = streamStart;
+    var dataEnd = endMarker;
+    if (dataEnd > dataStart && bytes[dataEnd - 1] == 0x0A) dataEnd -= 1;
+    if (dataEnd > dataStart && bytes[dataEnd - 1] == 0x0D) dataEnd -= 1;
+    if (dataEnd <= dataStart) continue;
+    final raw = bytes.sublist(dataStart, dataEnd);
+    Uint8List decoded;
+    if (RegExp(r'/FlateDecode\b').hasMatch(dict)) {
+      try {
+        decoded = Uint8List.fromList(ZLibDecoder().convert(raw));
+      } catch (_) {
+        continue;
       }
     } else {
-      chunks.add(_extractPdfTextFromContent(source));
+      decoded = raw;
     }
+    if (decoded.isEmpty || decoded.length > 10 * 1024 * 1024) continue;
+    final text = latin1.decode(decoded, allowInvalid: true);
+    if (text.contains('Tj') || text.contains('TJ') || text.contains('BT')) result.add(text);
   }
-
-  final normalized = _normalizeExtractedPdfText(chunks.where((chunk) => chunk.trim().isNotEmpty).join('\n'));
-  final letters = RegExp(r'[A-Za-zА-Яа-яЁё]').allMatches(normalized).length;
-  if (normalized.length < 24 || letters < 12) return '';
-  return normalized;
+  return result.take(600).toList(growable: false);
 }
 
 String _extractPdfTextFromContent(String content) {
@@ -4044,7 +4113,24 @@ String _extractChmText(Uint8List bytes) {
 }
 
 
-Future<_Fb2Document> _parseChmDocumentFromFile(File sourceFile, Uint8List bytes) async {
+
+Future<String> _extractChmPreviewFromFile(File sourceFile) async {
+  try {
+    final length = await sourceFile.length();
+    final maxBytes = length.clamp(0, 3 * 1024 * 1024).toInt();
+    final raf = await sourceFile.open();
+    try {
+      final bytes = await raf.read(maxBytes);
+      return _extractChmText(Uint8List.fromList(bytes));
+    } finally {
+      await raf.close();
+    }
+  } catch (_) {
+    return _safeUnsupportedBinaryPreview('CHM');
+  }
+}
+
+Future<_Fb2Document> _parseChmDocumentFromFile(File sourceFile) async {
   final extracted = await _tryExtractChmWithNativeTools(sourceFile);
   if (extracted.isNotEmpty) {
     final doc = _parseExtractedHtmlDocument(extracted, formatLabel: 'CHM');
@@ -4053,7 +4139,7 @@ Future<_Fb2Document> _parseChmDocumentFromFile(File sourceFile, Uint8List bytes)
     }
   }
 
-  final preview = _extractChmText(bytes);
+  final preview = await _extractChmPreviewFromFile(sourceFile);
   final blocks = preview
       .split(RegExp(r'\n{2,}'))
       .map((part) => part.trim())
@@ -4131,8 +4217,8 @@ Future<_Fb2Document?> _tryRenderDjvuPagesWithNativeTools(File sourceFile) async 
   Directory? tempDir;
   try {
     tempDir = await Directory.systemTemp.createTemp('readarc_djvu_');
-    final pages = await _readDjvuPageCount(sourceFile) ?? 24;
-    final maxPages = pages.clamp(1, 80).toInt();
+    final pages = await _readDjvuPageCount(sourceFile) ?? 12;
+    final maxPages = pages.clamp(1, 24).toInt();
     final blocks = <_Fb2Block>[];
     blocks.add(_Fb2Block.title('DJVU'));
     for (var page = 1; page <= maxPages; page++) {
@@ -4140,8 +4226,8 @@ Future<_Fb2Document?> _tryRenderDjvuPagesWithNativeTools(File sourceFile) async 
       var rendered = false;
       for (final command in const ['ddjvu']) {
         try {
-          final result = await _runNativeTool(command, ['-format=png', '-page=$page', sourceFile.path, out.path], timeout: const Duration(seconds: 18));
-          if (result.exitCode == 0 && await out.exists() && await out.length() > 0) {
+          final result = await _runNativeTool(command, ['-format=png', '-page=$page', '-size=1200x1600', sourceFile.path, out.path], timeout: const Duration(seconds: 18));
+          if (result.exitCode == 0 && await out.exists() && await out.length() > 0 && await out.length() <= 8 * 1024 * 1024) {
             rendered = true;
             break;
           }
@@ -4192,13 +4278,23 @@ Future<List<File>> _collectReadableDocumentFiles(Directory root) async {
     final r = rank(an).compareTo(rank(bn));
     return r != 0 ? r : an.compareTo(bn);
   });
-  return files.take(200).toList(growable: false);
+  return files.take(80).toList(growable: false);
 }
 
 _Fb2Document _parseExtractedHtmlDocument(List<File> files, {required String formatLabel}) {
   final blocks = <_Fb2Block>[];
-  for (final file in files) {
-    final html = _decodeTextFile(file.readAsBytesSync());
+  var blockBudget = 1800;
+  var imageBudgetBytes = 24 * 1024 * 1024;
+  for (final file in files.take(80)) {
+    if (blockBudget <= 0) break;
+    Uint8List fileBytes;
+    try {
+      if (file.lengthSync() > 8 * 1024 * 1024) continue;
+      fileBytes = file.readAsBytesSync();
+    } catch (_) {
+      continue;
+    }
+    final html = _decodeTextFile(fileBytes);
     final title = _htmlTitle(html) ?? file.uri.pathSegments.last;
     final clean = html
         .replaceAll(RegExp(r'<script\b[^>]*>.*?</script>', caseSensitive: false, dotAll: true), ' ')
@@ -4206,7 +4302,10 @@ _Fb2Document _parseExtractedHtmlDocument(List<File> files, {required String form
     if (title.trim().isNotEmpty) blocks.add(_Fb2Block.title(_decodeXmlEntities(title).trim()));
     for (final img in RegExp("""<img\\b[^>]*\\bsrc\\s*=\\s*[\'\"]([^\'\"]+)[\'\"][^>]*>""", caseSensitive: false).allMatches(clean)) {
       final image = _readImageNearHtml(file, img.group(1) ?? '');
-      if (image != null) blocks.add(_Fb2Block.image(image));
+      if (image != null && imageBudgetBytes > 0) {
+        imageBudgetBytes -= image.length;
+        blocks.add(_Fb2Block.image(image));
+      }
     }
     final blockRe = RegExp(
       r'<h[1-6]\b[^>]*>.*?</h[1-6]>|<p\b[^>]*>.*?</p>|<li\b[^>]*>.*?</li>|<tr\b[^>]*>.*?</tr>|<div\b[^>]*>.*?</div>',
@@ -4219,6 +4318,7 @@ _Fb2Document _parseExtractedHtmlDocument(List<File> files, {required String form
       final text = _htmlToPlainText(raw).replaceAll(RegExp(r'\s+'), ' ').trim();
       if (text.isEmpty || text.length < 2) continue;
       found = true;
+      if (blockBudget-- <= 0) break;
       if (raw.startsWith(RegExp(r'<h[1-6]', caseSensitive: false))) {
         blocks.add(_Fb2Block.title(text));
       } else if (raw.startsWith(RegExp(r'<li', caseSensitive: false))) {
@@ -4260,7 +4360,7 @@ Uint8List? _readImageNearHtml(File htmlFile, String srcRaw) {
   final resolved = base.resolve(src).toFilePath();
   final file = File(resolved);
   try {
-    if (file.existsSync() && file.lengthSync() <= 20 * 1024 * 1024) return file.readAsBytesSync();
+    if (file.existsSync() && file.lengthSync() <= 6 * 1024 * 1024) return file.readAsBytesSync();
   } catch (_) {}
   return null;
 }
