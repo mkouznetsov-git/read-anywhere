@@ -3797,6 +3797,7 @@ Future<_DjvuArtifact> _prepareDjvuArtifact({
 
 class _DjvuPageView extends StatefulWidget {
   const _DjvuPageView({
+    super.key,
     required this.sourceFile,
     required this.pagesDir,
     required this.pageNumber,
