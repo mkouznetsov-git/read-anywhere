@@ -4344,6 +4344,7 @@ class _PdfPageGeometry {
 
 class _PdfFitWidthPage extends StatefulWidget {
   const _PdfFitWidthPage({
+    super.key,
     required this.document,
     required this.pageNumber,
     required this.displayWidth,
