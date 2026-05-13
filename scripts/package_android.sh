@@ -25,6 +25,16 @@ cd "$APP_DIR"
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 
+# Build and bundle the embedded DJVU engine when the Rust Android toolchain is available.
+# If it is missing, Flutter packages still build; DJVU pages will show an in-app diagnostic
+# instead of using external tools.
+if "$ROOT_DIR/scripts/build_native_engines.sh" android; then
+  mkdir -p android/app/src/main/jniLibs/arm64-v8a
+  cp "$ROOT_DIR/native/readarc_engines/dist/android/arm64-v8a/libreadarc_djvu_engine.so"     android/app/src/main/jniLibs/arm64-v8a/libreadarc_djvu_engine.so
+else
+  echo "Embedded DJVU Android engine was not bundled. Continuing build without external converters." >&2
+fi
+
 build_with_optional_define() {
   local relay_define="${READARC_DEFAULT_RELAY_URL:-${READANYWHERE_DEFAULT_RELAY_URL:-https://relay.readarc.ru}}"
   local args=("$@")

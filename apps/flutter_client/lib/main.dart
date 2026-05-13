@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' show PlatformDispatcher;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -17,6 +18,7 @@ import 'models/book.dart';
 import 'models/manifest.dart';
 import 'models/sync_settings.dart';
 import 'services/book_import_service.dart';
+import 'services/format_engines/djvu_embedded_engine.dart';
 import 'services/format_engines/djvu_embedded_probe.dart';
 import 'services/storage_service.dart';
 import 'services/sync/sync_service.dart';
@@ -3671,7 +3673,7 @@ Future<_DjvuArtifact> _prepareDjvuArtifact({
         'pageCount': pageCount,
         'pageFormat': 'embedded-rgba-cache',
         'rendering': 'embedded-djvu-engine',
-        'engine': 'djvu-rs MIT selected; FFI renderer pending',
+        'engine': 'djvu-rs MIT embedded FFI engine',
         'preparedAt': DateTime.now().toUtc().toIso8601String(),
       }),
       flush: true,
@@ -3764,12 +3766,15 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
     try {
       if (await out.exists() && await out.length() > 0) return out;
     } catch (_) {}
-    // Sprint 33 deliberately removes external ddjvu/djvused execution from the
-    // runtime path. The selected production direction is an embedded MIT Rust
-    // decoder (djvu-rs) exposed through the ReadArc format engine API. Until the
-    // native FFI binary is linked for the current platform, keep the app alive
-    // and show a per-page diagnostic instead of launching shell tools.
-    return null;
+    final png = await DjvuEmbeddedEngine.renderPagePng(
+      sourcePath: widget.sourceFile.path,
+      pageNumber: widget.pageNumber,
+      pixelWidth: pixelWidth,
+      pixelHeight: pixelHeight,
+    ).timeout(const Duration(seconds: 45), onTimeout: () => null);
+    if (png == null || png.isEmpty) return null;
+    await out.writeAsBytes(png, flush: true);
+    return out;
   }
 
   @override
@@ -3785,7 +3790,7 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
             if (snapshot.connectionState == ConnectionState.done) {
               return const ColoredBox(
                 color: Color(0xFFF8F1E3),
-                child: Center(child: Padding(padding: EdgeInsets.all(18), child: Text('DJVU-страница будет отрисована встроенным движком ReadArc. Внешние ddjvu/djvused отключены в Sprint 33.'))),
+                child: Center(child: Padding(padding: EdgeInsets.all(18), child: Text('Не удалось отрисовать страницу DJVU встроенным движком ReadArc. Проверьте, что native engine вошёл в сборку.'))),
               );
             }
             return const ColoredBox(
@@ -3863,7 +3868,6 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
   Timer? _saveDebounce;
   Timer? _scrollRedrawThrottle;
   bool _textLayerLoading = false;
-  bool _largePdfSinglePageMode = false;
   bool _fullScreen = false;
   bool _showTextLayer = false;
   bool _restoringScroll = false;
@@ -3908,8 +3912,6 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
       return;
     }
     try {
-      final fileSize = await file.length();
-      final largePdfSinglePageMode = fileSize >= 24 * 1024 * 1024;
       final doc = await PdfDocument.openFile(file.path).timeout(const Duration(seconds: 15));
       final pages = doc.pagesCount;
       final geometries = await _readPdfPageGeometries(doc, pages).timeout(const Duration(seconds: 8));
@@ -3923,17 +3925,14 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
         _page = initialPage;
         _pages = pages;
         _pageGeometries = geometries;
-        _largePdfSinglePageMode = largePdfSinglePageMode;
         _document = doc;
         _textLayer = '';
         _loadError = null;
       });
-      _schedulePdfScrollToPage(initialPage, animated: false);
-      if (fileSize <= 12 * 1024 * 1024) {
-        unawaited(_loadPdfTextLayerLater(file));
-      } else {
-        debugPrint('ReadArc PDF text extraction skipped for large file: ${fileSize ~/ (1024 * 1024)} MB');
-      }
+      // PDF is now always opened in page-by-page mode. Text extraction is kept
+      // asynchronous and moved to a background isolate so large PDFs do not block
+      // the reader UI.
+      unawaited(_loadPdfTextLayerLater(file));
     } catch (error) {
       if (mounted) setState(() => _loadError = 'Не удалось открыть PDF: $error');
     }
@@ -3943,7 +3942,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
     if (_textLayerLoading) return;
     _textLayerLoading = true;
     try {
-      final textLayer = await _extractPdfTextLayer(file).timeout(const Duration(seconds: 20), onTimeout: () => '');
+      final textLayer = await _extractPdfTextLayer(file).timeout(const Duration(seconds: 45), onTimeout: () => '');
       if (!mounted) return;
       if (textLayer.trim().isNotEmpty) setState(() => _textLayer = textLayer);
     } catch (error) {
@@ -4166,52 +4165,33 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                           : LayoutBuilder(
                               builder: (context, constraints) {
                                 _lastViewportWidth = constraints.maxWidth;
-                                final dpr = MediaQuery.of(context).devicePixelRatio.clamp(0.85, Platform.isAndroid ? 1.0 : 1.15).toDouble();
-                                if (_largePdfSinglePageMode) {
-                                  final geometry = (_page - 1) < _pageGeometries.length ? _pageGeometries[_page - 1] : const _PdfPageGeometry(width: 595, height: 842);
-                                  final displayWidth = constraints.maxWidth.clamp(220.0, 1800.0).toDouble();
-                                  final displayHeight = _pdfPageDisplayHeight(geometry, displayWidth);
-                                  return _LargePdfSinglePageReader(
-                                    document: document,
-                                    page: _page,
-                                    pages: _pages,
-                                    displayWidth: displayWidth,
-                                    displayHeight: displayHeight,
-                                    devicePixelRatio: dpr,
-                                    onPrevious: _page <= 1 ? null : () { setState(() => _page--); unawaited(_savePage(_page)); },
-                                    onNext: _page >= _pages ? null : () { setState(() => _page++); unawaited(_savePage(_page)); },
-                                  );
-                                }
-                                return ColoredBox(
-                                  color: const Color(0xFFF3E7CF),
-                                  child: Scrollbar(
-                                    controller: _scrollController,
-                                    thumbVisibility: true,
-                                    interactive: true,
-                                    child: ListView.builder(
-                                      controller: _scrollController,
-                                      padding: const EdgeInsets.only(top: 12),
-                                      cacheExtent: constraints.maxHeight * 0.55,
-                                      itemCount: _pages,
-                                      itemBuilder: (context, index) {
-                                        final geometry = index < _pageGeometries.length
-                                            ? _pageGeometries[index]
-                                            : const _PdfPageGeometry(width: 595, height: 842);
-                                        final displayWidth = constraints.maxWidth.clamp(220.0, 2200.0).toDouble();
-                                        final displayHeight = _pdfPageDisplayHeight(geometry, displayWidth);
-                                        return Padding(
-                                          padding: const EdgeInsets.only(bottom: 12),
-                                          child: _PdfFitWidthPage(
-                                            document: document,
-                                            pageNumber: index + 1,
-                                            displayWidth: displayWidth,
-                                            displayHeight: displayHeight,
-                                            devicePixelRatio: dpr,
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                  ),
+                                final dpr = MediaQuery.of(context).devicePixelRatio
+                                    .clamp(Platform.isAndroid ? 2.25 : 1.75, Platform.isAndroid ? 3.25 : 2.5)
+                                    .toDouble();
+                                final geometry = (_page - 1) < _pageGeometries.length
+                                    ? _pageGeometries[_page - 1]
+                                    : const _PdfPageGeometry(width: 595, height: 842);
+                                final displayWidth = constraints.maxWidth.clamp(220.0, 1800.0).toDouble();
+                                final displayHeight = _pdfPageDisplayHeight(geometry, displayWidth);
+                                return _LargePdfSinglePageReader(
+                                  document: document,
+                                  page: _page,
+                                  pages: _pages,
+                                  displayWidth: displayWidth,
+                                  displayHeight: displayHeight,
+                                  devicePixelRatio: dpr,
+                                  onPrevious: _page <= 1
+                                      ? null
+                                      : () {
+                                          setState(() => _page--);
+                                          unawaited(_savePage(_page));
+                                        },
+                                  onNext: _page >= _pages
+                                      ? null
+                                      : () {
+                                          setState(() => _page++);
+                                          unawaited(_savePage(_page));
+                                        },
                                 );
                               },
                             ),
@@ -4267,21 +4247,6 @@ class _LargePdfSinglePageReader extends StatelessWidget {
       color: const Color(0xFFF3E7CF),
       child: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 10, 18, 6),
-            child: Row(
-              children: [
-                const Icon(Icons.memory_rounded, size: 18, color: Color(0xFF5E6380)),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Большой PDF открыт в экономном режиме: ReadArc рендерит только одну страницу, чтобы не замораживать интерфейс.',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: const Color(0xFF5E6380)),
-                  ),
-                ),
-              ],
-            ),
-          ),
           Expanded(
             child: Scrollbar(
               thumbVisibility: true,
@@ -4387,12 +4352,12 @@ class _PdfFitWidthPageState extends State<_PdfFitWidthPage> {
   }
 
   Future<Uint8List?> _cachedRender() {
-    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio).round().clamp(320, Platform.isAndroid ? 1200 : 1800);
-    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio).round().clamp(320, Platform.isAndroid ? 1800 : 2600);
+    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio).round().clamp(720, Platform.isAndroid ? 2600 : 2400);
+    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio).round().clamp(960, Platform.isAndroid ? 3900 : 3400);
     final key = '${identityHashCode(widget.document)}:${widget.pageNumber}:$pixelWidth:$pixelHeight';
     final existing = _renderCache[key];
     if (existing != null) return existing;
-    final maxCachedPages = Platform.isAndroid ? 3 : 5;
+    final maxCachedPages = Platform.isAndroid ? 2 : 3;
     while (_renderCacheOrder.length >= maxCachedPages) {
       final oldest = _renderCacheOrder.removeAt(0);
       _renderCache.remove(oldest);
@@ -4452,6 +4417,8 @@ class _PdfFitWidthPageState extends State<_PdfFitWidthPage> {
             height: widget.displayHeight,
             fit: BoxFit.fill,
             gaplessPlayback: true,
+            filterQuality: FilterQuality.high,
+            isAntiAlias: true,
           );
         },
       ),
@@ -4512,7 +4479,7 @@ class _PdfTextLayerView extends StatelessWidget {
 Future<String> _extractPdfTextLayer(File file) async {
   try {
     final bytes = await file.readAsBytes();
-    return _extractPdfTextFromBytes(bytes);
+    return compute(_extractPdfTextFromBytes, bytes);
   } catch (_) {
     return '';
   }

@@ -1,9 +1,5 @@
 # ReadArc embedded reader engines
 
-Sprint 33 starts the embedded-engine architecture. The app must not require
-`brew install`, `apt install`, external command-line converters, or server-side
-conversion to read user books.
-
 Runtime rule:
 
 ```text
@@ -14,10 +10,12 @@ ReadArc Flutter UI
   -> safe reader widgets
 ```
 
-Selected engines:
+ReadArc must not require users to install Homebrew, apt packages, command-line converters or server-side conversion services to read their books.
 
-- DJVU: `djvu-rs`, MIT, pure Rust implementation from the public DjVu v3 specification.
-- PDF: PDFium-backed engine direction; current Flutter package remains only until the native bridge is linked.
-- CHM: CHMLib-compatible embedded library direction, LGPL-2.1-or-later.
+Current engine decisions:
 
-No GPL DjVuLibre source is vendored in this tree.
+- DJVU: `djvu-rs` permissive/MIT crate path, wrapped by `readarc_djvu_engine` C ABI and Dart FFI.
+- PDF: current Flutter `pdfx` path is normalized to a page-by-page reader; long-term direction is a bundled PDFium-backed engine.
+- CHM: future embedded CHMLib-compatible reader.
+
+No DjVuLibre source and no GPL DJVU runtime tools are vendored in this tree.

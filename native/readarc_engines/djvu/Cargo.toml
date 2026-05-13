@@ -9,6 +9,6 @@ publish = false
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-# MIT licensed pure-Rust decoder. This is the selected production path instead
-# of GPL DjVuLibre command-line tools.
-djvu-rs = "0.10"
+# MIT-licensed pure-Rust decoder from the public DjVu v3 specification.
+# This avoids GPL DjVuLibre and all external command-line tools.
+djvu-rs = "0.9"

@@ -26,6 +26,12 @@ export READARC_PLATFORMS="macos"
 
 cd "$APP_DIR"
 
+# Build the embedded DJVU engine when Rust is available. The library is copied
+# into the .app bundle after Flutter produces the release app.
+if ! "$ROOT_DIR/scripts/build_native_engines.sh" macos; then
+  echo "Embedded DJVU macOS engine was not built. Continuing build without external converters." >&2
+fi
+
 build_with_optional_define() {
   local relay_define="${READARC_DEFAULT_RELAY_URL:-${READANYWHERE_DEFAULT_RELAY_URL:-https://relay.readarc.ru}}"
   local args=("$@")
@@ -52,6 +58,12 @@ STAGE_ROOT="$(mktemp -d)"
 trap 'rm -rf "$STAGE_ROOT"' EXIT
 STAGED_APP="$STAGE_ROOT/$APP_NAME.app"
 cp -R "$APP_PATH" "$STAGED_APP"
+
+DJVU_DYLIB="$ROOT_DIR/native/readarc_engines/dist/macos/libreadarc_djvu_engine.dylib"
+if [[ -f "$DJVU_DYLIB" ]]; then
+  mkdir -p "$STAGED_APP/Contents/Frameworks"
+  cp "$DJVU_DYLIB" "$STAGED_APP/Contents/Frameworks/libreadarc_djvu_engine.dylib"
+fi
 
 # Plain release .app zip, useful for quick testing.
 ditto -c -k --keepParent "$STAGED_APP" "$DIST_DIR/ReadArc-${VERSION}-macos-release-app.zip"

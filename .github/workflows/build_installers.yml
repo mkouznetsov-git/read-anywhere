@@ -99,6 +99,14 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Set up Rust for embedded reader engines
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install Android native build helper
+        run: cargo install cargo-ndk --locked
+
       - name: Build Android release artifacts
         run: ./scripts/package_android.sh
 
@@ -122,6 +130,9 @@ jobs:
         with:
           channel: stable
           cache: true
+
+      - name: Set up Rust for embedded reader engines
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Build macOS release artifacts
         run: ./scripts/package_macos.sh
