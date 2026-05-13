@@ -102,12 +102,35 @@ pub extern "C" fn readarc_djvu_render_page_rgba(
             return -4;
         };
         let data: &[u8] = pixmap.as_ref();
-        if data.len() != required {
-            return -5;
-        }
+        let pixels = (target_width as usize).saturating_mul(target_height as usize);
         let out = unsafe { slice::from_raw_parts_mut(out_rgba, required) };
-        out.copy_from_slice(data);
-        0
+        if data.len() == required {
+            out.copy_from_slice(data);
+            return 0;
+        }
+        if data.len() == pixels.saturating_mul(3) {
+            for i in 0..pixels {
+                let src = i * 3;
+                let dst = i * 4;
+                out[dst] = data[src];
+                out[dst + 1] = data[src + 1];
+                out[dst + 2] = data[src + 2];
+                out[dst + 3] = 255;
+            }
+            return 0;
+        }
+        if data.len() == pixels {
+            for i in 0..pixels {
+                let v = data[i];
+                let dst = i * 4;
+                out[dst] = v;
+                out[dst + 1] = v;
+                out[dst + 2] = v;
+                out[dst + 3] = 255;
+            }
+            return 0;
+        }
+        -5
     }))
     .unwrap_or(-99)
 }

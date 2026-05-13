@@ -65,6 +65,19 @@ if [[ -f "$DJVU_DYLIB" ]]; then
   cp "$DJVU_DYLIB" "$STAGED_APP/Contents/Frameworks/libreadarc_djvu_engine.dylib"
 fi
 
+# The native DJVU dylib is copied into the bundle after Flutter/Xcode finishes.
+# Without re-signing the modified bundle, Gatekeeper can report that ReadArc.app
+# is "damaged". Internal snapshot builds use ad-hoc signing; public builds
+# should replace this with Developer ID signing + notarization.
+if command -v codesign >/dev/null 2>&1; then
+  xattr -cr "$STAGED_APP" 2>/dev/null || true
+  if [[ -f "$STAGED_APP/Contents/Frameworks/libreadarc_djvu_engine.dylib" ]]; then
+    codesign --force --sign - "$STAGED_APP/Contents/Frameworks/libreadarc_djvu_engine.dylib" || true
+  fi
+  codesign --force --deep --sign - "$STAGED_APP" || true
+  codesign --verify --deep --strict "$STAGED_APP" || echo "Warning: ad-hoc code signature verification failed; continuing internal snapshot packaging." >&2
+fi
+
 # Plain release .app zip, useful for quick testing.
 ditto -c -k --keepParent "$STAGED_APP" "$DIST_DIR/ReadArc-${VERSION}-macos-release-app.zip"
 

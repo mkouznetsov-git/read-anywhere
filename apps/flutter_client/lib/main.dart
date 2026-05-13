@@ -3264,6 +3264,8 @@ class _DjvuReaderScreenState extends State<_DjvuReaderScreen> {
   String? _error;
   String? _textLayer;
   bool _fullScreen = false;
+  bool _djvuProgressScrubActive = false;
+  bool _openDjvuPageAtBottom = false;
   bool _restoringScroll = false;
   double _lastViewportWidth = 0;
   Timer? _saveDebounce;
@@ -3436,6 +3438,30 @@ class _DjvuReaderScreenState extends State<_DjvuReaderScreen> {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Текстовый слой DJVU скопирован')));
   }
 
+  void _goToDjvuPage(int page, {required bool openAtBottom}) {
+    if (_pageCount <= 0) return;
+    final next = page.clamp(1, _pageCount).toInt();
+    if (next == _page) return;
+    setState(() {
+      _page = next;
+      _openDjvuPageAtBottom = openAtBottom;
+    });
+    _saveDebounce?.cancel();
+    _saveDebounce = Timer(const Duration(milliseconds: 250), () {
+      unawaited(_savePage(next));
+    });
+  }
+
+  void _setDjvuPageFromProgress(int page) {
+    _goToDjvuPage(page, openAtBottom: false);
+  }
+
+  void _deactivateDjvuProgressScrub() {
+    if (_djvuProgressScrubActive) {
+      setState(() => _djvuProgressScrubActive = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final source = _sourceFile;
@@ -3505,56 +3531,139 @@ class _DjvuReaderScreenState extends State<_DjvuReaderScreen> {
                           _lastViewportWidth = constraints.maxWidth;
                           final displayWidth = constraints.maxWidth.clamp(240.0, 1800.0).toDouble();
                           final displayHeight = _pageHeight(displayWidth);
-                          final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, Platform.isAndroid ? 1.25 : 1.6).toDouble();
-                          return Scrollbar(
-                            controller: _scrollController,
-                            thumbVisibility: true,
-                            interactive: true,
-                            child: ListView.builder(
-                              controller: _scrollController,
-                              padding: const EdgeInsets.only(top: 12),
-                              cacheExtent: constraints.maxHeight * 0.55,
-                              itemCount: _pageCount,
-                              itemBuilder: (context, index) {
-                                final page = index + 1;
-                                return Padding(
-                                  padding: const EdgeInsets.only(bottom: _pageGap),
-                                  child: Center(
-                                    child: _DjvuPageView(
-                                      sourceFile: source,
-                                      pagesDir: pagesDir,
-                                      pageNumber: page,
-                                      displayWidth: displayWidth,
-                                      displayHeight: displayHeight,
-                                      devicePixelRatio: dpr,
-                                    ),
-                                  ),
-                                );
-                              },
-                            ),
+                          final dpr = MediaQuery.of(context).devicePixelRatio
+                              .clamp(Platform.isAndroid ? 2.25 : 1.75, Platform.isAndroid ? 3.25 : 2.5)
+                              .toDouble();
+                          return _DjvuSinglePageReader(
+                            sourceFile: source,
+                            pagesDir: pagesDir,
+                            page: _page,
+                            pages: _pageCount,
+                            displayWidth: displayWidth,
+                            displayHeight: displayHeight,
+                            devicePixelRatio: dpr,
+                            openAtBottom: _openDjvuPageAtBottom,
+                            onTapContent: _deactivateDjvuProgressScrub,
+                            onPrevious: _page <= 1 ? null : () => _goToDjvuPage(_page - 1, openAtBottom: true),
+                            onNext: _page >= _pageCount ? null : () => _goToDjvuPage(_page + 1, openAtBottom: false),
                           );
                         },
                       ),
                     ),
                     if (!_fullScreen)
-                      SafeArea(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: LinearProgressIndicator(
-                                  value: _pageCount <= 1 ? 0 : ((_page - 1) / (_pageCount - 1)).clamp(0.0, 1.0).toDouble(),
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Text('$_page / $_pageCount', style: const TextStyle(color: Color(0xFF2A2F4A))),
-                            ],
-                          ),
-                        ),
+                      _PagedReaderProgressBar(
+                        page: _page,
+                        pages: _pageCount,
+                        active: _djvuProgressScrubActive,
+                        onActivate: () => setState(() => _djvuProgressScrubActive = true),
+                        onPageSelected: _setDjvuPageFromProgress,
                       ),
                   ],
                 ),
+    );
+  }
+}
+
+
+class _DjvuSinglePageReader extends StatefulWidget {
+  const _DjvuSinglePageReader({
+    required this.sourceFile,
+    required this.pagesDir,
+    required this.page,
+    required this.pages,
+    required this.displayWidth,
+    required this.displayHeight,
+    required this.devicePixelRatio,
+    required this.openAtBottom,
+    required this.onTapContent,
+    required this.onPrevious,
+    required this.onNext,
+  });
+
+  final File sourceFile;
+  final Directory pagesDir;
+  final int page;
+  final int pages;
+  final double displayWidth;
+  final double displayHeight;
+  final double devicePixelRatio;
+  final bool openAtBottom;
+  final VoidCallback onTapContent;
+  final VoidCallback? onPrevious;
+  final VoidCallback? onNext;
+
+  @override
+  State<_DjvuSinglePageReader> createState() => _DjvuSinglePageReaderState();
+}
+
+class _DjvuSinglePageReaderState extends State<_DjvuSinglePageReader> {
+  final _controller = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    _positionPageAfterFrame();
+  }
+
+  @override
+  void didUpdateWidget(covariant _DjvuSinglePageReader oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.page != widget.page || oldWidget.openAtBottom != widget.openAtBottom) {
+      _positionPageAfterFrame();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _positionPageAfterFrame() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_controller.hasClients) return;
+      final target = widget.openAtBottom ? _controller.position.maxScrollExtent : 0.0;
+      _controller.jumpTo(target.clamp(0.0, _controller.position.maxScrollExtent));
+    });
+  }
+
+  void _onHorizontalDragEnd(DragEndDetails details) {
+    final velocity = details.primaryVelocity ?? 0;
+    if (velocity < -240) {
+      widget.onNext?.call();
+    } else if (velocity > 240) {
+      widget.onPrevious?.call();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: widget.onTapContent,
+      onHorizontalDragEnd: _onHorizontalDragEnd,
+      child: ColoredBox(
+        color: const Color(0xFFF3E7CF),
+        child: Scrollbar(
+          controller: _controller,
+          thumbVisibility: true,
+          child: SingleChildScrollView(
+            controller: _controller,
+            padding: const EdgeInsets.fromLTRB(0, 8, 0, 16),
+            child: Center(
+              child: _DjvuPageView(
+                key: ValueKey('djvu-page-${widget.page}-${widget.displayWidth.round()}-${widget.devicePixelRatio.toStringAsFixed(2)}'),
+                sourceFile: widget.sourceFile,
+                pagesDir: widget.pagesDir,
+                pageNumber: widget.page,
+                displayWidth: widget.displayWidth,
+                displayHeight: widget.displayHeight,
+                devicePixelRatio: widget.devicePixelRatio,
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -3622,6 +3731,7 @@ Future<_DjvuArtifact> _prepareDjvuArtifact({
   final pagesDir = Directory('${root.path}${Platform.pathSeparator}pages');
   if (!await pagesDir.exists()) await pagesDir.create(recursive: true);
   final manifestFile = await storage.processedArtifactManifestFile(book.id);
+  const renderProfile = 'paged-hidpi-v2';
 
   // First try an existing processed artifact. This lets Android/opened devices
   // use a prepared DJVU cache once artifact sync is enabled, without needing a
@@ -3633,6 +3743,7 @@ Future<_DjvuArtifact> _prepareDjvuArtifact({
       final firstPage = File('${pagesDir.path}${Platform.pathSeparator}page_00001.png');
       if ((data['kind'] == 'djvu-pages-v1' || data['kind'] == 'djvu-embedded-v1') &&
           data['sourceSha256'] == book.contentSha256 &&
+          data['renderProfile'] == renderProfile &&
           cachedPageCount > 0 &&
           await firstPage.exists() &&
           await firstPage.length() > 0) {
@@ -3652,6 +3763,7 @@ Future<_DjvuArtifact> _prepareDjvuArtifact({
       final data = jsonDecode(await manifestFile.readAsString()) as Map<String, dynamic>;
       reuse = (data['kind'] == 'djvu-pages-v1' || data['kind'] == 'djvu-embedded-v1') &&
           data['sourceSha256'] == book.contentSha256 &&
+          data['renderProfile'] == renderProfile &&
           data['pageCount'] == pageCount;
     } catch (_) {
       reuse = false;
@@ -3672,6 +3784,7 @@ Future<_DjvuArtifact> _prepareDjvuArtifact({
         'sourceSha256': book.contentSha256,
         'pageCount': pageCount,
         'pageFormat': 'embedded-rgba-cache',
+        'renderProfile': renderProfile,
         'rendering': 'embedded-djvu-engine',
         'engine': 'djvu-rs MIT embedded FFI engine',
         'preparedAt': DateTime.now().toUtc().toIso8601String(),
@@ -3734,8 +3847,8 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
     try {
       if (await out.exists() && await out.length() > 0) return out;
     } catch (_) {}
-    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio).round().clamp(720, Platform.isAndroid ? 1200 : 1700).toInt();
-    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio).round().clamp(900, Platform.isAndroid ? 1800 : 2400).toInt();
+    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio).round().clamp(960, Platform.isAndroid ? 2600 : 2400).toInt();
+    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio).round().clamp(1200, Platform.isAndroid ? 3900 : 3400).toInt();
     final key = '${widget.sourceFile.path}:${widget.pageNumber}:$pixelWidth:$pixelHeight';
     final existing = _renderJobs[key];
     if (existing != null) return existing;
@@ -3809,6 +3922,8 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
               height: widget.displayHeight,
               fit: BoxFit.fill,
               gaplessPlayback: true,
+              filterQuality: FilterQuality.high,
+              isAntiAlias: true,
             ),
           );
         },
@@ -3870,6 +3985,8 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
   bool _textLayerLoading = false;
   bool _fullScreen = false;
   bool _showTextLayer = false;
+  bool _pdfProgressScrubActive = false;
+  bool _openPdfPageAtBottom = false;
   bool _restoringScroll = false;
   double _lastViewportWidth = 0;
 
@@ -4052,6 +4169,30 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
     return width * ratio;
   }
 
+  void _goToPdfPage(int page, {required bool openAtBottom}) {
+    if (_pages <= 0) return;
+    final next = page.clamp(1, _pages).toInt();
+    if (next == _page) return;
+    setState(() {
+      _page = next;
+      _openPdfPageAtBottom = openAtBottom;
+    });
+    _saveDebounce?.cancel();
+    _saveDebounce = Timer(const Duration(milliseconds: 250), () {
+      unawaited(_savePage(next));
+    });
+  }
+
+  void _setPdfPageFromProgress(int page) {
+    _goToPdfPage(page, openAtBottom: false);
+  }
+
+  void _deactivatePdfProgressScrub() {
+    if (_pdfProgressScrubActive) {
+      setState(() => _pdfProgressScrubActive = false);
+    }
+  }
+
   double _offsetForPage(int page, double viewportWidth) {
     final safe = page.clamp(1, _pages).toInt();
     var offset = 12.0;
@@ -4180,38 +4321,21 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                                   displayWidth: displayWidth,
                                   displayHeight: displayHeight,
                                   devicePixelRatio: dpr,
-                                  onPrevious: _page <= 1
-                                      ? null
-                                      : () {
-                                          setState(() => _page--);
-                                          unawaited(_savePage(_page));
-                                        },
-                                  onNext: _page >= _pages
-                                      ? null
-                                      : () {
-                                          setState(() => _page++);
-                                          unawaited(_savePage(_page));
-                                        },
+                                  openAtBottom: _openPdfPageAtBottom,
+                                  onTapContent: _deactivatePdfProgressScrub,
+                                  onPrevious: _page <= 1 ? null : () => _goToPdfPage(_page - 1, openAtBottom: true),
+                                  onNext: _page >= _pages ? null : () => _goToPdfPage(_page + 1, openAtBottom: false),
                                 );
                               },
                             ),
                     ),
                     if (!_fullScreen)
-                      SafeArea(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: LinearProgressIndicator(
-                                  value: _pages <= 1 ? 0 : ((_page - 1) / (_pages - 1)).clamp(0.0, 1.0).toDouble(),
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Text(_pages > 0 ? '$_page / $_pages' : '$_page', style: const TextStyle(color: Color(0xFF2A2F4A))),
-                            ],
-                          ),
-                        ),
+                      _PagedReaderProgressBar(
+                        page: _page,
+                        pages: _pages,
+                        active: _pdfProgressScrubActive,
+                        onActivate: () => setState(() => _pdfProgressScrubActive = true),
+                        onPageSelected: _setPdfPageFromProgress,
                       ),
                   ],
                 ),
@@ -4220,7 +4344,8 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
 }
 
 
-class _LargePdfSinglePageReader extends StatelessWidget {
+
+class _LargePdfSinglePageReader extends StatefulWidget {
   const _LargePdfSinglePageReader({
     required this.document,
     required this.page,
@@ -4228,6 +4353,8 @@ class _LargePdfSinglePageReader extends StatelessWidget {
     required this.displayWidth,
     required this.displayHeight,
     required this.devicePixelRatio,
+    required this.openAtBottom,
+    required this.onTapContent,
     required this.onPrevious,
     required this.onNext,
   });
@@ -4238,63 +4365,177 @@ class _LargePdfSinglePageReader extends StatelessWidget {
   final double displayWidth;
   final double displayHeight;
   final double devicePixelRatio;
+  final bool openAtBottom;
+  final VoidCallback onTapContent;
   final VoidCallback? onPrevious;
   final VoidCallback? onNext;
 
   @override
+  State<_LargePdfSinglePageReader> createState() => _LargePdfSinglePageReaderState();
+}
+
+class _LargePdfSinglePageReaderState extends State<_LargePdfSinglePageReader> {
+  final _controller = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    _positionPageAfterFrame();
+  }
+
+  @override
+  void didUpdateWidget(covariant _LargePdfSinglePageReader oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.page != widget.page || oldWidget.openAtBottom != widget.openAtBottom) {
+      _positionPageAfterFrame();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _positionPageAfterFrame() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_controller.hasClients) return;
+      final target = widget.openAtBottom ? _controller.position.maxScrollExtent : 0.0;
+      _controller.jumpTo(target.clamp(0.0, _controller.position.maxScrollExtent));
+    });
+  }
+
+  void _onHorizontalDragEnd(DragEndDetails details) {
+    final velocity = details.primaryVelocity ?? 0;
+    if (velocity < -240) {
+      widget.onNext?.call();
+    } else if (velocity > 240) {
+      widget.onPrevious?.call();
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return ColoredBox(
-      color: const Color(0xFFF3E7CF),
-      child: Column(
-        children: [
-          Expanded(
-            child: Scrollbar(
-              thumbVisibility: true,
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(0, 8, 0, 16),
-                child: Center(
-                  child: _PdfFitWidthPage(
-                    key: ValueKey('large-pdf-page-$page'),
-                    document: document,
-                    pageNumber: page,
-                    displayWidth: displayWidth,
-                    displayHeight: displayHeight,
-                    devicePixelRatio: devicePixelRatio,
-                  ),
-                ),
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: widget.onTapContent,
+      onHorizontalDragEnd: _onHorizontalDragEnd,
+      child: ColoredBox(
+        color: const Color(0xFFF3E7CF),
+        child: Scrollbar(
+          controller: _controller,
+          thumbVisibility: true,
+          child: SingleChildScrollView(
+            controller: _controller,
+            padding: const EdgeInsets.fromLTRB(0, 8, 0, 16),
+            child: Center(
+              child: _PdfFitWidthPage(
+                key: ValueKey('pdf-page-${widget.page}-${widget.displayWidth.round()}-${widget.devicePixelRatio.toStringAsFixed(2)}'),
+                document: widget.document,
+                pageNumber: widget.page,
+                displayWidth: widget.displayWidth,
+                displayHeight: widget.displayHeight,
+                devicePixelRatio: widget.devicePixelRatio,
               ),
             ),
           ),
-          SafeArea(
-            top: false,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(18, 8, 18, 12),
-              child: Row(
-                children: [
-                  FilledButton.tonalIcon(
-                    onPressed: onPrevious,
-                    icon: const Icon(Icons.chevron_left_rounded),
-                    label: const Text('Назад'),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      '$page / $pages',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(fontWeight: FontWeight.w700, color: Color(0xFF2A2F4A)),
+        ),
+      ),
+    );
+  }
+}
+
+class _PagedReaderProgressBar extends StatelessWidget {
+  const _PagedReaderProgressBar({
+    required this.page,
+    required this.pages,
+    required this.active,
+    required this.onActivate,
+    required this.onPageSelected,
+  });
+
+  final int page;
+  final int pages;
+  final bool active;
+  final VoidCallback onActivate;
+  final ValueChanged<int> onPageSelected;
+
+  void _handlePosition(BuildContext context, Offset localPosition, double width) {
+    if (pages <= 1 || width <= 0) return;
+    final fraction = (localPosition.dx / width).clamp(0.0, 1.0).toDouble();
+    final next = (1 + (fraction * (pages - 1)).round()).clamp(1, pages).toInt();
+    onPageSelected(next);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = pages <= 1 ? 0.0 : ((page - 1) / (pages - 1)).clamp(0.0, 1.0).toDouble();
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            LayoutBuilder(
+              builder: (context, constraints) {
+                return GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTapDown: (details) {
+                    if (!active) {
+                      onActivate();
+                      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                        const SnackBar(
+                          content: Text('Шкала перехода активна: проведите по ней, чтобы перейти к нужной странице.'),
+                          duration: Duration(milliseconds: 1400),
+                        ),
+                      );
+                      return;
+                    }
+                    _handlePosition(context, details.localPosition, constraints.maxWidth);
+                  },
+                  onHorizontalDragStart: (_) {
+                    if (!active) onActivate();
+                  },
+                  onHorizontalDragUpdate: active
+                      ? (details) => _handlePosition(context, details.localPosition, constraints.maxWidth)
+                      : null,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 160),
+                    height: active ? 24 : 16,
+                    padding: EdgeInsets.symmetric(vertical: active ? 8 : 6),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(999),
+                      child: LinearProgressIndicator(
+                        value: progress,
+                        minHeight: active ? 8 : 4,
+                        backgroundColor: active ? const Color(0xFFD8C699) : const Color(0xFFE4D8BD),
+                      ),
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  FilledButton.tonalIcon(
-                    onPressed: onNext,
-                    icon: const Icon(Icons.chevron_right_rounded),
-                    label: const Text('Вперёд'),
-                  ),
-                ],
-              ),
+                );
+              },
             ),
-          ),
-        ],
+            const SizedBox(height: 2),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    active ? 'Проведите по шкале для быстрого перехода' : 'Смахните ←/→ для листания',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11, color: const Color(0xFF2A2F4A).withOpacity(0.7)),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  pages > 0 ? '$page / $pages' : '$page',
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF2A2F4A)),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
