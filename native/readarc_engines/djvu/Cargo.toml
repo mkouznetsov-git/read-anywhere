@@ -11,4 +11,4 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 # MIT-licensed pure-Rust decoder from the public DjVu v3 specification.
 # This avoids GPL DjVuLibre and all external command-line tools.
-djvu-rs = "0.9"
+djvu-rs = "=0.17.0"

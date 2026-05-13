@@ -32,11 +32,13 @@ build_android() {
     return 2
   fi
   mkdir -p "$DIST_ROOT/android"
-  cargo ndk \
-    --manifest-path "$ENGINE_MANIFEST" \
-    -t arm64-v8a \
-    -o "$DIST_ROOT/android" \
-    build --release
+  (
+    cd "$ROOT_DIR/native/readarc_engines/djvu"
+    cargo ndk \
+      -t arm64-v8a \
+      -o "$DIST_ROOT/android" \
+      build --release
+  )
   if [[ ! -f "$DIST_ROOT/android/arm64-v8a/libreadarc_djvu_engine.so" ]]; then
     echo "Android arm64 DJVU engine was not produced." >&2
     return 1
