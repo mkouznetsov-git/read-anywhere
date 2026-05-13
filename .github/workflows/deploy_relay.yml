@@ -1,0 +1,79 @@
+name: Deploy relay
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to deploy. Leave empty for current branch."
+        required: false
+        default: ""
+
+jobs:
+  deploy-relay:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout selected ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Build relay deployment archive
+        run: |
+          set -Eeuo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y zip
+
+          rm -f /tmp/readarc-relay-deploy.zip
+
+          zip -r /tmp/readarc-relay-deploy.zip . \
+            -x ".git/*" \
+            -x ".github/*" \
+            -x "apps/flutter_client/build/*" \
+            -x "apps/flutter_client/.dart_tool/*" \
+            -x "**/.DS_Store" \
+            -x "**/__pycache__/*"
+
+          ls -lh /tmp/readarc-relay-deploy.zip
+
+      - name: Prepare SSH
+        run: |
+          set -Eeuo pipefail
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          cat > ~/.ssh/readarc_relay_deploy <<'KEY'
+          ${{ secrets.RELAY_SSH_KEY }}
+          KEY
+
+          sed -i 's/^          //' ~/.ssh/readarc_relay_deploy
+          chmod 600 ~/.ssh/readarc_relay_deploy
+
+          ssh-keyscan -H "${{ secrets.RELAY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Upload archive to relay server
+        run: |
+          set -Eeuo pipefail
+
+          scp \
+            -i ~/.ssh/readarc_relay_deploy \
+            /tmp/readarc-relay-deploy.zip \
+            "${{ secrets.RELAY_USER }}@${{ secrets.RELAY_HOST }}:/tmp/readarc-update.zip"
+
+      - name: Deploy relay on server
+        run: |
+          set -Eeuo pipefail
+
+          ssh \
+            -i ~/.ssh/readarc_relay_deploy \
+            "${{ secrets.RELAY_USER }}@${{ secrets.RELAY_HOST }}" \
+            "readarc-update-relay /tmp/readarc-update.zip"
+
+      - name: Verify public health
+        run: |
+          set -Eeuo pipefail
+
+          curl -fsS https://relay.readarc.ru/health
+          echo
