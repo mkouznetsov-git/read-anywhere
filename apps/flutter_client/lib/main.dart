@@ -272,7 +272,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Удалить файл с этого устройства?'),
+        title: const Text('Удалить с устройства?'),
         content: Text(
           'Книга «${book.title}» останется в библиотеке аккаунта, но файл будет удалён с этого устройства. Позже её можно будет скачать снова с другого устройства.',
         ),
@@ -498,106 +498,111 @@ class _BookCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final progressValue = (book.progressPercent.clamp(0, 100) / 100).toDouble();
-    final progressText = book.progressPercent.clamp(0, 100).toStringAsFixed(1);
     final transfer = this.transfer;
     final isDownloading = transfer?.active == true;
     final hasDownloadError = transfer?.hasError == true;
     final showTransfer = transfer != null && !book.isDownloaded && (isDownloading || hasDownloadError);
+    final format = book.format.toUpperCase();
+    final sizeText = _formatUiBytes(book.sizeBytes);
+    final progressText = '${book.progressPercent.clamp(0, 100).toStringAsFixed(0)}%';
+
     return Card(
-      child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-        title: Text(book.title, maxLines: 2, overflow: TextOverflow.ellipsis),
-        subtitle: Padding(
-          padding: const EdgeInsets.only(top: 8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: book.isDownloaded ? onOpen : onDownload,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 10, 10),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                book.format.toUpperCase(),
-                style: Theme.of(context).textTheme.bodySmall,
+                book.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      color: const Color(0xFF2A2F4A),
+                      fontWeight: FontWeight.w700,
+                    ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 10),
               Row(
                 children: [
+                  _LibraryMetaChip(label: format),
+                  const SizedBox(width: 8),
+                  _LibraryMetaChip(label: sizeText),
+                  const SizedBox(width: 10),
                   Expanded(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(999),
-                      child: LinearProgressIndicator(value: progressValue),
+                    child: Tooltip(
+                      message: 'Прочитано $progressText',
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(999),
+                        child: LinearProgressIndicator(value: progressValue, minHeight: 5),
+                      ),
                     ),
                   ),
                   const SizedBox(width: 10),
-                  SizedBox(
-                    width: 48,
-                    child: Text(
-                      '$progressText%',
-                      textAlign: TextAlign.right,
-                      style: Theme.of(context).textTheme.bodySmall,
+                  if (isDownloading)
+                    IconButton(
+                      tooltip: 'Отменить скачивание',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: onCancelDownload,
+                      icon: const Icon(Icons.cancel_outlined),
+                    )
+                  else
+                    TextButton.icon(
+                      onPressed: book.isDownloaded ? onOpen : onDownload,
+                      icon: Icon(book.isDownloaded ? Icons.menu_book_rounded : Icons.cloud_download_outlined, size: 18),
+                      label: Text(book.isDownloaded ? 'Читать' : 'Скачать'),
+                      style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
                     ),
+                  PopupMenuButton<_BookAction>(
+                    tooltip: 'Действия с книгой',
+                    onSelected: (action) {
+                      switch (action) {
+                        case _BookAction.removeLocalCopy:
+                          onRemoveLocalCopy?.call();
+                          break;
+                        case _BookAction.deleteFromLibrary:
+                          onDeleteFromLibrary();
+                          break;
+                      }
+                    },
+                    itemBuilder: (context) => [
+                      if (book.isDownloaded)
+                        const PopupMenuItem(value: _BookAction.removeLocalCopy, child: Text('Удалить с устройства')),
+                      const PopupMenuItem(value: _BookAction.deleteFromLibrary, child: Text('Удалить из библиотеки')),
+                    ],
                   ),
                 ],
               ),
               if (showTransfer && transfer != null) ...[
-                const SizedBox(height: 10),
+                const SizedBox(height: 8),
                 ClipRRect(
                   borderRadius: BorderRadius.circular(999),
-                  child: LinearProgressIndicator(
-                    value: transfer.progressPercent.clamp(0, 100) / 100,
-                  ),
+                  child: LinearProgressIndicator(value: transfer.progressPercent.clamp(0, 100) / 100, minHeight: 4),
                 ),
                 const SizedBox(height: 4),
-                Text(
-                  hasDownloadError
-                      ? (transfer.error ?? 'Ошибка скачивания')
-                      : transfer.statusText,
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
+                Text(hasDownloadError ? (transfer.error ?? 'Ошибка скачивания') : transfer.statusText, style: Theme.of(context).textTheme.bodySmall),
               ],
             ],
           ),
         ),
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (isDownloading)
-              IconButton(
-                tooltip: 'Отменить скачивание',
-                onPressed: onCancelDownload,
-                icon: const Icon(Icons.cancel_outlined),
-              )
-            else
-              IconButton(
-                tooltip: book.isDownloaded ? 'Читать' : 'Скачать на это устройство',
-                onPressed: book.isDownloaded ? onOpen : onDownload,
-                icon: Icon(book.isDownloaded
-                    ? Icons.menu_book_rounded
-                    : Icons.cloud_download_outlined),
-              ),
-            PopupMenuButton<_BookAction>(
-              tooltip: 'Действия с книгой',
-              onSelected: (action) {
-                switch (action) {
-                  case _BookAction.removeLocalCopy:
-                    onRemoveLocalCopy?.call();
-                    break;
-                  case _BookAction.deleteFromLibrary:
-                    onDeleteFromLibrary();
-                    break;
-                }
-              },
-              itemBuilder: (context) => [
-                if (book.isDownloaded)
-                  const PopupMenuItem(
-                    value: _BookAction.removeLocalCopy,
-                    child: Text('Удалить файл с этого устройства'),
-                  ),
-                const PopupMenuItem(
-                  value: _BookAction.deleteFromLibrary,
-                  child: Text('Удалить из библиотеки'),
-                ),
-              ],
-            ),
-          ],
-        ),
+      ),
+    );
+  }
+}
+
+class _LibraryMetaChip extends StatelessWidget {
+  const _LibraryMetaChip({required this.label});
+  final String label;
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(color: const Color(0xFFEFE2C8), borderRadius: BorderRadius.circular(999)),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        child: Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFF2A2F4A))),
       ),
     );
   }
@@ -694,6 +699,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
   BookRecord? _runtimeBook;
   _TextAnchorLocator? _lastKnownLocator;
   bool _fullScreen = false;
+  bool _textProgressScrubActive = false;
 
   BookRecord get _book => _runtimeBook ?? widget.book;
 
@@ -958,6 +964,25 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
     });
   }
 
+  void _setTextProgressFromFraction(double fraction) {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final target = (position.maxScrollExtent * fraction.clamp(0.0, 1.0)).clamp(position.minScrollExtent, position.maxScrollExtent).toDouble();
+    _scrollController.jumpTo(target);
+    final locator = _currentLocator();
+    if (locator != null) {
+      _lastKnownLocator = locator;
+      _lastProgress = locator.progressPercent;
+      _saveDebounce?.cancel();
+      _saveDebounce = Timer(const Duration(milliseconds: 450), () => unawaited(_saveProgress(locator)));
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _deactivateTextProgressScrub() {
+    if (_textProgressScrubActive) setState(() => _textProgressScrubActive = false);
+  }
+
   String get _textLocatorType => switch (widget.sourceKind) {
         _TextSourceKind.fb2 => 'fb2-line-anchor-v1',
         _TextSourceKind.epub => 'epub-line-anchor-v1',
@@ -1095,32 +1120,36 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
                           if (currentLines == null) {
                             return const Center(child: CircularProgressIndicator());
                           }
-                          return SelectionArea(
-                            child: Scrollbar(
-                              controller: _scrollController,
-                              thumbVisibility: true,
-                              interactive: true,
-                              child: ListView.builder(
+                          return GestureDetector(
+                            behavior: HitTestBehavior.translucent,
+                            onTap: _deactivateTextProgressScrub,
+                            child: SelectionArea(
+                              child: Scrollbar(
                                 controller: _scrollController,
-                                padding: const EdgeInsets.fromLTRB(
-                                  _horizontalReaderPadding,
-                                  _topPadding,
-                                  _horizontalReaderPadding,
-                                  _bottomPadding,
+                                thumbVisibility: true,
+                                interactive: true,
+                                child: ListView.builder(
+                                  controller: _scrollController,
+                                  padding: const EdgeInsets.fromLTRB(
+                                    _horizontalReaderPadding,
+                                    _topPadding,
+                                    _horizontalReaderPadding,
+                                    _bottomPadding,
+                                  ),
+                                  itemExtent: _lineExtent,
+                                  cacheExtent: _lineExtent * 60,
+                                  itemCount: currentLines.length,
+                                  itemBuilder: (context, index) {
+                                    final line = currentLines[index];
+                                    return Text(
+                                      line.text,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.clip,
+                                      softWrap: false,
+                                      style: _readerTextStyle,
+                                    );
+                                  },
                                 ),
-                                itemExtent: _lineExtent,
-                                cacheExtent: _lineExtent * 60,
-                                itemCount: currentLines.length,
-                                itemBuilder: (context, index) {
-                                  final line = currentLines[index];
-                                  return Text(
-                                    line.text,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.clip,
-                                    softWrap: false,
-                                    style: _readerTextStyle,
-                                  );
-                                },
                               ),
                             ),
                           );
@@ -1128,19 +1157,12 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
                       ),
                     ),
                     if (!_fullScreen)
-                      SafeArea(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: LinearProgressIndicator(value: _lastProgress.clamp(0, 100) / 100),
-                              ),
-                              const SizedBox(width: 12),
-                              Text('${_lastProgress.clamp(0, 100).toStringAsFixed(1)}%', style: const TextStyle(color: Color(0xFF2A2F4A))),
-                            ],
-                          ),
-                        ),
+                      _ContinuousReaderProgressBar(
+                        progress: (_lastProgress.clamp(0, 100) / 100).toDouble(),
+                        label: '${_lastProgress.clamp(0, 100).toStringAsFixed(1)}%',
+                        active: _textProgressScrubActive,
+                        onActivate: () => setState(() => _textProgressScrubActive = true),
+                        onFractionSelected: _setTextProgressFromFraction,
                       ),
                   ],
                 ),
@@ -1168,6 +1190,7 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
   _Fb2Document? _document;
   String? _loadError;
   bool _fullScreen = false;
+  bool _docxProgressScrubActive = false;
   bool _restoring = false;
   Timer? _saveDebounce;
   Timer? _redrawThrottle;
@@ -1263,6 +1286,22 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
     final position = _scrollController.position;
     if (position.maxScrollExtent <= 0) return 0;
     return ((position.pixels / position.maxScrollExtent) * 100).clamp(0.0, 100.0).toDouble();
+  }
+
+  void _setDocxProgressFromFraction(double fraction) {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final target = (position.maxScrollExtent * fraction.clamp(0.0, 1.0)).clamp(position.minScrollExtent, position.maxScrollExtent).toDouble();
+    _scrollController.jumpTo(target);
+    final progress = _currentProgress();
+    _progress = progress;
+    _saveDebounce?.cancel();
+    _saveDebounce = Timer(const Duration(milliseconds: 450), () => unawaited(_saveProgress(progress)));
+    if (mounted) setState(() {});
+  }
+
+  void _deactivateDocxProgressScrub() {
+    if (_docxProgressScrubActive) setState(() => _docxProgressScrubActive = false);
   }
 
   void _onScroll() {
@@ -1365,12 +1404,15 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
                     Expanded(
                       child: ColoredBox(
                         color: const Color(0xFFE7D7B9),
-                        child: SelectionArea(
-                          child: Scrollbar(
-                            controller: _scrollController,
-                            thumbVisibility: true,
-                            interactive: !Platform.isAndroid && !Platform.isIOS,
-                            child: ListView(
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.translucent,
+                          onTap: _deactivateDocxProgressScrub,
+                          child: SelectionArea(
+                            child: Scrollbar(
+                              controller: _scrollController,
+                              thumbVisibility: true,
+                              interactive: !Platform.isAndroid && !Platform.isIOS,
+                              child: ListView(
                               controller: _scrollController,
                               padding: const EdgeInsets.fromLTRB(14, 18, 14, 32),
                               cacheExtent: 3600,
@@ -1406,24 +1448,20 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
                                     ),
                                   ),
                                 ),
-                              ],
+                                ],
+                              ),
                             ),
                           ),
                         ),
                       ),
                     ),
                     if (!_fullScreen)
-                      SafeArea(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
-                          child: Row(
-                            children: [
-                              Expanded(child: LinearProgressIndicator(value: _progress.clamp(0, 100) / 100)),
-                              const SizedBox(width: 12),
-                              Text('${_progress.clamp(0, 100).toStringAsFixed(1)}%', style: const TextStyle(color: Color(0xFF2A2F4A))),
-                            ],
-                          ),
-                        ),
+                      _ContinuousReaderProgressBar(
+                        progress: (_progress.clamp(0, 100) / 100).toDouble(),
+                        label: '${_progress.clamp(0, 100).toStringAsFixed(1)}%',
+                        active: _docxProgressScrubActive,
+                        onActivate: () => setState(() => _docxProgressScrubActive = true),
+                        onFractionSelected: _setDocxProgressFromFraction,
                       ),
                   ],
                 ),
@@ -1691,6 +1729,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
   bool _restoringPosition = false;
   bool _didInitialRestore = false;
   bool _fullScreen = false;
+  bool _richProgressScrubActive = false;
 
   BookRecord get _book => _runtimeBook ?? widget.book;
 
@@ -1982,6 +2021,26 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     });
   }
 
+  void _setRichProgressFromFraction(double fraction) {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final target = (position.maxScrollExtent * fraction.clamp(0.0, 1.0)).clamp(position.minScrollExtent, position.maxScrollExtent).toDouble();
+    _scrollController.jumpTo(target);
+    final locator = _currentLocator();
+    if (locator != null) {
+      _lastKnownLocator = locator;
+      _pendingUnitIndex = locator.unitIndex;
+      _progress = locator.progressPercent;
+      _saveDebounce?.cancel();
+      _saveDebounce = Timer(const Duration(milliseconds: 450), () => unawaited(_saveProgress(locator)));
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _deactivateRichProgressScrub() {
+    if (_richProgressScrubActive) setState(() => _richProgressScrubActive = false);
+  }
+
   Future<void> _saveProgress(_Fb2UnitLocator locator) async {
     _lastKnownLocator = locator;
     _pendingUnitIndex = locator.unitIndex;
@@ -2192,27 +2251,26 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
                               );
                             },
                           );
-                          return Scrollbar(
-                            controller: _scrollController,
-                            thumbVisibility: true,
-                            interactive: !Platform.isAndroid && !Platform.isIOS,
-                            child: _selectionAreaIsCheapForRichReader() ? SelectionArea(child: readerList) : readerList,
+                          return GestureDetector(
+                            behavior: HitTestBehavior.translucent,
+                            onTap: _deactivateRichProgressScrub,
+                            child: Scrollbar(
+                              controller: _scrollController,
+                              thumbVisibility: true,
+                              interactive: !Platform.isAndroid && !Platform.isIOS,
+                              child: _selectionAreaIsCheapForRichReader() ? SelectionArea(child: readerList) : readerList,
+                            ),
                           );
                         },
                       ),
                     ),
                     if (!_fullScreen)
-                      SafeArea(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
-                          child: Row(
-                            children: [
-                              Expanded(child: LinearProgressIndicator(value: _progress.clamp(0, 100) / 100)),
-                              const SizedBox(width: 12),
-                              Text('${_progress.clamp(0, 100).toStringAsFixed(1)}%', style: const TextStyle(color: Color(0xFF2A2F4A))),
-                            ],
-                          ),
-                        ),
+                      _ContinuousReaderProgressBar(
+                        progress: (_progress.clamp(0, 100) / 100).toDouble(),
+                        label: '${_progress.clamp(0, 100).toStringAsFixed(1)}%',
+                        active: _richProgressScrubActive,
+                        onActivate: () => setState(() => _richProgressScrubActive = true),
+                        onFractionSelected: _setRichProgressFromFraction,
                       ),
                   ],
                 ),
@@ -3438,7 +3496,7 @@ class _DjvuReaderScreenState extends State<_DjvuReaderScreen> {
     if (text.isEmpty) return;
     await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Текстовый слой DJVU скопирован')));
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Текст DJVU скопирован')));
   }
 
   void _goToDjvuPage(int page, {required bool openAtBottom}) {
@@ -3477,7 +3535,7 @@ class _DjvuReaderScreenState extends State<_DjvuReaderScreen> {
               title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
               actions: [
                 IconButton(
-                  tooltip: 'Скопировать текстовый слой DJVU',
+                  tooltip: 'Скопировать текст DJVU',
                   onPressed: (_textLayer ?? '').trim().isEmpty ? null : _copyDjvuTextLayer,
                   icon: const Icon(Icons.copy_all_rounded),
                 ),
@@ -3494,23 +3552,26 @@ class _DjvuReaderScreenState extends State<_DjvuReaderScreen> {
               ],
             ),
       floatingActionButton: _fullScreen
-          ? Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                FloatingActionButton.small(
-                  heroTag: 'djvu-bookmark-${widget.book.id}',
-                  tooltip: 'Добавить закладку',
-                  onPressed: source == null ? null : _addBookmark,
-                  child: const Icon(Icons.bookmark_add_outlined),
-                ),
-                const SizedBox(height: 8),
-                FloatingActionButton.small(
-                  heroTag: 'djvu-exit-fullscreen-${widget.book.id}',
-                  tooltip: 'Выйти из полного экрана',
-                  onPressed: () => setState(() => _fullScreen = false),
-                  child: const Icon(Icons.fullscreen_exit_rounded),
-                ),
-              ],
+          ? Padding(
+              padding: EdgeInsets.only(bottom: _isAndroidReaderPlatform ? 70 : 0),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  FloatingActionButton.small(
+                    heroTag: 'djvu-bookmark-${widget.book.id}',
+                    tooltip: 'Добавить закладку',
+                    onPressed: source == null ? null : _addBookmark,
+                    child: const Icon(Icons.bookmark_add_outlined),
+                  ),
+                  const SizedBox(height: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'djvu-exit-fullscreen-${widget.book.id}',
+                    tooltip: 'Выйти из полного экрана',
+                    onPressed: () => setState(() => _fullScreen = false),
+                    child: const Icon(Icons.fullscreen_exit_rounded),
+                  ),
+                ],
+              ),
             )
           : null,
       body: _error != null
@@ -3535,7 +3596,7 @@ class _DjvuReaderScreenState extends State<_DjvuReaderScreen> {
                           final displayWidth = constraints.maxWidth.clamp(240.0, 1800.0).toDouble();
                           final displayHeight = _pageHeight(displayWidth);
                           final dpr = MediaQuery.of(context).devicePixelRatio
-                              .clamp(Platform.isAndroid ? 2.25 : 1.75, Platform.isAndroid ? 3.25 : 2.5)
+                              .clamp(Platform.isAndroid ? 2.75 : 2.0, Platform.isAndroid ? 4.0 : 3.0)
                               .toDouble();
                           return _DjvuSinglePageReader(
                             sourceFile: source,
@@ -3792,7 +3853,7 @@ Future<_DjvuArtifact> _prepareDjvuArtifact({
   final pagesDir = Directory('${root.path}${Platform.pathSeparator}pages');
   if (!await pagesDir.exists()) await pagesDir.create(recursive: true);
   final manifestFile = await storage.processedArtifactManifestFile(book.id);
-  const renderProfile = 'paged-hidpi-v3';
+  const renderProfile = 'paged-hidpi-v4';
 
   // First try an existing processed artifact. This lets Android/opened devices
   // use a prepared DJVU cache once artifact sync is enabled, without needing a
@@ -3912,9 +3973,9 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
     // DJVU pages often contain scanned text; render above physical DPR and
     // downscale with high filtering. This keeps Android text crisp while the
     // paged viewer limits memory to one visible page plus a small cache.
-    final qualityScale = Platform.isAndroid ? 2.35 : 1.75;
-    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio * qualityScale).round().clamp(1400, Platform.isAndroid ? 3600 : 3200).toInt();
-    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio * qualityScale).round().clamp(1800, Platform.isAndroid ? 5400 : 4600).toInt();
+    final qualityScale = Platform.isAndroid ? 2.75 : 2.05;
+    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio * qualityScale).round().clamp(1600, Platform.isAndroid ? 4200 : 3600).toInt();
+    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio * qualityScale).round().clamp(2200, Platform.isAndroid ? 6200 : 5200).toInt();
     final key = '${widget.sourceFile.path}:${widget.pageNumber}:$pixelWidth:$pixelHeight';
     final existing = _renderJobs[key];
     if (existing != null) return existing;
@@ -4050,7 +4111,6 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
   Timer? _scrollRedrawThrottle;
   bool _textLayerLoading = false;
   bool _fullScreen = false;
-  bool _showTextLayer = false;
   bool _pdfProgressScrubActive = false;
   bool _openPdfPageAtBottom = false;
   bool _restoringScroll = false;
@@ -4225,7 +4285,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
     await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Текстовый слой PDF скопирован')),
+      const SnackBar(content: Text('Текст PDF скопирован')),
     );
   }
 
@@ -4307,11 +4367,6 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
               title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
               actions: [
                 IconButton(
-                  tooltip: _showTextLayer ? 'Показать PDF-страницы' : 'Показать текстовый слой',
-                  onPressed: _hasPdfTextLayer ? () => setState(() => _showTextLayer = !_showTextLayer) : null,
-                  icon: Icon(_showTextLayer ? Icons.picture_as_pdf_outlined : Icons.text_fields_rounded),
-                ),
-                IconButton(
                   tooltip: 'Скопировать текст PDF',
                   onPressed: _hasPdfTextLayer ? _copyPdfTextLayer : null,
                   icon: const Icon(Icons.copy_all_rounded),
@@ -4329,30 +4384,33 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
               ],
             ),
       floatingActionButton: _fullScreen
-          ? Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                FloatingActionButton.small(
-                  heroTag: 'pdf-text-${widget.book.id}',
-                  tooltip: _showTextLayer ? 'Показать PDF-страницы' : 'Показать текстовый слой',
-                  onPressed: _hasPdfTextLayer ? () => setState(() => _showTextLayer = !_showTextLayer) : null,
-                  child: Icon(_showTextLayer ? Icons.picture_as_pdf_outlined : Icons.text_fields_rounded),
-                ),
-                const SizedBox(height: 8),
-                FloatingActionButton.small(
-                  heroTag: 'pdf-bookmark-${widget.book.id}',
-                  tooltip: 'Добавить закладку',
-                  onPressed: document != null ? _addBookmark : null,
-                  child: const Icon(Icons.bookmark_add_outlined),
-                ),
-                const SizedBox(height: 8),
-                FloatingActionButton.small(
-                  heroTag: 'pdf-exit-fullscreen-${widget.book.id}',
-                  tooltip: 'Выйти из полного экрана',
-                  onPressed: () => setState(() => _fullScreen = false),
-                  child: const Icon(Icons.fullscreen_exit_rounded),
-                ),
-              ],
+          ? Padding(
+              padding: EdgeInsets.only(bottom: _isAndroidReaderPlatform ? 70 : 0),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  FloatingActionButton.small(
+                    heroTag: 'pdf-copy-${widget.book.id}',
+                    tooltip: 'Скопировать текст PDF',
+                    onPressed: _hasPdfTextLayer ? _copyPdfTextLayer : null,
+                    child: const Icon(Icons.copy_all_rounded),
+                  ),
+                  const SizedBox(height: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'pdf-bookmark-${widget.book.id}',
+                    tooltip: 'Добавить закладку',
+                    onPressed: document != null ? _addBookmark : null,
+                    child: const Icon(Icons.bookmark_add_outlined),
+                  ),
+                  const SizedBox(height: 8),
+                  FloatingActionButton.small(
+                    heroTag: 'pdf-exit-fullscreen-${widget.book.id}',
+                    tooltip: 'Выйти из полного экрана',
+                    onPressed: () => setState(() => _fullScreen = false),
+                    child: const Icon(Icons.fullscreen_exit_rounded),
+                  ),
+                ],
+              ),
             )
           : null,
       body: _loadError != null
@@ -4367,9 +4425,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
               : Column(
                   children: [
                     Expanded(
-                      child: _showTextLayer && _hasPdfTextLayer
-                          ? _PdfTextLayerView(text: _textLayer!, onCopyAll: _copyPdfTextLayer)
-                          : LayoutBuilder(
+                      child: LayoutBuilder(
                               builder: (context, constraints) {
                                 _lastViewportWidth = constraints.maxWidth;
                                 final dpr = MediaQuery.of(context).devicePixelRatio
@@ -4569,6 +4625,93 @@ class _LargePdfSinglePageReaderState extends State<_LargePdfSinglePageReader> {
   }
 }
 
+class _ContinuousReaderProgressBar extends StatefulWidget {
+  const _ContinuousReaderProgressBar({
+    required this.progress,
+    required this.label,
+    required this.active,
+    required this.onActivate,
+    required this.onFractionSelected,
+  });
+
+  final double progress;
+  final String label;
+  final bool active;
+  final VoidCallback onActivate;
+  final ValueChanged<double> onFractionSelected;
+
+  @override
+  State<_ContinuousReaderProgressBar> createState() => _ContinuousReaderProgressBarState();
+}
+
+class _ContinuousReaderProgressBarState extends State<_ContinuousReaderProgressBar> {
+  bool _hover = false;
+
+  bool get _desktopHoverMode => _isDesktopReaderPlatform;
+  bool get _interactive => widget.active || (_desktopHoverMode && _hover);
+
+  void _handlePosition(Offset localPosition, double width) {
+    if (width <= 0) return;
+    widget.onFractionSelected((localPosition.dx / width).clamp(0.0, 1.0).toDouble());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final active = _interactive;
+    const indigo = Color(0xFF2A2F4A);
+    const gold = Color(0xFFC6A14A);
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 2, 14, 5),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            MouseRegion(
+              onEnter: (_) { if (_desktopHoverMode) setState(() => _hover = true); },
+              onExit: (_) { if (_desktopHoverMode) setState(() => _hover = false); },
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  return GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTapDown: (details) {
+                      if (_desktopHoverMode) { _handlePosition(details.localPosition, constraints.maxWidth); return; }
+                      if (!widget.active) { widget.onActivate(); return; }
+                      _handlePosition(details.localPosition, constraints.maxWidth);
+                    },
+                    onHorizontalDragStart: (_) { if (!_desktopHoverMode && !widget.active) widget.onActivate(); },
+                    onHorizontalDragUpdate: (details) {
+                      if (_desktopHoverMode || widget.active) _handlePosition(details.localPosition, constraints.maxWidth);
+                    },
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 130),
+                      height: active ? 34 : 24,
+                      padding: EdgeInsets.symmetric(vertical: active ? 9 : 8),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(999),
+                        child: LinearProgressIndicator(
+                          value: widget.progress.clamp(0.0, 1.0).toDouble(),
+                          minHeight: active ? 12 : 5,
+                          valueColor: AlwaysStoppedAnimation<Color>(active ? indigo : gold),
+                          backgroundColor: active ? indigo.withOpacity(0.22) : const Color(0xFFE4D8BD),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Text(widget.label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: indigo)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _PagedReaderProgressBar extends StatefulWidget {
   const _PagedReaderProgressBar({
     required this.page,
@@ -4647,13 +4790,13 @@ class _PagedReaderProgressBarState extends State<_PagedReaderProgressBar> {
                     },
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 130),
-                      height: active ? 26 : 14,
-                      padding: EdgeInsets.symmetric(vertical: active ? 7 : 5),
+                      height: active ? 34 : 24,
+                      padding: EdgeInsets.symmetric(vertical: active ? 9 : 8),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(999),
                         child: LinearProgressIndicator(
                           value: progress,
-                          minHeight: active ? 10 : 4,
+                          minHeight: active ? 12 : 5,
                           valueColor: AlwaysStoppedAnimation<Color>(active ? indigo : gold),
                           backgroundColor: active ? indigo.withOpacity(0.22) : const Color(0xFFE4D8BD),
                         ),
@@ -4687,52 +4830,41 @@ class _PagedReaderAndroidNavButtons extends StatelessWidget {
   Widget build(BuildContext context) {
     if (!_isAndroidReaderPlatform) return const SizedBox.shrink();
     return SafeArea(
-      child: Row(
-        children: [
-          _AndroidPageTurnButton(
-            alignment: Alignment.centerLeft,
-            icon: Icons.chevron_left_rounded,
-            onPressed: previous,
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              _AndroidPageTurnButton(icon: Icons.chevron_left_rounded, onPressed: previous),
+              _AndroidPageTurnButton(icon: Icons.chevron_right_rounded, onPressed: next),
+            ],
           ),
-          const Spacer(),
-          _AndroidPageTurnButton(
-            alignment: Alignment.centerRight,
-            icon: Icons.chevron_right_rounded,
-            onPressed: next,
-          ),
-        ],
+        ),
       ),
     );
   }
 }
 
 class _AndroidPageTurnButton extends StatelessWidget {
-  const _AndroidPageTurnButton({required this.alignment, required this.icon, required this.onPressed});
+  const _AndroidPageTurnButton({required this.icon, required this.onPressed});
 
-  final Alignment alignment;
   final IconData icon;
   final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {
     final enabled = onPressed != null;
-    return Align(
-      alignment: alignment,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 6),
-        child: Material(
-          color: const Color(0xFF2A2F4A).withOpacity(enabled ? 0.18 : 0.06),
-          borderRadius: BorderRadius.circular(18),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(18),
-            onTap: onPressed,
-            child: SizedBox(
-              width: 38,
-              height: 58,
-              child: Icon(icon, size: 26, color: const Color(0xFF2A2F4A).withOpacity(enabled ? 0.78 : 0.22)),
-            ),
-          ),
-        ),
+    const indigo = Color(0xFF2A2F4A);
+    return Material(
+      color: indigo.withOpacity(enabled ? 0.14 : 0.05),
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: onPressed,
+        child: SizedBox(width: 54, height: 42, child: Icon(icon, size: 28, color: indigo.withOpacity(enabled ? 0.78 : 0.22))),
       ),
     );
   }

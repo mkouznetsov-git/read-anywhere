@@ -83,7 +83,7 @@ Uint8List? _renderDjvuPagePngInIsolate(Map<String, Object> args) {
       bytes: rgba.buffer,
       numChannels: 4,
     );
-    return Uint8List.fromList(img.encodePng(image, level: 4));
+    return Uint8List.fromList(img.encodePng(image, level: 1));
   } catch (error) {
     debugPrint('ReadArc embedded DJVU render failed: $error');
     return null;
