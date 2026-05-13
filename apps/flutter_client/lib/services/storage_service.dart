@@ -2,6 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:crypto/crypto.dart' as crypto;
+import 'package:cryptography/cryptography.dart';
+
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
@@ -45,13 +48,22 @@ class StorageService {
     if (!await file.exists()) {
       final deviceId = 'device-${_uuid.v4()}';
       final deviceName = _defaultDeviceName();
+      final deviceKeyPair = await _newDeviceSigningKeyPair();
       final manifest = LibraryManifest(
         accountId: 'account-${_uuid.v4()}',
         accountEncryptionKey: _newAccountEncryptionKey(),
+        deviceSigningPublicKey: deviceKeyPair.publicKey,
+        deviceSigningPrivateKey: deviceKeyPair.privateKey,
         deviceId: deviceId,
         deviceName: deviceName,
         trustedDevices: [
-          TrustedDeviceRecord(deviceId: deviceId, name: deviceName, role: 'owner'),
+          TrustedDeviceRecord(
+            deviceId: deviceId,
+            name: deviceName,
+            role: 'owner',
+            publicKey: deviceKeyPair.publicKey,
+            keyFingerprint: _fingerprint(deviceKeyPair.publicKey),
+          ),
         ],
       );
       await saveManifest(manifest);
@@ -62,7 +74,8 @@ class StorageService {
     final withKey = manifest.accountEncryptionKey.trim().isEmpty
         ? manifest.copyWith(accountEncryptionKey: _newAccountEncryptionKey())
         : manifest;
-    final migrated = _ensureCurrentDeviceTrusted(withKey);
+    final withDeviceKey = await _ensureDeviceSigningKeys(withKey);
+    final migrated = _ensureCurrentDeviceTrusted(withDeviceKey);
     if (!identical(migrated, manifest)) {
       await saveManifest(migrated);
     }
@@ -107,7 +120,12 @@ class StorageService {
     final manifest = await loadManifest();
     final devices = manifest.trustedDevices.map((device) {
       if (device.deviceId != manifest.deviceId) return device;
-      return device.copyWith(name: normalized, lastSeenAt: DateTime.now().toUtc());
+      return device.copyWith(
+        name: normalized,
+        publicKey: manifest.deviceSigningPublicKey,
+        keyFingerprint: _fingerprint(manifest.deviceSigningPublicKey),
+        lastSeenAt: DateTime.now().toUtc(),
+      );
     }).toList();
     final updated = manifest.copyWith(deviceName: normalized, trustedDevices: devices);
     await saveManifest(updated);
@@ -119,9 +137,11 @@ class StorageService {
     required String deviceId,
     required String name,
     String role = 'device',
+    String publicKey = '',
   }) async {
     final normalizedId = deviceId.trim();
     final normalizedName = name.trim().isEmpty ? 'Устройство' : name.trim();
+    final normalizedPublicKey = publicKey.trim();
     if (normalizedId.isEmpty) {
       throw ArgumentError('deviceId не может быть пустым');
     }
@@ -133,14 +153,18 @@ class StorageService {
       devices[index] = existing.copyWith(
         name: normalizedName,
         role: existing.role == 'owner' ? 'owner' : role,
+        publicKey: normalizedPublicKey.isEmpty ? existing.publicKey : normalizedPublicKey,
+        keyFingerprint: normalizedPublicKey.isEmpty ? existing.keyFingerprint : _fingerprint(normalizedPublicKey),
         lastSeenAt: DateTime.now().toUtc(),
-        clearDeletedAt: true,
+        clearRevocation: true,
       );
     } else {
       devices.add(TrustedDeviceRecord(
         deviceId: normalizedId,
         name: normalizedName,
         role: role,
+        publicKey: normalizedPublicKey,
+        keyFingerprint: _fingerprint(normalizedPublicKey),
       ));
     }
     final updated = manifest.copyWith(trustedDevices: devices);
@@ -153,6 +177,7 @@ class StorageService {
     required String accountEncryptionKey,
     required String ownerDeviceId,
     required String ownerDeviceName,
+    String ownerDevicePublicKey = '',
   }) async {
     final current = await loadManifest();
     await saveManifest(current.copyWith(
@@ -166,30 +191,39 @@ class StorageService {
       deviceId: ownerDeviceId,
       name: ownerDeviceName,
       role: 'owner',
+      publicKey: ownerDevicePublicKey,
     );
     return trustDevice(
       deviceId: withOwner.deviceId,
       name: withOwner.deviceName,
       role: 'device',
+      publicKey: withOwner.deviceSigningPublicKey,
     );
   }
 
 
 
-  Future<LibraryManifest> removeTrustedDevice(String deviceId) async {
+  Future<LibraryManifest> revokeTrustedDevice(String deviceId, {String reason = 'revoked_by_owner'}) async {
     final manifest = await loadManifest();
     if (deviceId == manifest.deviceId) {
-      throw ArgumentError('Нельзя удалить текущее устройство из доверенных');
+      throw ArgumentError('Нельзя отозвать доступ у текущего устройства');
     }
     final now = DateTime.now().toUtc();
     final devices = manifest.trustedDevices.map((device) {
       if (device.deviceId != deviceId) return device;
-      return device.copyWith(deletedAt: now, lastSeenAt: now);
+      return device.copyWith(
+        deletedAt: now,
+        lastSeenAt: now,
+        revokedByDeviceId: manifest.deviceId,
+        revokedReason: reason,
+      );
     }).toList();
     final updated = manifest.copyWith(trustedDevices: devices);
     await saveManifest(updated);
     return updated;
   }
+
+  Future<LibraryManifest> removeTrustedDevice(String deviceId) => revokeTrustedDevice(deviceId);
 
   Future<LibraryManifest> pruneDeletedTrustedDevices() async {
     final manifest = await loadManifest();
@@ -208,10 +242,13 @@ class StorageService {
     final now = DateTime.now().toUtc();
     final devices = manifest.trustedDevices.map((device) {
       if (device.deviceId != manifest.deviceId) return device;
+      if (device.isRevoked) return device;
       return device.copyWith(
         name: manifest.deviceName,
+        publicKey: manifest.deviceSigningPublicKey,
+        keyFingerprint: _fingerprint(manifest.deviceSigningPublicKey),
         lastSeenAt: now,
-        clearDeletedAt: true,
+        clearRevocation: true,
       );
     }).toList();
     final updated = manifest.copyWith(trustedDevices: devices);
@@ -387,6 +424,10 @@ class StorageService {
         devices[device.deviceId] = device;
         continue;
       }
+      if (existing.isRevoked != device.isRevoked) {
+        if (device.isRevoked) devices[device.deviceId] = device;
+        continue;
+      }
       final existingMarker = existing.deletedAt ?? existing.lastSeenAt;
       final deviceMarker = device.deletedAt ?? device.lastSeenAt;
       if (deviceMarker.isAfter(existingMarker)) devices[device.deviceId] = device;
@@ -420,11 +461,17 @@ class StorageService {
     final index = devices.indexWhere((d) => d.deviceId == manifest.deviceId);
     if (index >= 0) {
       final current = devices[index];
-      if (!current.isDeleted && current.name == manifest.deviceName) return manifest;
+      // If another trusted owner revoked this device, never silently restore it on
+      // startup. The UI can still show local library data, but sync must stop.
+      if (current.isRevoked) return manifest;
+      final currentKey = manifest.deviceSigningPublicKey;
+      if (current.name == manifest.deviceName && current.publicKey == currentKey) return manifest;
       devices[index] = current.copyWith(
         name: manifest.deviceName,
+        publicKey: currentKey,
+        keyFingerprint: _fingerprint(currentKey),
         lastSeenAt: DateTime.now().toUtc(),
-        clearDeletedAt: true,
+        clearRevocation: true,
       );
       return manifest.copyWith(trustedDevices: devices);
     }
@@ -435,11 +482,44 @@ class StorageService {
           deviceId: manifest.deviceId,
           name: manifest.deviceName,
           role: manifest.trustedDevices.isEmpty ? 'owner' : 'device',
+          publicKey: manifest.deviceSigningPublicKey,
+          keyFingerprint: _fingerprint(manifest.deviceSigningPublicKey),
         ),
       ],
     );
   }
 
+  Future<LibraryManifest> _ensureDeviceSigningKeys(LibraryManifest manifest) async {
+    if (manifest.deviceSigningPublicKey.trim().isNotEmpty &&
+        manifest.deviceSigningPrivateKey.trim().isNotEmpty) {
+      return manifest;
+    }
+    final keyPair = await _newDeviceSigningKeyPair();
+    return manifest.copyWith(
+      deviceSigningPublicKey: keyPair.publicKey,
+      deviceSigningPrivateKey: keyPair.privateKey,
+    );
+  }
+
+  Future<_DeviceSigningKeyPair> _newDeviceSigningKeyPair() async {
+    final algorithm = Ed25519();
+    final keyPair = await algorithm.newKeyPair();
+    final keyPairData = await keyPair.extract();
+    return _DeviceSigningKeyPair(
+      publicKey: _base64UrlNoPadding(keyPairData.publicKey.bytes),
+      privateKey: _base64UrlNoPadding(keyPairData.bytes),
+    );
+  }
+
+  String _fingerprint(String publicKey) {
+    final normalized = publicKey.trim();
+    if (normalized.isEmpty) return '';
+    final digest = crypto.sha256.convert(utf8.encode(normalized)).bytes;
+    final full = _base64UrlNoPadding(digest);
+    return '${full.substring(0, 8)}…${full.substring(full.length - 8)}';
+  }
+
+  String _base64UrlNoPadding(List<int> bytes) => base64UrlEncode(bytes).replaceAll('=', '');
 
   String _newAccountEncryptionKey() {
     final random = Random.secure();
@@ -456,4 +536,12 @@ class StorageService {
     }
     return 'Моё устройство';
   }
+}
+
+
+class _DeviceSigningKeyPair {
+  const _DeviceSigningKeyPair({required this.publicKey, required this.privateKey});
+
+  final String publicKey;
+  final String privateKey;
 }

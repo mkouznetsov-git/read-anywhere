@@ -119,6 +119,12 @@ List<TrustedDeviceRecord> _mergeTrustedDevices(
       byId[device.deviceId] = device;
       continue;
     }
+    if (existing.isRevoked != device.isRevoked) {
+      // Revocation is a security tombstone. Do not let a later ordinary
+      // lastSeenAt update from the revoked device resurrect it.
+      if (device.isRevoked) byId[device.deviceId] = device;
+      continue;
+    }
     final existingMarker = existing.deletedAt ?? existing.lastSeenAt;
     final deviceMarker = device.deletedAt ?? device.lastSeenAt;
     if (deviceMarker.isAfter(existingMarker)) byId[device.deviceId] = device;

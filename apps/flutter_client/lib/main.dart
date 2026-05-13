@@ -4040,7 +4040,7 @@ String _extractDocxText(Uint8List bytes) {
 }
 
 String _extractLegacyBinaryText(Uint8List bytes, String formatLabel) {
-  // MVP adapter for formats that require native converters in production
+  // Adapter for formats that require native converters or processed artifacts in production
   // (CHM/DJVU/legacy binary DOC). It extracts readable string runs so the file
   // can at least be indexed/opened while the original remains available for
   // transfer. Proper renderers/converters should replace this adapter later.
@@ -4051,7 +4051,7 @@ String _extractLegacyBinaryText(Uint8List bytes, String formatLabel) {
     if (line.length >= 8) lines.add(line);
   }
   if (lines.isEmpty) {
-    return 'Формат $formatLabel добавлен как MVP-адаптер. Текст не удалось извлечь без локального конвертера. Оригинальный файл сохранён и синхронизируется между устройствами.';
+    return 'Формат $formatLabel добавлен в библиотеку. Для полноценного чтения нужен локальный конвертер или подготовленное представление. Оригинальный файл сохранён и синхронизируется между устройствами.';
   }
   return lines.take(20000).join('\n');
 }
@@ -4600,7 +4600,7 @@ class _UnsupportedReaderPlaceholder extends StatelessWidget {
             const Icon(Icons.extension_rounded, size: 56),
             const SizedBox(height: 16),
             Text(
-              'Формат ${book.format.toUpperCase()} добавлен в библиотеку, но renderer еще не подключен в MVP.',
+              'Формат ${book.format.toUpperCase()} добавлен в библиотеку, но полноценный renderer ещё не подключён.',
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 12),
@@ -4874,15 +4874,15 @@ class _SyncScreenState extends State<SyncScreen> {
   }
 
 
-  Future<void> _removeTrustedDevice(TrustedDeviceRecord device) async {
+  Future<void> _revokeTrustedDevice(TrustedDeviceRecord device) async {
     final manifest = _manifest;
     if (manifest == null) return;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Удалить устройство?'),
+        title: const Text('Отозвать доступ?'),
         content: Text(
-          'Устройство «${device.name}» будет скрыто из списка доверенных. Если оно подключится заново через QR-код/код, запись появится снова.',
+          'Устройство «${device.name}» потеряет право участвовать в синхронизации этого аккаунта. Его события и передачи файлов будут отклоняться другими устройствами.',
         ),
         actions: [
           TextButton(
@@ -4891,21 +4891,21 @@ class _SyncScreenState extends State<SyncScreen> {
           ),
           FilledButton(
             onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Удалить'),
+            child: const Text('Отозвать доступ'),
           ),
         ],
       ),
     );
     if (confirmed != true) return;
     try {
-      final updated = await widget.storage.removeTrustedDevice(device.deviceId);
-      await widget.sync.broadcastLibrarySnapshot(reason: 'trusted_device_removed');
+      final updated = await widget.storage.revokeTrustedDevice(device.deviceId);
+      await widget.sync.broadcastLibrarySnapshot(reason: 'trusted_device_revoked');
       if (!mounted) return;
       setState(() => _manifest = updated);
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не удалось удалить устройство: $error')),
+        SnackBar(content: Text('Не удалось отозвать доступ: $error')),
       );
     }
   }
@@ -4932,7 +4932,7 @@ class _SyncScreenState extends State<SyncScreen> {
     if (manifest == null || _settings == null) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
-    final hiddenTrustedDevices = manifest.trustedDevices.where((device) => device.isDeleted).length;
+    final revokedTrustedDevices = manifest.trustedDevices.where((device) => device.isRevoked).length;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Синхронизация')),
@@ -4948,10 +4948,17 @@ class _SyncScreenState extends State<SyncScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(syncState.statusText),
+                    if (manifest.isCurrentDeviceRevoked) ...[
+                      const SizedBox(height: 10),
+                      const Text(
+                        'Доступ этого устройства отозван. Локальная библиотека остаётся доступной, но синхронизация остановлена.',
+                      ),
+                    ],
                     const SizedBox(height: 10),
                     SelectableText('Аккаунт: ${manifest.accountId}'),
                     Text('Название устройства: ${manifest.deviceName}'),
                     SelectableText('Идентификатор устройства: ${manifest.deviceId}'),
+                    SelectableText("Ключ устройства: ${manifest.currentDeviceTrust?.effectiveFingerprint ?? 'не создан'}"),
                   ],
                 ),
               ),
@@ -5059,7 +5066,7 @@ class _SyncScreenState extends State<SyncScreen> {
                   title: const Text('Доверенные устройства'),
                   subtitle: Text(manifest.activeTrustedDevices.isEmpty
                       ? 'Пока только текущее устройство'
-                      : 'Устройств: ${manifest.activeTrustedDevices.length}${hiddenTrustedDevices > 0 ? ', скрытых: $hiddenTrustedDevices' : ''}'),
+                      : 'Доверенных: ${manifest.activeTrustedDevices.length}${revokedTrustedDevices > 0 ? ', отозвано: $revokedTrustedDevices' : ''}'),
                   childrenPadding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
                   children: [
                     if (manifest.activeTrustedDevices.isEmpty)
@@ -5071,7 +5078,7 @@ class _SyncScreenState extends State<SyncScreen> {
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text('Удалённые устройства скрываются из списка и синхронизируются как отозванные. Текущее устройство удалить нельзя.'),
+                          const Text('Доступ можно отозвать у любого другого устройства. Отзыв синхронизируется как security-событие: новые события и файлы от отозванного устройства будут отклоняться.'),
                           const SizedBox(height: 8),
                           ...manifest.activeTrustedDevices.map((device) {
                             final isCurrent = device.deviceId == manifest.deviceId;
@@ -5079,21 +5086,38 @@ class _SyncScreenState extends State<SyncScreen> {
                               contentPadding: EdgeInsets.zero,
                               leading: Icon(isCurrent ? Icons.phone_iphone_rounded : Icons.devices_rounded),
                               title: Text('${device.name}${isCurrent ? ' • это устройство' : ''}'),
-                              subtitle: Text('${device.role} • ${device.deviceId}'),
+                              subtitle: Text(
+                                '${device.role} • ${device.trustStatusLabel}\n'
+                                'Ключ: ${device.effectiveFingerprint}\n'
+                                'Права: metadata ${device.canSyncMetadata ? '✓' : '—'}, files ${device.canTransferFiles ? '✓' : '—'}',
+                              ),
                               trailing: isCurrent
                                   ? null
                                   : IconButton(
-                                      tooltip: 'Удалить устройство из списка',
-                                      icon: const Icon(Icons.delete_outline_rounded),
-                                      onPressed: () => _removeTrustedDevice(device),
+                                      tooltip: 'Отозвать доступ устройства',
+                                      icon: const Icon(Icons.block_rounded),
+                                      onPressed: () => _revokeTrustedDevice(device),
                                     ),
                             );
                           }),
+                          if (manifest.trustedDevices.any((device) => device.isRevoked)) ...[
+                            const Divider(height: 24),
+                            const Text('Отозванные устройства'),
+                            const SizedBox(height: 8),
+                            ...manifest.trustedDevices.where((device) => device.isRevoked).map((device) => ListTile(
+                                  contentPadding: EdgeInsets.zero,
+                                  leading: const Icon(Icons.block_rounded),
+                                  title: Text(device.name),
+                                  subtitle: Text(
+                                    '${device.deviceId}\nКлюч: ${device.effectiveFingerprint}\nОтозвано: ${device.deletedAt?.toLocal() ?? ''}',
+                                  ),
+                                )),
+                          ],
                           const SizedBox(height: 8),
                           OutlinedButton.icon(
                             onPressed: _pruneTrustedDevices,
                             icon: const Icon(Icons.cleaning_services_outlined),
-                            label: const Text('Очистить скрытые записи'),
+                            label: const Text('Очистить старые отозванные записи'),
                           ),
                         ],
                       ),

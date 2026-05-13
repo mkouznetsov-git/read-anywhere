@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketState
 
-app = FastAPI(title="ReadArc Rendezvous Relay", version="0.2.0")
+app = FastAPI(title="ReadArc Rendezvous Relay", version="0.2.1")
 
 # In-memory only. The relay intentionally stores no books and writes nothing to
 # disk. Sprint 3 hotfix 2 keeps the latest *metadata snapshots* in RAM so a newly
@@ -58,6 +58,7 @@ async def start_pairing(request: Request) -> JSONResponse:
     account_id = str(payload.get("accountId") or "").strip()
     owner_device_id = str(payload.get("ownerDeviceId") or "").strip()
     owner_device_name = str(payload.get("ownerDeviceName") or "Устройство").strip()
+    owner_device_public_key = str(payload.get("ownerDevicePublicKey") or "").strip()
     account_encryption_key = str(payload.get("accountEncryptionKey") or "").strip()
     relay_url = str(payload.get("relayUrl") or "").strip()
     try:
@@ -79,6 +80,7 @@ async def start_pairing(request: Request) -> JSONResponse:
             "accountId": account_id,
             "ownerDeviceId": owner_device_id,
             "ownerDeviceName": owner_device_name or "Устройство",
+            "ownerDevicePublicKey": owner_device_public_key,
             "accountEncryptionKey": account_encryption_key,
             "relayUrl": relay_url,
             "createdAt": time.time(),
@@ -102,6 +104,7 @@ async def claim_pairing(request: Request) -> JSONResponse:
     code = _normalize_pairing_code(str(payload.get("code") or ""))
     new_device_id = str(payload.get("deviceId") or "").strip()
     new_device_name = str(payload.get("deviceName") or "Устройство").strip()
+    new_device_public_key = str(payload.get("devicePublicKey") or "").strip()
     if not code or not new_device_id:
         return JSONResponse({"ok": False, "message": "code and deviceId are required"}, status_code=400)
 
@@ -118,8 +121,10 @@ async def claim_pairing(request: Request) -> JSONResponse:
         "relayUrl": record["relayUrl"],
         "ownerDeviceId": record["ownerDeviceId"],
         "ownerDeviceName": record["ownerDeviceName"],
+        "ownerDevicePublicKey": record.get("ownerDevicePublicKey", ""),
         "accountEncryptionKey": record.get("accountEncryptionKey", ""),
         "acceptedDeviceId": new_device_id,
+        "acceptedDevicePublicKey": new_device_public_key,
         "acceptedDeviceName": new_device_name or "Устройство",
     })
 

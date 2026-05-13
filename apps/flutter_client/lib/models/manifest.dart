@@ -5,37 +5,79 @@ class TrustedDeviceRecord {
     required this.deviceId,
     required this.name,
     this.role = 'device',
+    this.publicKey = '',
+    this.keyFingerprint = '',
+    this.canSyncMetadata = true,
+    this.canTransferFiles = true,
     DateTime? addedAt,
     DateTime? lastSeenAt,
     this.deletedAt,
+    this.revokedByDeviceId,
+    this.revokedReason,
   })  : addedAt = addedAt ?? DateTime.now().toUtc(),
         lastSeenAt = lastSeenAt ?? DateTime.now().toUtc();
 
   final String deviceId;
   final String name;
   final String role;
+  final String publicKey;
+  final String keyFingerprint;
+  final bool canSyncMetadata;
+  final bool canTransferFiles;
   final DateTime addedAt;
   final DateTime lastSeenAt;
+  /// Backward compatible tombstone field. In ReadArc Sprint 26 it means that
+  /// device access is revoked, not merely hidden in the UI.
   final DateTime? deletedAt;
+  final String? revokedByDeviceId;
+  final String? revokedReason;
 
   bool get isDeleted => deletedAt != null;
+  bool get isRevoked => deletedAt != null;
+  bool get isOwner => role == 'owner';
+  bool get hasPublicKey => publicKey.trim().isNotEmpty;
+
+  String get trustStatusLabel => isRevoked ? 'Доступ отозван' : 'Доверенное';
+
+  String get effectiveFingerprint {
+    final explicit = keyFingerprint.trim();
+    if (explicit.isNotEmpty) return explicit;
+    final key = publicKey.trim();
+    if (key.length >= 16) return '${key.substring(0, 8)}…${key.substring(key.length - 8)}';
+    final id = deviceId.trim();
+    if (id.length >= 16) return '${id.substring(0, 8)}…${id.substring(id.length - 8)}';
+    return id;
+  }
 
   TrustedDeviceRecord copyWith({
     String? deviceId,
     String? name,
     String? role,
+    String? publicKey,
+    String? keyFingerprint,
+    bool? canSyncMetadata,
+    bool? canTransferFiles,
     DateTime? addedAt,
     DateTime? lastSeenAt,
     DateTime? deletedAt,
+    String? revokedByDeviceId,
+    String? revokedReason,
     bool clearDeletedAt = false,
+    bool clearRevocation = false,
   }) {
     return TrustedDeviceRecord(
       deviceId: deviceId ?? this.deviceId,
       name: name ?? this.name,
       role: role ?? this.role,
+      publicKey: publicKey ?? this.publicKey,
+      keyFingerprint: keyFingerprint ?? this.keyFingerprint,
+      canSyncMetadata: canSyncMetadata ?? this.canSyncMetadata,
+      canTransferFiles: canTransferFiles ?? this.canTransferFiles,
       addedAt: addedAt ?? this.addedAt,
       lastSeenAt: lastSeenAt ?? this.lastSeenAt,
-      deletedAt: clearDeletedAt ? null : (deletedAt ?? this.deletedAt),
+      deletedAt: clearDeletedAt || clearRevocation ? null : (deletedAt ?? this.deletedAt),
+      revokedByDeviceId: clearRevocation ? null : (revokedByDeviceId ?? this.revokedByDeviceId),
+      revokedReason: clearRevocation ? null : (revokedReason ?? this.revokedReason),
     );
   }
 
@@ -43,23 +85,47 @@ class TrustedDeviceRecord {
         'deviceId': deviceId,
         'name': name,
         'role': role,
+        'publicKey': publicKey,
+        'keyFingerprint': keyFingerprint,
+        'permissions': {
+          'syncMetadata': canSyncMetadata,
+          'transferFiles': canTransferFiles,
+        },
         'addedAt': addedAt.toIso8601String(),
         'lastSeenAt': lastSeenAt.toIso8601String(),
         'deletedAt': deletedAt?.toIso8601String(),
+        'revokedAt': deletedAt?.toIso8601String(),
+        'revokedByDeviceId': revokedByDeviceId,
+        'revokedReason': revokedReason,
       };
 
-  factory TrustedDeviceRecord.fromJson(Map<String, dynamic> json) => TrustedDeviceRecord(
-        deviceId: json['deviceId'] as String? ?? 'unknown-device',
-        name: json['name'] as String? ?? 'Устройство',
-        role: json['role'] as String? ?? 'device',
-        addedAt: DateTime.tryParse(json['addedAt'] as String? ?? '') ??
-            DateTime.now().toUtc(),
-        lastSeenAt: DateTime.tryParse(json['lastSeenAt'] as String? ?? '') ??
-            DateTime.now().toUtc(),
-        deletedAt: json['deletedAt'] == null
-            ? null
-            : DateTime.tryParse(json['deletedAt'] as String),
-      );
+  factory TrustedDeviceRecord.fromJson(Map<String, dynamic> json) {
+    final permissions = json['permissions'] is Map
+        ? Map<String, dynamic>.from(json['permissions'] as Map)
+        : const <String, dynamic>{};
+    final revokedAt = json['revokedAt'] == null
+        ? null
+        : DateTime.tryParse(json['revokedAt'].toString());
+    final deletedAt = json['deletedAt'] == null
+        ? revokedAt
+        : DateTime.tryParse(json['deletedAt'].toString()) ?? revokedAt;
+    return TrustedDeviceRecord(
+      deviceId: json['deviceId'] as String? ?? 'unknown-device',
+      name: json['name'] as String? ?? 'Устройство',
+      role: json['role'] as String? ?? 'device',
+      publicKey: json['publicKey'] as String? ?? '',
+      keyFingerprint: json['keyFingerprint'] as String? ?? '',
+      canSyncMetadata: permissions['syncMetadata'] != false,
+      canTransferFiles: permissions['transferFiles'] != false,
+      addedAt: DateTime.tryParse(json['addedAt'] as String? ?? '') ??
+          DateTime.now().toUtc(),
+      lastSeenAt: DateTime.tryParse(json['lastSeenAt'] as String? ?? '') ??
+          DateTime.now().toUtc(),
+      deletedAt: deletedAt,
+      revokedByDeviceId: json['revokedByDeviceId'] as String?,
+      revokedReason: json['revokedReason'] as String?,
+    );
+  }
 }
 
 class LibraryManifest {
@@ -68,6 +134,8 @@ class LibraryManifest {
     required this.deviceId,
     this.deviceName = 'Моё устройство',
     this.accountEncryptionKey = '',
+    this.deviceSigningPublicKey = '',
+    this.deviceSigningPrivateKey = '',
     DateTime? updatedAt,
     List<BookRecord>? books,
     List<TrustedDeviceRecord>? trustedDevices,
@@ -79,11 +147,22 @@ class LibraryManifest {
   final String deviceId;
   final String deviceName;
   final String accountEncryptionKey;
+  final String deviceSigningPublicKey;
+  final String deviceSigningPrivateKey;
   final DateTime updatedAt;
   final List<BookRecord> books;
   final List<TrustedDeviceRecord> trustedDevices;
 
   List<BookRecord> get visibleBooks => sortBooksForLibrary(books);
+
+  TrustedDeviceRecord? get currentDeviceTrust {
+    for (final device in trustedDevices) {
+      if (device.deviceId == deviceId) return device;
+    }
+    return null;
+  }
+
+  bool get isCurrentDeviceRevoked => currentDeviceTrust?.isRevoked == true;
   List<TrustedDeviceRecord> get activeTrustedDevices => trustedDevices
       .where((device) => !device.isDeleted)
       .toList()
@@ -100,6 +179,8 @@ class LibraryManifest {
     String? deviceId,
     String? deviceName,
     String? accountEncryptionKey,
+    String? deviceSigningPublicKey,
+    String? deviceSigningPrivateKey,
     DateTime? updatedAt,
     List<BookRecord>? books,
     List<TrustedDeviceRecord>? trustedDevices,
@@ -109,6 +190,8 @@ class LibraryManifest {
       deviceId: deviceId ?? this.deviceId,
       deviceName: deviceName ?? this.deviceName,
       accountEncryptionKey: accountEncryptionKey ?? this.accountEncryptionKey,
+      deviceSigningPublicKey: deviceSigningPublicKey ?? this.deviceSigningPublicKey,
+      deviceSigningPrivateKey: deviceSigningPrivateKey ?? this.deviceSigningPrivateKey,
       updatedAt: updatedAt ?? DateTime.now().toUtc(),
       books: books ?? this.books,
       trustedDevices: trustedDevices ?? this.trustedDevices,
@@ -126,7 +209,9 @@ class LibraryManifest {
         'deviceId': deviceId,
         'deviceName': deviceName,
         if (includeLocalPaths) 'accountEncryptionKey': accountEncryptionKey,
-        'crypto': {'payload': 'readanywhere-e2e-v1'},
+        'deviceSigningPublicKey': deviceSigningPublicKey,
+        if (includeLocalPaths) 'deviceSigningPrivateKey': deviceSigningPrivateKey,
+        'crypto': {'payload': 'readarc-e2e-v2', 'legacyPayload': 'readanywhere-e2e-v2'},
         'updatedAt': updatedAt.toIso8601String(),
         'trustedDevices': trustedDevices.map((d) => d.toJson()).toList(),
         'books': books
@@ -139,6 +224,8 @@ class LibraryManifest {
         deviceId: json['deviceId'] as String? ?? 'local-device',
         deviceName: json['deviceName'] as String? ?? 'Моё устройство',
         accountEncryptionKey: json['accountEncryptionKey'] as String? ?? '',
+        deviceSigningPublicKey: json['deviceSigningPublicKey'] as String? ?? '',
+        deviceSigningPrivateKey: json['deviceSigningPrivateKey'] as String? ?? '',
         updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
             DateTime.now().toUtc(),
         trustedDevices: ((json['trustedDevices'] as List?) ?? [])

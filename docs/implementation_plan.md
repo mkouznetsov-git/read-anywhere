@@ -12,7 +12,7 @@
 
 Проверка: утвержден ADR с транспортом, форматами, безопасностью и UX pairing.
 
-## Этап 1. MVP библиотеки
+## Этап 1. Библиотека
 
 1. Создать Flutter shell.
 2. Реализовать локальный manifest/SQLite.
@@ -28,9 +28,9 @@
 - статус `скачана` корректен после удаления локального файла;
 - библиотека работает без сети.
 
-## Этап 2. Reader MVP
+## Этап 2. Reader
 
-1. TXT-reader как быстрый прототип.
+1. TXT-reader как базовый reader.
 2. EPUB/PDF reader через выбранный SDK.
 3. Нормализация locator для каждого формата.
 4. Автосохранение прогресса.
@@ -114,3 +114,22 @@
 - fuzz-тесты parser/locator;
 - dependency/license audit;
 - ручное тестирование импорта всех поддерживаемых форматов.
+
+
+## Актуальный продуктовый roadmap после Sprint 25
+
+MVP-этап завершён. Дальше ReadArc развивается как готовый продукт, а не как прототип.
+
+1. Sprint 26 — доверенные устройства, ключи, отзыв доступа.
+2. Sprint 27 — offline queue на relay для encrypted metadata-событий.
+3. Sprint 28 — компактная библиотека, коллекции, теги, сортировки.
+4. Sprint 29 — закладки 2.0: обязательные названия, заметки, общий список, фильтры, переходы.
+5. Sprint 30 — полнотекстовый поиск по книге и локальной библиотеке.
+6. Sprint 31 — processed artifacts: originals + prepared representations.
+7. Sprint 32 — DOCX через локальную конвертацию/processed cache.
+8. Sprint 33 — CHM/DJVU через desktop conversion + sync processed artifacts.
+9. Sprint 34 — reader UX: шрифты, темы, ночной режим, настройки страницы.
+10. Sprint 35 — production packaging: Android, iOS, macOS, Windows, Linux.
+11. Sprint 36 — автообновления desktop-приложений.
+
+Обязательное архитектурное решение: ReadArc хранит оригинальные файлы и создаёт processed artifacts для тяжёлых форматов. Оригинал остаётся источником истины, prepared representation ускоряет чтение, поиск и мобильный UX.

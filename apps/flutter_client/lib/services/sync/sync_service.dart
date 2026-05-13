@@ -66,6 +66,7 @@ class _ParsedPairingInput {
     this.relayUrl,
     this.accountEncryptionKey,
     this.ownerDeviceName,
+    this.ownerDevicePublicKey,
     this.accountId,
     this.ownerDeviceId,
     this.expiresAt,
@@ -75,6 +76,7 @@ class _ParsedPairingInput {
   final String? relayUrl;
   final String? accountEncryptionKey;
   final String? ownerDeviceName;
+  final String? ownerDevicePublicKey;
   final String? accountId;
   final String? ownerDeviceId;
   final DateTime? expiresAt;
@@ -262,6 +264,14 @@ class SyncService {
     );
 
     final manifest = await _storage.loadManifest();
+    if (manifest.isCurrentDeviceRevoked) {
+      _setState(state.value.copyWith(
+        connected: false,
+        statusText: 'Доступ этого устройства отозван',
+        relayUrl: relayUrl,
+      ));
+      throw StateError('Доступ этого устройства к аккаунту отозван');
+    }
     await _probeRelayHealth(relayUrl, timeout: const Duration(seconds: 5));
     final uri = Uri.parse(relayUrl.trim());
     final client = RelayClient(
@@ -487,6 +497,7 @@ class SyncService {
       'accountId': manifest.accountId,
       'ownerDeviceId': manifest.deviceId,
       'ownerDeviceName': manifest.deviceName,
+      'ownerDevicePublicKey': manifest.deviceSigningPublicKey,
       // Transitional fallback for the 6-digit code path. QR/invite links carry
       // this key client-to-client, so a relay only has to see it when the user
       // chooses manual code entry instead of QR.
@@ -519,6 +530,7 @@ class SyncService {
         'accountId': manifest.accountId,
         'ownerDeviceId': manifest.deviceId,
         'deviceName': manifest.deviceName,
+        'ownerDevicePublicKey': manifest.deviceSigningPublicKey,
         'key': manifest.accountEncryptionKey,
         'expiresAt': expiresAt.toIso8601String(),
       },
@@ -555,6 +567,7 @@ class SyncService {
         'code': parsed.code,
         'deviceId': local.deviceId,
         'deviceName': local.deviceName,
+        'devicePublicKey': local.deviceSigningPublicKey,
       });
       if (response['ok'] != true) {
         throw StateError(response['message']?.toString() ?? 'Pairing-код не принят relay');
@@ -575,6 +588,7 @@ class SyncService {
     final accountId = response?['accountId']?.toString() ?? parsed.accountId ?? '';
     final ownerDeviceId = response?['ownerDeviceId']?.toString() ?? parsed.ownerDeviceId ?? '';
     final ownerDeviceName = response?['ownerDeviceName']?.toString() ?? parsed.ownerDeviceName ?? 'Устройство';
+    final ownerDevicePublicKey = response?['ownerDevicePublicKey']?.toString() ?? parsed.ownerDevicePublicKey ?? '';
     final accountEncryptionKey = parsed.accountEncryptionKey ?? response?['accountEncryptionKey']?.toString() ?? '';
     final returnedRelayUrl = relayUrl;
     if (accountId.isEmpty || ownerDeviceId.isEmpty) {
@@ -593,6 +607,7 @@ class SyncService {
       accountEncryptionKey: accountEncryptionKey,
       ownerDeviceId: ownerDeviceId,
       ownerDeviceName: ownerDeviceName,
+      ownerDevicePublicKey: ownerDevicePublicKey,
     );
     _appendLog('Pairing выполнен. Аккаунт подключён автоматически.');
     await connect(relayUrl: relayUrl);
@@ -660,6 +675,7 @@ class SyncService {
       final relay = uri.queryParameters['relay']?.trim();
       final accountKey = uri.queryParameters['key']?.trim();
       final ownerDeviceName = uri.queryParameters['deviceName']?.trim();
+      final ownerDevicePublicKey = uri.queryParameters['ownerDevicePublicKey']?.trim();
       final accountId = uri.queryParameters['accountId']?.trim();
       final ownerDeviceId = uri.queryParameters['ownerDeviceId']?.trim();
       final expiresAtRaw = uri.queryParameters['expiresAt']?.trim();
@@ -672,6 +688,7 @@ class SyncService {
         relayUrl: relay?.isEmpty == true ? null : relay,
         accountEncryptionKey: accountKey?.isEmpty == true ? null : accountKey,
         ownerDeviceName: ownerDeviceName?.isEmpty == true ? null : ownerDeviceName,
+        ownerDevicePublicKey: ownerDevicePublicKey?.isEmpty == true ? null : ownerDevicePublicKey,
         accountId: accountId?.isEmpty == true ? null : accountId,
         ownerDeviceId: ownerDeviceId?.isEmpty == true ? null : ownerDeviceId,
         expiresAt: expiresAt,
@@ -874,6 +891,11 @@ class SyncService {
       return;
     }
 
+    if (_isRevokedDevice(local, envelope.deviceId)) {
+      _appendLog('Отклонено событие от отозванного устройства: ${envelope.deviceId}');
+      return;
+    }
+
     if (!_acceptSecureEnvelope(envelope)) {
       return;
     }
@@ -893,6 +915,10 @@ class SyncService {
       createdAt: envelope.createdAt,
       payload: decryptedPayload,
     );
+
+    if (!_acceptTrustedDevicePayload(local, decryptedEnvelope)) {
+      return;
+    }
 
     switch (decryptedEnvelope.type) {
       case 'library_snapshot_requested':
@@ -953,6 +979,45 @@ class SyncService {
     return true;
   }
 
+  bool _isRevokedDevice(LibraryManifest local, String deviceId) {
+    for (final device in local.trustedDevices) {
+      if (device.deviceId == deviceId) return device.isRevoked;
+    }
+    return false;
+  }
+
+  bool _isActiveTrustedDevice(LibraryManifest local, String deviceId) {
+    for (final device in local.trustedDevices) {
+      if (device.deviceId == deviceId) return !device.isRevoked;
+    }
+    return false;
+  }
+
+  bool _acceptTrustedDevicePayload(LibraryManifest local, SyncEnvelope envelope) {
+    if (_isActiveTrustedDevice(local, envelope.deviceId)) return true;
+
+    // First event from a freshly paired device can be its library snapshot. It is
+    // already encrypted with the account key from the one-time QR invite. Accept
+    // only if the snapshot explicitly introduces the sender as a trusted device
+    // with a public key; all other unknown-device events are rejected.
+    if (envelope.type == 'library_snapshot') {
+      final payloadManifest = envelope.payload['manifest'];
+      if (payloadManifest is Map) {
+        final devices = (payloadManifest['trustedDevices'] as List?) ?? const [];
+        for (final item in devices.whereType<Map>()) {
+          final candidate = TrustedDeviceRecord.fromJson(Map<String, dynamic>.from(item));
+          if (candidate.deviceId == envelope.deviceId && !candidate.isRevoked && candidate.hasPublicKey) {
+            _appendLog('Принято первое доверенное событие от ${candidate.name}');
+            return true;
+          }
+        }
+      }
+    }
+
+    _appendLog('Отклонено событие от недоверенного устройства: ${envelope.deviceId}');
+    return false;
+  }
+
   Future<void> _handleLibrarySnapshotRequested(
     SyncEnvelope envelope,
     LibraryManifest local,
@@ -977,6 +1042,15 @@ class SyncService {
     final merged = mergeManifests(local, remote);
     await _storage.saveManifest(merged);
     _manifestChanges.add(merged);
+    if (merged.isCurrentDeviceRevoked) {
+      _appendLog('Доступ этого устройства отозван. Синхронизация остановлена.');
+      await disconnect(manual: true);
+      _setState(state.value.copyWith(
+        connected: false,
+        statusText: 'Доступ этого устройства отозван',
+      ));
+      return;
+    }
     _appendLog(
       'Принят snapshot от ${remote.deviceName} — книг: ${remote.books.length}',
     );
@@ -1392,6 +1466,11 @@ class SyncService {
       if (header['type'] != 'book_file_binary_chunk') return;
       if (header['accountId'] != local.accountId) return;
       if (header['requestingDeviceId'] != local.deviceId) return;
+      final sourceDeviceId = header['sourceDeviceId']?.toString() ?? header['deviceId']?.toString() ?? '';
+      if (_isRevokedDevice(local, sourceDeviceId) || !_isActiveTrustedDevice(local, sourceDeviceId)) {
+        _appendLog('Отклонён binary chunk от недоверенного/отозванного устройства: $sourceDeviceId');
+        return;
+      }
       final clearBytes = await ReadAnywhereE2eCrypto.decryptBinaryFrame(
         header: header,
         cipherBytes: message.body,
@@ -2003,6 +2082,15 @@ class SyncService {
     }
     try {
       final local = await _storage.loadManifest();
+      if (local.isCurrentDeviceRevoked) {
+        _appendLog('Не отправлено ${envelope.type}: доступ этого устройства отозван');
+        await disconnect(manual: true);
+        _setState(state.value.copyWith(
+          connected: false,
+          statusText: 'Доступ этого устройства отозван',
+        ));
+        return false;
+      }
       final encryptedPayload = await ReadAnywhereE2eCrypto.encryptPayload(
         payload: envelope.payload,
         accountEncryptionKey: local.accountEncryptionKey,
