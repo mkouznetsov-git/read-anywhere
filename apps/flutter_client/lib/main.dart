@@ -24,6 +24,9 @@ import 'services/storage_service.dart';
 import 'services/sync/sync_service.dart';
 import 'ui/app_theme.dart';
 
+bool get _isDesktopReaderPlatform => Platform.isMacOS || Platform.isLinux || Platform.isWindows;
+bool get _isAndroidReaderPlatform => Platform.isAndroid;
+
 void main() {
   runZonedGuarded(() {
     WidgetsFlutterBinding.ensureInitialized();
@@ -3598,11 +3601,17 @@ class _DjvuSinglePageReader extends StatefulWidget {
 
 class _DjvuSinglePageReaderState extends State<_DjvuSinglePageReader> {
   final _controller = ScrollController();
+  final _focusNode = FocusNode(debugLabel: 'ReadArc DJVU paged reader');
 
   @override
   void initState() {
     super.initState();
     _positionPageAfterFrame();
+    if (_isDesktopReaderPlatform) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focusNode.requestFocus();
+      });
+    }
   }
 
   @override
@@ -3615,6 +3624,7 @@ class _DjvuSinglePageReaderState extends State<_DjvuSinglePageReader> {
 
   @override
   void dispose() {
+    _focusNode.dispose();
     _controller.dispose();
     super.dispose();
   }
@@ -3636,11 +3646,55 @@ class _DjvuSinglePageReaderState extends State<_DjvuSinglePageReader> {
     }
   }
 
+  void _scrollBy(double delta) {
+    if (!_controller.hasClients) return;
+    final position = _controller.position;
+    final target = (position.pixels + delta).clamp(position.minScrollExtent, position.maxScrollExtent).toDouble();
+    _controller.animateTo(target, duration: const Duration(milliseconds: 120), curve: Curves.easeOutCubic);
+  }
+
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (!_isDesktopReaderPlatform || event is! KeyDownEvent) return KeyEventResult.ignored;
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      widget.onPrevious?.call();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowRight) {
+      widget.onNext?.call();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      _scrollBy(-MediaQuery.of(context).size.height * 0.78);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowDown) {
+      _scrollBy(MediaQuery.of(context).size.height * 0.78);
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    final page = Center(
+      child: _DjvuPageView(
+        key: ValueKey('djvu-page-${widget.page}-${widget.displayWidth.round()}-${widget.devicePixelRatio.toStringAsFixed(2)}'),
+        sourceFile: widget.sourceFile,
+        pagesDir: widget.pagesDir,
+        pageNumber: widget.page,
+        displayWidth: widget.displayWidth,
+        displayHeight: widget.displayHeight,
+        devicePixelRatio: widget.devicePixelRatio,
+      ),
+    );
+
+    Widget reader = GestureDetector(
       behavior: HitTestBehavior.translucent,
-      onTap: widget.onTapContent,
+      onTap: () {
+        widget.onTapContent();
+        if (_isDesktopReaderPlatform) _focusNode.requestFocus();
+      },
       onHorizontalDragEnd: _onHorizontalDragEnd,
       child: ColoredBox(
         color: const Color(0xFFF3E7CF),
@@ -3650,20 +3704,27 @@ class _DjvuSinglePageReaderState extends State<_DjvuSinglePageReader> {
           child: SingleChildScrollView(
             controller: _controller,
             padding: const EdgeInsets.fromLTRB(0, 8, 0, 16),
-            child: Center(
-              child: _DjvuPageView(
-                key: ValueKey('djvu-page-${widget.page}-${widget.displayWidth.round()}-${widget.devicePixelRatio.toStringAsFixed(2)}'),
-                sourceFile: widget.sourceFile,
-                pagesDir: widget.pagesDir,
-                pageNumber: widget.page,
-                displayWidth: widget.displayWidth,
-                displayHeight: widget.displayHeight,
-                devicePixelRatio: widget.devicePixelRatio,
-              ),
-            ),
+            child: page,
           ),
         ),
       ),
+    );
+
+    if (_isAndroidReaderPlatform) {
+      reader = Stack(
+        children: [
+          Positioned.fill(child: reader),
+          Positioned.fill(child: _PagedReaderAndroidNavButtons(previous: widget.onPrevious, next: widget.onNext)),
+        ],
+      );
+    }
+
+    if (!_isDesktopReaderPlatform) return reader;
+    return Focus(
+      focusNode: _focusNode,
+      autofocus: true,
+      onKeyEvent: _handleKeyEvent,
+      child: reader,
     );
   }
 }
@@ -3731,7 +3792,7 @@ Future<_DjvuArtifact> _prepareDjvuArtifact({
   final pagesDir = Directory('${root.path}${Platform.pathSeparator}pages');
   if (!await pagesDir.exists()) await pagesDir.create(recursive: true);
   final manifestFile = await storage.processedArtifactManifestFile(book.id);
-  const renderProfile = 'paged-hidpi-v2';
+  const renderProfile = 'paged-hidpi-v3';
 
   // First try an existing processed artifact. This lets Android/opened devices
   // use a prepared DJVU cache once artifact sync is enabled, without needing a
@@ -3848,8 +3909,12 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
     try {
       if (await out.exists() && await out.length() > 0) return out;
     } catch (_) {}
-    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio).round().clamp(960, Platform.isAndroid ? 2600 : 2400).toInt();
-    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio).round().clamp(1200, Platform.isAndroid ? 3900 : 3400).toInt();
+    // DJVU pages often contain scanned text; render above physical DPR and
+    // downscale with high filtering. This keeps Android text crisp while the
+    // paged viewer limits memory to one visible page plus a small cache.
+    final qualityScale = Platform.isAndroid ? 2.35 : 1.75;
+    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio * qualityScale).round().clamp(1400, Platform.isAndroid ? 3600 : 3200).toInt();
+    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio * qualityScale).round().clamp(1800, Platform.isAndroid ? 5400 : 4600).toInt();
     final key = '${widget.sourceFile.path}:${widget.pageNumber}:$pixelWidth:$pixelHeight';
     final existing = _renderJobs[key];
     if (existing != null) return existing;
@@ -4377,11 +4442,17 @@ class _LargePdfSinglePageReader extends StatefulWidget {
 
 class _LargePdfSinglePageReaderState extends State<_LargePdfSinglePageReader> {
   final _controller = ScrollController();
+  final _focusNode = FocusNode(debugLabel: 'ReadArc PDF paged reader');
 
   @override
   void initState() {
     super.initState();
     _positionPageAfterFrame();
+    if (_isDesktopReaderPlatform) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focusNode.requestFocus();
+      });
+    }
   }
 
   @override
@@ -4394,6 +4465,7 @@ class _LargePdfSinglePageReaderState extends State<_LargePdfSinglePageReader> {
 
   @override
   void dispose() {
+    _focusNode.dispose();
     _controller.dispose();
     super.dispose();
   }
@@ -4415,11 +4487,54 @@ class _LargePdfSinglePageReaderState extends State<_LargePdfSinglePageReader> {
     }
   }
 
+  void _scrollBy(double delta) {
+    if (!_controller.hasClients) return;
+    final position = _controller.position;
+    final target = (position.pixels + delta).clamp(position.minScrollExtent, position.maxScrollExtent).toDouble();
+    _controller.animateTo(target, duration: const Duration(milliseconds: 120), curve: Curves.easeOutCubic);
+  }
+
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (!_isDesktopReaderPlatform || event is! KeyDownEvent) return KeyEventResult.ignored;
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      widget.onPrevious?.call();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowRight) {
+      widget.onNext?.call();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      _scrollBy(-MediaQuery.of(context).size.height * 0.78);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowDown) {
+      _scrollBy(MediaQuery.of(context).size.height * 0.78);
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    final page = Center(
+      child: _PdfFitWidthPage(
+        key: ValueKey('pdf-page-${widget.page}-${widget.displayWidth.round()}-${widget.devicePixelRatio.toStringAsFixed(2)}'),
+        document: widget.document,
+        pageNumber: widget.page,
+        displayWidth: widget.displayWidth,
+        displayHeight: widget.displayHeight,
+        devicePixelRatio: widget.devicePixelRatio,
+      ),
+    );
+
+    Widget reader = GestureDetector(
       behavior: HitTestBehavior.translucent,
-      onTap: widget.onTapContent,
+      onTap: () {
+        widget.onTapContent();
+        if (_isDesktopReaderPlatform) _focusNode.requestFocus();
+      },
       onHorizontalDragEnd: _onHorizontalDragEnd,
       child: ColoredBox(
         color: const Color(0xFFF3E7CF),
@@ -4429,24 +4544,32 @@ class _LargePdfSinglePageReaderState extends State<_LargePdfSinglePageReader> {
           child: SingleChildScrollView(
             controller: _controller,
             padding: const EdgeInsets.fromLTRB(0, 8, 0, 16),
-            child: Center(
-              child: _PdfFitWidthPage(
-                key: ValueKey('pdf-page-${widget.page}-${widget.displayWidth.round()}-${widget.devicePixelRatio.toStringAsFixed(2)}'),
-                document: widget.document,
-                pageNumber: widget.page,
-                displayWidth: widget.displayWidth,
-                displayHeight: widget.displayHeight,
-                devicePixelRatio: widget.devicePixelRatio,
-              ),
-            ),
+            child: page,
           ),
         ),
       ),
     );
+
+    if (_isAndroidReaderPlatform) {
+      reader = Stack(
+        children: [
+          Positioned.fill(child: reader),
+          Positioned.fill(child: _PagedReaderAndroidNavButtons(previous: widget.onPrevious, next: widget.onNext)),
+        ],
+      );
+    }
+
+    if (!_isDesktopReaderPlatform) return reader;
+    return Focus(
+      focusNode: _focusNode,
+      autofocus: true,
+      onKeyEvent: _handleKeyEvent,
+      child: reader,
+    );
   }
 }
 
-class _PagedReaderProgressBar extends StatelessWidget {
+class _PagedReaderProgressBar extends StatefulWidget {
   const _PagedReaderProgressBar({
     required this.page,
     required this.pages,
@@ -4461,81 +4584,154 @@ class _PagedReaderProgressBar extends StatelessWidget {
   final VoidCallback onActivate;
   final ValueChanged<int> onPageSelected;
 
-  void _handlePosition(BuildContext context, Offset localPosition, double width) {
-    if (pages <= 1 || width <= 0) return;
+  @override
+  State<_PagedReaderProgressBar> createState() => _PagedReaderProgressBarState();
+}
+
+class _PagedReaderProgressBarState extends State<_PagedReaderProgressBar> {
+  bool _hover = false;
+
+  bool get _desktopHoverMode => _isDesktopReaderPlatform;
+  bool get _interactive => widget.active || (_desktopHoverMode && _hover);
+
+  void _handlePosition(Offset localPosition, double width) {
+    if (widget.pages <= 1 || width <= 0) return;
     final fraction = (localPosition.dx / width).clamp(0.0, 1.0).toDouble();
-    final next = (1 + (fraction * (pages - 1)).round()).clamp(1, pages).toInt();
-    onPageSelected(next);
+    final next = (1 + (fraction * (widget.pages - 1)).round()).clamp(1, widget.pages).toInt();
+    widget.onPageSelected(next);
   }
 
   @override
   Widget build(BuildContext context) {
-    final progress = pages <= 1 ? 0.0 : ((page - 1) / (pages - 1)).clamp(0.0, 1.0).toDouble();
+    final progress = widget.pages <= 1 ? 0.0 : ((widget.page - 1) / (widget.pages - 1)).clamp(0.0, 1.0).toDouble();
+    final active = _interactive;
+    const indigo = Color(0xFF2A2F4A);
+    const gold = Color(0xFFC6A14A);
+
     return SafeArea(
       top: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+        padding: const EdgeInsets.fromLTRB(14, 2, 14, 5),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            LayoutBuilder(
-              builder: (context, constraints) {
-                return GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTapDown: (details) {
-                    if (!active) {
-                      onActivate();
-                      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-                        const SnackBar(
-                          content: Text('Шкала перехода активна: проведите по ней, чтобы перейти к нужной странице.'),
-                          duration: Duration(milliseconds: 1400),
+            MouseRegion(
+              onEnter: (_) {
+                if (_desktopHoverMode) setState(() => _hover = true);
+              },
+              onExit: (_) {
+                if (_desktopHoverMode) setState(() => _hover = false);
+              },
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  return GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTapDown: (details) {
+                      if (_desktopHoverMode) {
+                        _handlePosition(details.localPosition, constraints.maxWidth);
+                        return;
+                      }
+                      if (!widget.active) {
+                        widget.onActivate();
+                        return;
+                      }
+                      _handlePosition(details.localPosition, constraints.maxWidth);
+                    },
+                    onHorizontalDragStart: (_) {
+                      if (!_desktopHoverMode && !widget.active) widget.onActivate();
+                    },
+                    onHorizontalDragUpdate: (details) {
+                      if (_desktopHoverMode || widget.active) {
+                        _handlePosition(details.localPosition, constraints.maxWidth);
+                      }
+                    },
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 130),
+                      height: active ? 26 : 14,
+                      padding: EdgeInsets.symmetric(vertical: active ? 7 : 5),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(999),
+                        child: LinearProgressIndicator(
+                          value: progress,
+                          minHeight: active ? 10 : 4,
+                          valueColor: AlwaysStoppedAnimation<Color>(active ? indigo : gold),
+                          backgroundColor: active ? indigo.withOpacity(0.22) : const Color(0xFFE4D8BD),
                         ),
-                      );
-                      return;
-                    }
-                    _handlePosition(context, details.localPosition, constraints.maxWidth);
-                  },
-                  onHorizontalDragStart: (_) {
-                    if (!active) onActivate();
-                  },
-                  onHorizontalDragUpdate: active
-                      ? (details) => _handlePosition(context, details.localPosition, constraints.maxWidth)
-                      : null,
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 160),
-                    height: active ? 24 : 16,
-                    padding: EdgeInsets.symmetric(vertical: active ? 8 : 6),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(999),
-                      child: LinearProgressIndicator(
-                        value: progress,
-                        minHeight: active ? 8 : 4,
-                        backgroundColor: active ? const Color(0xFFD8C699) : const Color(0xFFE4D8BD),
                       ),
                     ),
-                  ),
-                );
-              },
+                  );
+                },
+              ),
             ),
-            const SizedBox(height: 2),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    active ? 'Проведите по шкале для быстрого перехода' : 'Смахните ←/→ для листания',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 11, color: const Color(0xFF2A2F4A).withOpacity(0.7)),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Text(
-                  pages > 0 ? '$page / $pages' : '$page',
-                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF2A2F4A)),
-                ),
-              ],
+            Align(
+              alignment: Alignment.centerRight,
+              child: Text(
+                widget.pages > 0 ? '${widget.page} / ${widget.pages}' : '${widget.page}',
+                style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: indigo),
+              ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PagedReaderAndroidNavButtons extends StatelessWidget {
+  const _PagedReaderAndroidNavButtons({required this.previous, required this.next});
+
+  final VoidCallback? previous;
+  final VoidCallback? next;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_isAndroidReaderPlatform) return const SizedBox.shrink();
+    return SafeArea(
+      child: Row(
+        children: [
+          _AndroidPageTurnButton(
+            alignment: Alignment.centerLeft,
+            icon: Icons.chevron_left_rounded,
+            onPressed: previous,
+          ),
+          const Spacer(),
+          _AndroidPageTurnButton(
+            alignment: Alignment.centerRight,
+            icon: Icons.chevron_right_rounded,
+            onPressed: next,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AndroidPageTurnButton extends StatelessWidget {
+  const _AndroidPageTurnButton({required this.alignment, required this.icon, required this.onPressed});
+
+  final Alignment alignment;
+  final IconData icon;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onPressed != null;
+    return Align(
+      alignment: alignment,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        child: Material(
+          color: const Color(0xFF2A2F4A).withOpacity(enabled ? 0.18 : 0.06),
+          borderRadius: BorderRadius.circular(18),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(18),
+            onTap: onPressed,
+            child: SizedBox(
+              width: 38,
+              height: 58,
+              child: Icon(icon, size: 26, color: const Color(0xFF2A2F4A).withOpacity(enabled ? 0.78 : 0.22)),
+            ),
+          ),
         ),
       ),
     );

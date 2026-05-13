@@ -14,15 +14,36 @@ fi
 mkdir -p "$DIST_ROOT"
 
 build_macos() {
-  echo "Building embedded DJVU engine for macOS..."
-  cargo build --release --manifest-path "$ENGINE_MANIFEST"
+  echo "Building embedded DJVU engine for macOS universal dylib..."
   mkdir -p "$DIST_ROOT/macos"
-  local src="$ROOT_DIR/native/readarc_engines/djvu/target/release/libreadarc_djvu_engine.dylib"
-  if [[ ! -f "$src" ]]; then
-    echo "macOS DJVU engine was not produced: $src" >&2
+
+  # GitHub macOS runners can be Apple Silicon while real users may still run
+  # Intel Macs. Build both slices and lipo them together so the embedded DJVU
+  # engine loads on macOS x86_64 and arm64 instead of silently producing blank
+  # pages on the opposite architecture.
+  if command -v rustup >/dev/null 2>&1; then
+    rustup target add x86_64-apple-darwin aarch64-apple-darwin >/dev/null
+  fi
+
+  local x64_src="$ROOT_DIR/native/readarc_engines/djvu/target/x86_64-apple-darwin/release/libreadarc_djvu_engine.dylib"
+  local arm_src="$ROOT_DIR/native/readarc_engines/djvu/target/aarch64-apple-darwin/release/libreadarc_djvu_engine.dylib"
+  local universal="$DIST_ROOT/macos/libreadarc_djvu_engine.dylib"
+
+  cargo build --release --manifest-path "$ENGINE_MANIFEST" --target x86_64-apple-darwin
+  cargo build --release --manifest-path "$ENGINE_MANIFEST" --target aarch64-apple-darwin
+
+  if [[ -f "$x64_src" && -f "$arm_src" && "$(command -v lipo || true)" != "" ]]; then
+    lipo -create -output "$universal" "$x64_src" "$arm_src"
+  elif [[ -f "$x64_src" ]]; then
+    cp "$x64_src" "$universal"
+  elif [[ -f "$arm_src" ]]; then
+    cp "$arm_src" "$universal"
+  else
+    echo "macOS DJVU engine was not produced for either architecture." >&2
     return 1
   fi
-  cp "$src" "$DIST_ROOT/macos/libreadarc_djvu_engine.dylib"
+
+  file "$universal" || true
 }
 
 build_android() {
