@@ -84,6 +84,7 @@ class StorageService {
 
   Future<void> saveManifest(LibraryManifest manifest) async {
     final file = await manifestFile();
+    await _backupManifestIfPresent(file);
     const encoder = JsonEncoder.withIndent('  ');
     await file.writeAsString(encoder.convert(_normalizeManifest(manifest).toJson()), flush: true);
   }
@@ -449,10 +450,30 @@ class StorageService {
 
 
   LibraryManifest _normalizeManifest(LibraryManifest manifest) {
-    final books = [...manifest.books]..sort((a, b) {
-      if (a.isDeleted != b.isDeleted) return a.isDeleted ? 1 : -1;
-      return compareBooksForLibrary(a, b);
-    });
+    final books = manifest.books.map((book) {
+      if (!book.isDeleted) return book;
+      final localPath = book.localPath?.trim() ?? '';
+      if (localPath.isEmpty) return book;
+
+      // Safety repair for stale remote tombstones. A normal user-initiated
+      // delete clears localPath first. If a deleted record still has a local
+      // file path, the book was almost certainly hidden by an older remote
+      // tombstone during sync. Keep the user's local library visible.
+      final availableOn = <String>{
+        ...book.availableOnDeviceIds,
+        manifest.deviceId,
+      }.toList()
+        ..sort();
+      return book.copyWith(
+        clearDeletedAt: true,
+        availableOnDeviceIds: availableOn,
+        updatedAt: DateTime.now().toUtc(),
+      );
+    }).toList()
+      ..sort((a, b) {
+        if (a.isDeleted != b.isDeleted) return a.isDeleted ? 1 : -1;
+        return compareBooksForLibrary(a, b);
+      });
     final devices = <String, TrustedDeviceRecord>{};
     for (final device in manifest.trustedDevices) {
       final existing = devices[device.deviceId];
@@ -478,6 +499,38 @@ class StorageService {
         return a.name.toLowerCase().compareTo(b.name.toLowerCase());
       });
     return manifest.copyWith(books: books, trustedDevices: sortedDevices);
+  }
+
+
+  Future<void> _backupManifestIfPresent(File manifestFile) async {
+    try {
+      if (!await manifestFile.exists()) return;
+      final backupDir = Directory(p.join((await appDir()).path, 'manifest_backups'));
+      if (!await backupDir.exists()) await backupDir.create(recursive: true);
+      final ts = DateTime.now()
+          .toUtc()
+          .toIso8601String()
+          .replaceAll(':', '-')
+          .replaceAll('.', '-');
+      final backup = File(p.join(backupDir.path, 'manifest_$ts.json'));
+      await manifestFile.copy(backup.path);
+
+      final backups = await backupDir
+          .list()
+          .where((entity) => entity is File && p.basename(entity.path).startsWith('manifest_'))
+          .cast<File>()
+          .toList();
+      backups.sort((a, b) => b.path.compareTo(a.path));
+      for (final stale in backups.skip(20)) {
+        try {
+          await stale.delete();
+        } catch (_) {
+          // Backup cleanup is best-effort only.
+        }
+      }
+    } catch (_) {
+      // Never fail the main manifest write because of backup problems.
+    }
   }
 
   Future<void> _deleteLocalBookFileIfSafe(String? localPath) async {

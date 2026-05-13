@@ -78,10 +78,30 @@ BookRecord _mergeBook(BookRecord local, BookRecord remote) {
 
 
 BookRecord? _deletedWinner(BookRecord local, BookRecord remote) {
-  final candidates = [local, remote].where((book) => book.deletedAt != null).toList();
-  if (candidates.isEmpty) return null;
-  candidates.sort((a, b) => a.deletedAt!.compareTo(b.deletedAt!));
-  return candidates.last;
+  final deletedCandidates = [local, remote]
+      .where((book) => book.deletedAt != null)
+      .toList();
+  if (deletedCandidates.isEmpty) return null;
+
+  final activeCandidates = [local, remote]
+      .where((book) => book.deletedAt == null)
+      .toList();
+
+  deletedCandidates.sort((a, b) => a.deletedAt!.compareTo(b.deletedAt!));
+  final latestDeletion = deletedCandidates.last;
+  final latestDeletionAt = latestDeletion.deletedAt!;
+
+  // A deletion tombstone must not permanently win over a newer local re-import
+  // or a newer active copy from another trusted device. This case was visible
+  // after updating ReadArc and reconnecting an Android device: an older queued
+  // snapshot from the phone contained a tombstone for a book that had later been
+  // re-added/configured on the Mac, and the old merge logic hid the fresh local
+  // library entry. Deletion wins only when it is newer than every active copy.
+  for (final active in activeCandidates) {
+    if (active.updatedAt.isAfter(latestDeletionAt)) return null;
+  }
+
+  return latestDeletion;
 }
 
 int _progressCompare(BookRecord a, BookRecord b) {

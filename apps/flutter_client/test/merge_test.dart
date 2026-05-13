@@ -185,6 +185,64 @@ void main() {
     expect(merged.visibleBooks, isEmpty);
   });
 
+
+  test('newer active local book wins over older remote deletion tombstone', () {
+    final localBook = BookRecord(
+      id: 'book-1',
+      title: 'Reimported Book',
+      fileName: 'book.fb2',
+      format: 'fb2',
+      sizeBytes: 10,
+      contentSha256: 'book-1',
+      localPath: '/local/book.fb2',
+      updatedAt: DateTime.utc(2030),
+      availableOnDeviceIds: const ['mac'],
+    );
+    final remoteTombstone = localBook.copyWith(
+      clearLocalPath: true,
+      availableOnDeviceIds: const [],
+      deletedAt: DateTime.utc(2029),
+      updatedAt: DateTime.utc(2029),
+    );
+
+    final merged = mergeManifests(
+      LibraryManifest(accountId: 'acc', deviceId: 'mac', books: [localBook]),
+      LibraryManifest(accountId: 'acc', deviceId: 'android', books: [remoteTombstone]),
+    );
+
+    expect(merged.books.single.isDeleted, isFalse);
+    expect(merged.visibleBooks.single.title, 'Reimported Book');
+    expect(merged.books.single.localPath, '/local/book.fb2');
+  });
+
+  test('newer remote deletion tombstone still hides older active book', () {
+    final localBook = BookRecord(
+      id: 'book-1',
+      title: 'Book',
+      fileName: 'book.fb2',
+      format: 'fb2',
+      sizeBytes: 10,
+      contentSha256: 'book-1',
+      localPath: '/local/book.fb2',
+      updatedAt: DateTime.utc(2029),
+      availableOnDeviceIds: const ['mac'],
+    );
+    final remoteTombstone = localBook.copyWith(
+      clearLocalPath: true,
+      availableOnDeviceIds: const [],
+      deletedAt: DateTime.utc(2030),
+      updatedAt: DateTime.utc(2030),
+    );
+
+    final merged = mergeManifests(
+      LibraryManifest(accountId: 'acc', deviceId: 'mac', books: [localBook]),
+      LibraryManifest(accountId: 'acc', deviceId: 'android', books: [remoteTombstone]),
+    );
+
+    expect(merged.books.single.isDeleted, isTrue);
+    expect(merged.visibleBooks, isEmpty);
+  });
+
   test('deleted trusted device is hidden from active devices', () {
     final removed = TrustedDeviceRecord(
       deviceId: 'old-device',
