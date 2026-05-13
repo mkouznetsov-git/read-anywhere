@@ -31,7 +31,7 @@ if [[ -f "$ANDROID_MANIFEST" ]]; then
   perl -0pi -e 's#android:label="[^"]*"#android:label="ReadArc"#' "$ANDROID_MANIFEST"
 fi
 
-# Debug MVP may use ws:// or http:// relay. Production should use HTTPS/WSS and remove cleartext.
+# Internal debug builds may use ws:// or http:// relay. Production builds must use HTTPS/WSS and avoid cleartext traffic.
 if [[ -f "$ANDROID_MANIFEST" ]] && ! grep -q "usesCleartextTraffic" "$ANDROID_MANIFEST"; then
   perl -0pi -e 's#<application#<application android:usesCleartextTraffic="true"#' "$ANDROID_MANIFEST"
 fi

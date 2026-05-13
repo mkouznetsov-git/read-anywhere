@@ -79,3 +79,22 @@ POST /pairing/claim
 ```
 
 Коды хранятся только в памяти процесса, живут до 5 минут и удаляются после первого использования. Они нужны только для передачи `accountId` и relay endpoint новому устройству без ручного копирования accountId.
+
+## Sprint 27: durable encrypted metadata offline queue
+
+Relay версии `0.3.0` поддерживает bounded offline queue для encrypted metadata events.
+
+Настройки окружения:
+
+```text
+READARC_RELAY_DATA_DIR=/data
+READARC_OFFLINE_QUEUE_TTL_SECONDS=2592000
+```
+
+В Docker Compose runtime-состояние монтируется в:
+
+```text
+./server_data/relay:/data
+```
+
+Relay сохраняет только encrypted envelope JSON с `payload.e2ee`; книги, бинарные chunks и plaintext metadata не сохраняются.

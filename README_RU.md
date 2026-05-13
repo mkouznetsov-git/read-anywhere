@@ -363,3 +363,16 @@ TXT-reader переведён на один обычный вертикальн�
 
 Добавлены: кнопка скачивания всей библиотеки, hardening Direct/LAN transfer для Personal Hub, macOS network server entitlement, DOCX rich renderer, корректный fallback для DOC/CHM/DJVU без отображения бинарного мусора.
 
+
+## Sprint 27: offline queue encrypted metadata events
+
+ReadArc relay теперь поддерживает bounded offline queue для encrypted metadata-событий. Relay сохраняет только уже зашифрованные envelopes (`payload.e2ee`) и не хранит книги, бинарные chunks или plaintext metadata. Для production-relay используется runtime volume `./server_data/relay:/data`, где лежит `offline_queue.json` с очередью и cursors устройств.
+
+После Sprint 27 серверный relay нужно обновить через SSH и пересобрать контейнер:
+
+```bash
+cd /opt/readarc/app
+docker compose down
+docker compose up -d --build relay
+curl https://relay.readarc.ru/health
+```

@@ -245,6 +245,7 @@ class SyncEnvelope {
     required this.deviceId,
     required this.payload,
     DateTime? createdAt,
+    this.relayQueueSeq,
   }) : createdAt = createdAt ?? DateTime.now().toUtc();
 
   final String type;
@@ -252,6 +253,7 @@ class SyncEnvelope {
   final String deviceId;
   final Map<String, dynamic> payload;
   final DateTime createdAt;
+  final int? relayQueueSeq;
 
   Map<String, dynamic> toJson() => {
         'type': type,
@@ -259,6 +261,7 @@ class SyncEnvelope {
         'deviceId': deviceId,
         'createdAt': createdAt.toIso8601String(),
         'payload': payload,
+        if (relayQueueSeq != null) 'relayQueueSeq': relayQueueSeq,
       };
 
   factory SyncEnvelope.fromJson(Map<String, dynamic> json) => SyncEnvelope(
@@ -268,5 +271,6 @@ class SyncEnvelope {
         createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ??
             DateTime.now().toUtc(),
         payload: Map<String, dynamic>.from(json['payload'] as Map),
+        relayQueueSeq: (json['relayQueueSeq'] as num?)?.toInt(),
       );
 }

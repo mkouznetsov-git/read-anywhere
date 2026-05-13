@@ -252,7 +252,7 @@ jobs:
 
           ## Важно
 
-          Эти сборки предназначены для внутреннего тестирования. macOS-сборки пока не подписаны Developer ID и не notarized. Android release-сборки пока используют стандартную тестовую конфигурацию MVP; production-публикация позже потребует отдельного signing keystore.
+          Эти сборки предназначены для внутреннего тестирования. macOS-сборки пока не подписаны Developer ID и не notarized. Android release-сборки предназначены для внутреннего тестирования; production-публикация потребует отдельного release signing keystore и настройки iOS/macOS signing/notarization.
           EOF
 
           echo "Release assets:"

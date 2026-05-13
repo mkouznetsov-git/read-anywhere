@@ -8,4 +8,8 @@ services:
       - "127.0.0.1:8787:8787"
     environment:
       PORT: "8787"
+      READARC_RELAY_DATA_DIR: "/data"
+      READARC_OFFLINE_QUEUE_TTL_SECONDS: "2592000"
+    volumes:
+      - ./server_data/relay:/data
     restart: unless-stopped

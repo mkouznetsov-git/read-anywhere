@@ -144,11 +144,15 @@ class RelayClient {
       );
 
   void send(SyncEnvelope envelope) {
+    sendControl(envelope.toJson());
+  }
+
+  void sendControl(Map<String, dynamic> payload) {
     final channel = _channel;
     if (channel == null) {
       throw StateError('RelayClient is not connected');
     }
-    channel.sink.add(jsonEncode(envelope.toJson()));
+    channel.sink.add(jsonEncode(payload));
   }
 
 

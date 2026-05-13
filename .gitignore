@@ -1,1 +1,13 @@
+# ReadArc relay runtime state
+server_data/
+
+# Flutter/Dart build outputs
+.dart_tool/
+build/
+.pub-cache/
+.pub/
+
+# OS/editor
 .DS_Store
+.idea/
+.vscode/

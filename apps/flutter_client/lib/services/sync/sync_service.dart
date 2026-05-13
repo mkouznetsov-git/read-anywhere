@@ -214,7 +214,10 @@ class SyncService {
   final _uploadLocks = <String>{};
   final _cancelledTransfers = <String>{};
   final _seenSecureEventIds = <String, DateTime>{};
-  static const _replayWindow = Duration(hours: 24);
+  // Sprint 27: relay can keep encrypted metadata events for offline devices.
+  // Keep replay protection aligned with the relay TTL while still rejecting
+  // duplicate eventIds inside the active window.
+  static const _replayWindow = Duration(days: 30);
 
   Timer? _reconnectTimer;
   Timer? _healthTimer;
@@ -840,12 +843,36 @@ class SyncService {
   }
 
   Future<void> _handleIncomingEnvelope(SyncEnvelope envelope) async {
+    var handled = false;
     try {
       await _handleIncomingEnvelopeUnsafe(envelope);
+      handled = true;
     } catch (error, stackTrace) {
       // A malformed file-transfer event must never break metadata sync.
       debugPrint('Sync event handling failed: $error\n$stackTrace');
       _appendLog('Ошибка обработки ${envelope.type}: $error');
+    } finally {
+      if (handled) {
+        _ackRelayQueueEnvelope(envelope);
+      }
+    }
+  }
+
+  void _ackRelayQueueEnvelope(SyncEnvelope envelope) {
+    final cursor = envelope.relayQueueSeq;
+    final client = _client;
+    if (cursor == null || client == null || !state.value.connected) return;
+    try {
+      client.sendControl({
+        'type': 'offline_queue_ack',
+        'accountId': envelope.accountId,
+        'deviceId': client.deviceId,
+        'payload': {
+          'cursor': cursor,
+        },
+      });
+    } catch (error) {
+      _appendLog('Не удалось подтвердить offline queue: $error');
     }
   }
 
