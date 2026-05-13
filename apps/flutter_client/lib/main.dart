@@ -17,6 +17,7 @@ import 'models/book.dart';
 import 'models/manifest.dart';
 import 'models/sync_settings.dart';
 import 'services/book_import_service.dart';
+import 'services/format_engines/djvu_embedded_probe.dart';
 import 'services/storage_service.dart';
 import 'services/sync/sync_service.dart';
 import 'ui/app_theme.dart';
@@ -3622,13 +3623,13 @@ Future<_DjvuArtifact> _prepareDjvuArtifact({
 
   // First try an existing processed artifact. This lets Android/opened devices
   // use a prepared DJVU cache once artifact sync is enabled, without needing a
-  // native DjVuLibre binary locally.
+  // embedded renderer locally.
   if (await manifestFile.exists()) {
     try {
       final data = jsonDecode(await manifestFile.readAsString()) as Map<String, dynamic>;
       final cachedPageCount = (data['pageCount'] as num?)?.toInt() ?? 0;
       final firstPage = File('${pagesDir.path}${Platform.pathSeparator}page_00001.png');
-      if (data['kind'] == 'djvu-pages-v1' &&
+      if ((data['kind'] == 'djvu-pages-v1' || data['kind'] == 'djvu-embedded-v1') &&
           data['sourceSha256'] == book.contentSha256 &&
           cachedPageCount > 0 &&
           await firstPage.exists() &&
@@ -3638,22 +3639,16 @@ Future<_DjvuArtifact> _prepareDjvuArtifact({
     } catch (_) {}
   }
 
-  if (!(Platform.isMacOS || Platform.isLinux || Platform.isWindows)) {
-    throw StateError('На этом устройстве пока нет нативного DJVU-конвертера. Откройте DJVU на Mac/desktop после установки DjVuLibre; подготовленные страницы будут использоваться как processed artifact.');
-  }
-  await _requireNativeTool('djvused');
-  await _requireNativeTool('ddjvu');
-
   final pageCount = await _readDjvuPageCount(sourceFile);
   if (pageCount == null || pageCount <= 0) {
-    throw StateError('Не удалось определить количество страниц DJVU через djvused. Проверьте, что файл открывается в DjVuLibre.');
+    throw StateError('ReadArc распознал DJVU как неподготовленный файл, но встроенный probe не смог определить количество страниц. Внешние ddjvu/djvused больше не используются.');
   }
 
   var reuse = false;
   if (await manifestFile.exists()) {
     try {
       final data = jsonDecode(await manifestFile.readAsString()) as Map<String, dynamic>;
-      reuse = data['kind'] == 'djvu-pages-v1' &&
+      reuse = (data['kind'] == 'djvu-pages-v1' || data['kind'] == 'djvu-embedded-v1') &&
           data['sourceSha256'] == book.contentSha256 &&
           data['pageCount'] == pageCount;
     } catch (_) {
@@ -3671,11 +3666,12 @@ Future<_DjvuArtifact> _prepareDjvuArtifact({
     const encoder = JsonEncoder.withIndent('  ');
     await manifestFile.writeAsString(
       encoder.convert({
-        'kind': 'djvu-pages-v1',
+        'kind': 'djvu-embedded-v1',
         'sourceSha256': book.contentSha256,
         'pageCount': pageCount,
-        'pageFormat': 'png',
-        'rendering': 'lazy-ddjvu',
+        'pageFormat': 'embedded-rgba-cache',
+        'rendering': 'embedded-djvu-engine',
+        'engine': 'djvu-rs MIT selected; FFI renderer pending',
         'preparedAt': DateTime.now().toUtc().toIso8601String(),
       }),
       flush: true,
@@ -3768,26 +3764,12 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
     try {
       if (await out.exists() && await out.length() > 0) return out;
     } catch (_) {}
-    final tmp = File('${out.path}.tmp');
-    try {
-      if (await tmp.exists()) await tmp.delete();
-    } catch (_) {}
-    final result = await _runNativeTool(
-      'ddjvu',
-      ['-format=png', '-page=${widget.pageNumber}', '-size=${pixelWidth}x$pixelHeight', widget.sourceFile.path, tmp.path],
-      timeout: const Duration(seconds: 45),
-    );
-    if (result.exitCode != 0) {
-      throw StateError('ddjvu exit ${result.exitCode}: ${result.stderr}');
-    }
-    if (!await tmp.exists() || await tmp.length() <= 0) {
-      throw StateError('ddjvu не создал изображение страницы ${widget.pageNumber}.');
-    }
-    try {
-      if (await out.exists()) await out.delete();
-    } catch (_) {}
-    await tmp.rename(out.path);
-    return out;
+    // Sprint 33 deliberately removes external ddjvu/djvused execution from the
+    // runtime path. The selected production direction is an embedded MIT Rust
+    // decoder (djvu-rs) exposed through the ReadArc format engine API. Until the
+    // native FFI binary is linked for the current platform, keep the app alive
+    // and show a per-page diagnostic instead of launching shell tools.
+    return null;
   }
 
   @override
@@ -3803,7 +3785,7 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
             if (snapshot.connectionState == ConnectionState.done) {
               return const ColoredBox(
                 color: Color(0xFFF8F1E3),
-                child: Center(child: Text('Не удалось отрисовать страницу DJVU')),
+                child: Center(child: Padding(padding: EdgeInsets.all(18), child: Text('DJVU-страница будет отрисована встроенным движком ReadArc. Внешние ddjvu/djvused отключены в Sprint 33.'))),
               );
             }
             return const ColoredBox(
@@ -3832,10 +3814,7 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
 
 String _djvuFriendlyError(Object error) {
   final message = '$error';
-  if (message.contains('ddjvu') || message.contains('djvused') || message.contains('No such file')) {
-    return 'Для чтения DJVU на macOS/Linux нужен DjVuLibre: команды ddjvu и djvused. На Mac установите его командой: brew install djvulibre. ReadArc теперь использует безопасный processed-reader: приложение не должно закрываться, но без этих инструментов подготовить страницы нельзя.\n\nТехнически: $message';
-  }
-  return '$message\n\nReadArc оставил приложение открытым и не стал показывать бинарный DJVU как текст.';
+  return '$message\n\nReadArc больше не использует внешние ddjvu/djvused/djvutxt. Для DJVU выбран встроенный путь: pure Rust djvu-rs через native/FFI engine. Приложение должно оставаться открытым и показывать диагностику внутри reader-а.';
 }
 
 Future<void> _requireNativeTool(String executable) async {
@@ -3884,6 +3863,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
   Timer? _saveDebounce;
   Timer? _scrollRedrawThrottle;
   bool _textLayerLoading = false;
+  bool _largePdfSinglePageMode = false;
   bool _fullScreen = false;
   bool _showTextLayer = false;
   bool _restoringScroll = false;
@@ -3929,6 +3909,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
     }
     try {
       final fileSize = await file.length();
+      final largePdfSinglePageMode = fileSize >= 24 * 1024 * 1024;
       final doc = await PdfDocument.openFile(file.path).timeout(const Duration(seconds: 15));
       final pages = doc.pagesCount;
       final geometries = await _readPdfPageGeometries(doc, pages).timeout(const Duration(seconds: 8));
@@ -3942,6 +3923,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
         _page = initialPage;
         _pages = pages;
         _pageGeometries = geometries;
+        _largePdfSinglePageMode = largePdfSinglePageMode;
         _document = doc;
         _textLayer = '';
         _loadError = null;
@@ -4184,7 +4166,22 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                           : LayoutBuilder(
                               builder: (context, constraints) {
                                 _lastViewportWidth = constraints.maxWidth;
-                                final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, Platform.isAndroid ? 1.15 : 1.45).toDouble();
+                                final dpr = MediaQuery.of(context).devicePixelRatio.clamp(0.85, Platform.isAndroid ? 1.0 : 1.15).toDouble();
+                                if (_largePdfSinglePageMode) {
+                                  final geometry = (_page - 1) < _pageGeometries.length ? _pageGeometries[_page - 1] : const _PdfPageGeometry(width: 595, height: 842);
+                                  final displayWidth = constraints.maxWidth.clamp(220.0, 1800.0).toDouble();
+                                  final displayHeight = _pdfPageDisplayHeight(geometry, displayWidth);
+                                  return _LargePdfSinglePageReader(
+                                    document: document,
+                                    page: _page,
+                                    pages: _pages,
+                                    displayWidth: displayWidth,
+                                    displayHeight: displayHeight,
+                                    devicePixelRatio: dpr,
+                                    onPrevious: _page <= 1 ? null : () { setState(() => _page--); unawaited(_savePage(_page)); },
+                                    onNext: _page >= _pages ? null : () { setState(() => _page++); unawaited(_savePage(_page)); },
+                                  );
+                                }
                                 return ColoredBox(
                                   color: const Color(0xFFF3E7CF),
                                   child: Scrollbar(
@@ -4238,6 +4235,102 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                       ),
                   ],
                 ),
+    );
+  }
+}
+
+
+class _LargePdfSinglePageReader extends StatelessWidget {
+  const _LargePdfSinglePageReader({
+    required this.document,
+    required this.page,
+    required this.pages,
+    required this.displayWidth,
+    required this.displayHeight,
+    required this.devicePixelRatio,
+    required this.onPrevious,
+    required this.onNext,
+  });
+
+  final PdfDocument document;
+  final int page;
+  final int pages;
+  final double displayWidth;
+  final double displayHeight;
+  final double devicePixelRatio;
+  final VoidCallback? onPrevious;
+  final VoidCallback? onNext;
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: const Color(0xFFF3E7CF),
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 10, 18, 6),
+            child: Row(
+              children: [
+                const Icon(Icons.memory_rounded, size: 18, color: Color(0xFF5E6380)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Большой PDF открыт в экономном режиме: ReadArc рендерит только одну страницу, чтобы не замораживать интерфейс.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: const Color(0xFF5E6380)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Scrollbar(
+              thumbVisibility: true,
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(0, 8, 0, 16),
+                child: Center(
+                  child: _PdfFitWidthPage(
+                    key: ValueKey('large-pdf-page-$page'),
+                    document: document,
+                    pageNumber: page,
+                    displayWidth: displayWidth,
+                    displayHeight: displayHeight,
+                    devicePixelRatio: devicePixelRatio,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          SafeArea(
+            top: false,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(18, 8, 18, 12),
+              child: Row(
+                children: [
+                  FilledButton.tonalIcon(
+                    onPressed: onPrevious,
+                    icon: const Icon(Icons.chevron_left_rounded),
+                    label: const Text('Назад'),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      '$page / $pages',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontWeight: FontWeight.w700, color: Color(0xFF2A2F4A)),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  FilledButton.tonalIcon(
+                    onPressed: onNext,
+                    icon: const Icon(Icons.chevron_right_rounded),
+                    label: const Text('Вперёд'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -4981,85 +5074,42 @@ Future<List<File>> _tryExtractChmWithNativeTools(File sourceFile) async {
 }
 
 Future<_Fb2Document> _parseDjvuDocumentFromFile(File sourceFile) async {
-  final textDoc = await _tryExtractDjvuText(sourceFile);
-  if (textDoc != null && textDoc.totalTextChars > 120) return textDoc;
-
-  final imageDoc = await _tryRenderDjvuPagesWithNativeTools(sourceFile);
-  if (imageDoc != null && imageDoc.blocks.isNotEmpty) return imageDoc;
-
+  final pageCount = await _readDjvuPageCount(sourceFile) ?? 0;
   return _makeFb2Document([
+    _Fb2Block.title('DJVU'),
     _Fb2Block.paragraph([
       _Fb2Inline(
-        'DJVU-файл сохранён и синхронизируется как оригинал. Для полноценного просмотра ReadArc теперь ищет нативные инструменты DjVuLibre (djvutxt/ddjvu/djvused). На этом устройстве они не найдены или не смогли открыть файл, поэтому бинарные данные не показываются как текст.',
+        'DJVU-файл распознан встроенным ReadArc probe. Страниц: ${pageCount <= 0 ? 'не определено' : pageCount}. Внешние DjVuLibre/ddjvu/djvused больше не используются. Полный рендер страниц переводится на встроенный djvu-rs engine.',
       ),
     ]),
   ]);
 }
 
 Future<_Fb2Document?> _tryExtractDjvuText(File sourceFile) async {
-  if (!(Platform.isMacOS || Platform.isLinux || Platform.isWindows)) return null;
-  for (final command in const ['djvutxt', 'djvused']) {
-    try {
-      final args = command == 'djvutxt' ? [sourceFile.path] : ['-e', 'print-pure-txt', sourceFile.path];
-      final result = await _runNativeTool(command, args, timeout: const Duration(seconds: 25));
-      if (result.exitCode != 0) continue;
-      final text = _normalizeText('${result.stdout}');
-      if (!_looksLikeReadableDocumentPreview(text, minLetters: 80, minWords: 18)) continue;
-      final blocks = text
-          .split(RegExp(r'\n{2,}'))
-          .map((part) => part.trim())
-          .where((part) => part.isNotEmpty)
-          .map((part) => _Fb2Block.paragraph([_Fb2Inline(part)]))
-          .toList(growable: false);
-      return _makeFb2Document(blocks);
-    } catch (_) {}
-  }
+  // No shell tools in production. Text extraction will be provided by the same
+  // embedded djvu-rs engine as page rendering.
   return null;
 }
 
 Future<_Fb2Document?> _tryRenderDjvuPagesWithNativeTools(File sourceFile) async {
-  if (!(Platform.isMacOS || Platform.isLinux || Platform.isWindows)) return null;
-  Directory? tempDir;
-  try {
-    tempDir = await Directory.systemTemp.createTemp('readarc_djvu_');
-    final pages = await _readDjvuPageCount(sourceFile) ?? 12;
-    final maxPages = pages.clamp(1, 12).toInt();
-    final blocks = <_Fb2Block>[];
-    blocks.add(_Fb2Block.title('DJVU'));
-    for (var page = 1; page <= maxPages; page++) {
-      final out = File('${tempDir.path}${Platform.pathSeparator}page_${page.toString().padLeft(4, '0')}.png');
-      var rendered = false;
-      for (final command in const ['ddjvu']) {
-        try {
-          final result = await _runNativeTool(command, ['-format=png', '-page=$page', '-size=1100x1500', sourceFile.path, out.path], timeout: const Duration(seconds: 18));
-          if (result.exitCode == 0 && await out.exists() && await out.length() > 0 && await out.length() <= 6 * 1024 * 1024) {
-            rendered = true;
-            break;
-          }
-        } catch (_) {}
-      }
-      if (!rendered) break;
-      blocks.add(_Fb2Block.title('Страница $page'));
-      try {
-        blocks.add(_Fb2Block.image(await out.readAsBytes()));
-      } catch (error) {
-        debugPrint('Cannot read rendered DJVU page $page: $error');
-        break;
-      }
-    }
-    if (blocks.length > 1) return _makeFb2Document(blocks);
-  } catch (_) {}
+  // Deprecated in Sprint 33. Kept only so older call sites compile while the
+  // embedded format-engine module takes over.
   return null;
 }
 
 Future<int?> _readDjvuPageCount(File sourceFile) async {
   try {
-    final result = await _runNativeTool('djvused', ['-e', 'n', sourceFile.path], timeout: const Duration(seconds: 8));
-    if (result.exitCode == 0) {
-      final parsed = int.tryParse('${result.stdout}'.trim());
-      if (parsed != null && parsed > 0) return parsed;
-    }
-  } catch (_) {}
+    final length = await sourceFile.length();
+    final limit = length < 16 * 1024 * 1024 ? length : 16 * 1024 * 1024;
+    final bytes = await sourceFile.openRead(0, limit).fold<BytesBuilder>(BytesBuilder(copy: false), (builder, chunk) {
+      builder.add(chunk);
+      return builder;
+    });
+    final probe = DjvuEmbeddedProbe.inspect(bytes.takeBytes());
+    if (probe.isDjvu && probe.pageCount > 0) return probe.pageCount;
+  } catch (error) {
+    debugPrint('Embedded DJVU probe failed: $error');
+  }
   return null;
 }
 
@@ -5457,7 +5507,7 @@ class _UnsupportedReaderPlaceholder extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             const Text(
-              'Production-версия должна подключить Readium/MuPDF/DjVuLibre/DOCX adapter и сохранять locator для каждого формата.',
+              'Production-версия должна подключить встроенные Readium/PDFium/DJVU/CHM/DOCX engines и сохранять locator для каждого формата.',
               textAlign: TextAlign.center,
             ),
           ],
