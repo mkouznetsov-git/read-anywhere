@@ -1,10 +1,11 @@
+name: readarc
 services:
   relay:
     build:
       context: ./server/rendezvous_relay
-    image: readanywhere-relay:dev
+    image: readarc-relay:dev
     ports:
-      - "8787:8787"
+      - "127.0.0.1:8787:8787"
     environment:
       PORT: "8787"
     restart: unless-stopped

@@ -26,7 +26,7 @@ rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 
 build_with_optional_define() {
-  local relay_define="${READARC_DEFAULT_RELAY_URL:-${READANYWHERE_DEFAULT_RELAY_URL:-}}"
+  local relay_define="${READARC_DEFAULT_RELAY_URL:-${READANYWHERE_DEFAULT_RELAY_URL:-https://relay.readarc.ru}}"
   local args=("$@")
   if [[ -n "$relay_define" ]]; then
     args+=(--dart-define="READARC_DEFAULT_RELAY_URL=$relay_define")

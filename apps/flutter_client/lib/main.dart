@@ -4670,14 +4670,11 @@ class SyncScreen extends StatefulWidget {
 }
 
 class _SyncScreenState extends State<SyncScreen> {
-  final _relayController = TextEditingController();
-  final _personalHubRelayController = TextEditingController();
   final _accountController = TextEditingController();
   final _deviceNameController = TextEditingController();
   final _pairingInputController = TextEditingController();
   LibraryManifest? _manifest;
   SyncSettings? _settings;
-  RelayEndpointMode _endpointMode = RelayEndpointMode.custom;
   bool _busy = false;
   bool _pairingBusy = false;
   bool _logExpanded = false;
@@ -4691,8 +4688,6 @@ class _SyncScreenState extends State<SyncScreen> {
 
   @override
   void dispose() {
-    _relayController.dispose();
-    _personalHubRelayController.dispose();
     _accountController.dispose();
     _deviceNameController.dispose();
     _pairingInputController.dispose();
@@ -4701,26 +4696,18 @@ class _SyncScreenState extends State<SyncScreen> {
 
   Future<void> _load() async {
     final manifest = await widget.storage.loadManifest();
-    final settings = await widget.storage.loadSyncSettings();
+    final settings = (await widget.storage.loadSyncSettings()).asOfficial(autoConnect: true);
+    await widget.storage.saveSyncSettings(settings);
     if (!mounted) return;
     _manifest = manifest;
     _settings = settings;
-    _endpointMode = settings.endpointMode == RelayEndpointMode.localDevelopment ? RelayEndpointMode.custom : settings.endpointMode;
-    _relayController.text = settings.endpointMode == RelayEndpointMode.localDevelopment
-        ? ReadAnywhereRelayConfig.localDevelopmentRelayUrl
-        : settings.customRelayUrl;
-    _personalHubRelayController.text = settings.personalHubRelayUrl;
     _accountController.text = manifest.accountId;
     _deviceNameController.text = manifest.deviceName;
     setState(() {});
   }
 
-  SyncSettings _settingsFromForm({bool? autoConnect}) => SyncSettings(
-        endpointMode: _endpointMode,
-        customRelayUrl: _relayController.text.trim(),
-        personalHubRelayUrl: _personalHubRelayController.text.trim(),
-        autoConnect: autoConnect ?? _settings?.autoConnect ?? false,
-      );
+  SyncSettings _settingsFromForm({bool? autoConnect}) =>
+      SyncSettings(autoConnect: autoConnect ?? true).asOfficial(autoConnect: true);
 
   Future<void> _saveIdentity() async {
     setState(() => _busy = true);
@@ -4743,47 +4730,10 @@ class _SyncScreenState extends State<SyncScreen> {
     }
   }
 
-  Future<void> _saveConnectionSettings() async {
-    setState(() => _busy = true);
-    try {
-      final settings = _settingsFromForm(autoConnect: true);
-      if (settings.usesOfficialPlaceholder) {
-        throw StateError(
-          'Официальный relay ещё не настроен в этой сборке. Выберите Personal Hub или свой relay.',
-        );
-      }
-      if (settings.usesPersonalHubPlaceholder) {
-        throw StateError(
-          'Для Personal Hub вставьте реальный Funnel/Tunnel URL, например https://your-device.your-tailnet.ts.net.',
-        );
-      }
-      await widget.storage.saveSyncSettings(settings);
-      try {
-        await widget.sync.connect(relayUrl: settings.effectiveRelayUrl);
-      } catch (_) {
-        widget.sync.startAutoReconnect(relayUrl: settings.effectiveRelayUrl);
-      }
-      _settings = await widget.storage.loadSyncSettings();
-      _manifest = await widget.storage.loadManifest();
-      if (!mounted) return;
-      setState(() {});
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Соединение сохранено. Автоподключение включено.')),
-      );
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не удалось сохранить соединение: $error')),
-      );
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
   Future<void> _createPairingInvite() async {
     setState(() => _pairingBusy = true);
     try {
-      final settings = _settingsFromForm(autoConnect: _settings?.autoConnect ?? false);
+      final settings = _settingsFromForm(autoConnect: true);
       await widget.storage.saveSyncSettings(settings);
       final invite = await widget.sync.createPairingInvite(settings: settings);
       if (!mounted) return;
@@ -4809,7 +4759,7 @@ class _SyncScreenState extends State<SyncScreen> {
     if (!forceFresh && existing != null && !existing.isNearExpiry) return existing;
     setState(() => _pairingBusy = true);
     try {
-      final settings = _settingsFromForm(autoConnect: _settings?.autoConnect ?? false);
+      final settings = _settingsFromForm(autoConnect: true);
       await widget.storage.saveSyncSettings(settings);
       final invite = await widget.sync.createPairingInvite(settings: settings);
       if (!mounted) return invite;
@@ -5006,81 +4956,12 @@ class _SyncScreenState extends State<SyncScreen> {
                 ),
               ),
               _SectionCard(
-                title: 'Соединение',
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      syncState.connected
-                          ? 'Соединение активно. ReadArc синхронизирует библиотеку автоматически.'
-                          : (_settings?.autoConnect == true
-                              ? 'Автоподключение включено. Если связи нет, ReadArc будет переподключаться сам.'
-                              : 'Выберите endpoint и сохраните соединение, чтобы включить автоподключение.'),
-                    ),
-                    const SizedBox(height: 12),
-                    _RelayModeOption(
-                      value: RelayEndpointMode.official,
-                      groupValue: _endpointMode,
-                      title: 'ReadArc relay',
-                      subtitle: ReadAnywhereRelayConfig.officialRelayUrl,
-                      onChanged: (value) => setState(() => _endpointMode = value),
-                    ),
-                    _RelayModeOption(
-                      value: RelayEndpointMode.personalHub,
-                      groupValue: _endpointMode,
-                      title: 'Personal Hub / Tailscale Funnel',
-                      subtitle: 'Ваш relay, опубликованный через Tailscale Funnel/Cloudflare Tunnel',
-                      onChanged: (value) => setState(() => _endpointMode = value),
-                    ),
-                    if (_endpointMode == RelayEndpointMode.personalHub) ...[
-                      const SizedBox(height: 8),
-                      TextField(
-                        controller: _personalHubRelayController,
-                        decoration: const InputDecoration(
-                          labelText: 'Personal Hub URL',
-                          helperText: 'Например: https://your-device.your-tailnet.ts.net',
-                        ),
-                      ),
-                    ],
-                    _RelayModeOption(
-                      value: RelayEndpointMode.custom,
-                      groupValue: _endpointMode,
-                      title: 'Свой relay',
-                      subtitle: 'VPS, Cloudflare Tunnel, домашний сервер или LAN/VPN endpoint',
-                      onChanged: (value) => setState(() => _endpointMode = value),
-                    ),
-                    if (_endpointMode == RelayEndpointMode.custom) ...[
-                      const SizedBox(height: 8),
-                      TextField(
-                        controller: _relayController,
-                        decoration: const InputDecoration(
-                          labelText: 'URL соединения',
-                          helperText: 'Например: https://relay.example.com или http://192.168.1.10:8787',
-                        ),
-                      ),
-                    ],
-                    const SizedBox(height: 12),
-                    SelectableText(
-                      'Сейчас: ${SyncSettings(endpointMode: _endpointMode, customRelayUrl: _relayController.text, personalHubRelayUrl: _personalHubRelayController.text).effectiveRelayUrl}',
-                    ),
-                    const SizedBox(height: 12),
-                    FilledButton.icon(
-                      onPressed: _busy ? null : _saveConnectionSettings,
-                      icon: _busy
-                          ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                          : const Icon(Icons.save_rounded),
-                      label: const Text('Сохранить соединение'),
-                    ),
-                  ],
-                ),
-              ),
-              _SectionCard(
                 title: 'Подключение устройства',
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'QR-код уже содержит всю информацию для подключения: адрес соединения, аккаунт и защищённый ключ. На новом устройстве достаточно отсканировать QR. Короткий код оставлен как запасной вариант.',
+                      'QR-код уже содержит всю информацию для подключения к аккаунту. На новом устройстве достаточно отсканировать QR. Короткий код оставлен как запасной вариант.',
                     ),
                     const SizedBox(height: 12),
                     Row(
@@ -5130,8 +5011,6 @@ class _SyncScreenState extends State<SyncScreen> {
                             ),
                             const SizedBox(height: 8),
                             Text('Действует до: ${_pairingInvite!.expiresAt.toLocal()}'),
-                            const SizedBox(height: 8),
-                            SelectableText('Соединение: ${_pairingInvite!.relayUrl}'),
                             const SizedBox(height: 12),
                             OutlinedButton.icon(
                               onPressed: _copyPairingInvite,
@@ -5340,7 +5219,7 @@ class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Text(
-                'Наведите камеру на QR-код ReadArc. Выбирать тип соединения на этом устройстве не нужно.',
+                'Наведите камеру на QR-код ReadArc. Приложение подключится через официальный relay автоматически.',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.bodyMedium,
               ),
@@ -5348,36 +5227,6 @@ class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
           ),
         ],
       ),
-    );
-  }
-}
-
-class _RelayModeOption extends StatelessWidget {
-  const _RelayModeOption({
-    required this.value,
-    required this.groupValue,
-    required this.title,
-    required this.subtitle,
-    required this.onChanged,
-  });
-
-  final RelayEndpointMode value;
-  final RelayEndpointMode groupValue;
-  final String title;
-  final String subtitle;
-  final ValueChanged<RelayEndpointMode> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return RadioListTile<RelayEndpointMode>(
-      contentPadding: EdgeInsets.zero,
-      value: value,
-      groupValue: groupValue,
-      onChanged: (next) {
-        if (next != null) onChanged(next);
-      },
-      title: Text(title),
-      subtitle: Text(subtitle),
     );
   }
 }

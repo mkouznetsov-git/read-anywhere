@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE_DIR="$HOME/.config/systemd/user"
-SERVICE_FILE="$SERVICE_DIR/readanywhere-relay.service"
+SERVICE_FILE="$SERVICE_DIR/readarc-relay.service"
 mkdir -p "$SERVICE_DIR"
 
 cat > "$SERVICE_FILE" <<SERVICE
@@ -25,8 +25,8 @@ WantedBy=default.target
 SERVICE
 
 systemctl --user daemon-reload
-systemctl --user enable --now readanywhere-relay.service
+systemctl --user enable --now readarc-relay.service
 
-echo "Installed and started user service: readanywhere-relay.service"
-echo "Status: systemctl --user status readanywhere-relay.service"
+echo "Installed and started user service: readarc-relay.service"
+echo "Status: systemctl --user status readarc-relay.service"
 echo "Health check: curl http://127.0.0.1:8787/health"

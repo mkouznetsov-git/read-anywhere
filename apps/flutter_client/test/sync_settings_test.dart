@@ -2,49 +2,51 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:readarc/models/sync_settings.dart';
 
 void main() {
-  test('migrates legacy relayUrl settings to custom mode', () {
-    final settings = SyncSettings.fromJson({
-      'relayUrl': 'https://relay.example.test',
-      'autoConnect': true,
-    });
+  test('defaults to official ReadArc relay with autoconnect', () {
+    const settings = SyncSettings();
 
-    expect(settings.endpointMode, RelayEndpointMode.custom);
-    expect(settings.customRelayUrl, 'https://relay.example.test');
-    expect(settings.effectiveRelayUrl, 'https://relay.example.test');
+    expect(settings.endpointMode, RelayEndpointMode.official);
+    expect(settings.effectiveRelayUrl, ReadArcRelayConfig.officialRelayUrl);
+    expect(settings.effectiveRelayUrl, 'https://relay.readarc.ru');
     expect(settings.autoConnect, isTrue);
   });
 
-  test('detects local development legacy relayUrl', () {
+  test('migrates legacy custom relayUrl to official relay', () {
     final settings = SyncSettings.fromJson({
-      'relayUrl': 'http://127.0.0.1:8787',
+      'relayUrl': 'https://old-personal-hub.tailnet.ts.net',
+      'autoConnect': false,
     });
 
-    expect(settings.endpointMode, RelayEndpointMode.localDevelopment);
-    expect(settings.effectiveRelayUrl, ReadAnywhereRelayConfig.localDevelopmentRelayUrl);
+    expect(settings.endpointMode, RelayEndpointMode.official);
+    expect(settings.effectiveRelayUrl, ReadArcRelayConfig.officialRelayUrl);
+    expect(settings.autoConnect, isTrue);
   });
 
-  test('official mode uses compile-time default relay URL', () {
-    const settings = SyncSettings(endpointMode: RelayEndpointMode.official);
-
-    expect(settings.effectiveRelayUrl, ReadAnywhereRelayConfig.officialRelayUrl);
-  });
-
-  test('personal hub mode uses dedicated hub URL', () {
+  test('copyWith keeps official relay while preserving explicit autoconnect flag', () {
     const settings = SyncSettings(
+      endpointMode: RelayEndpointMode.custom,
+      customRelayUrl: 'http://127.0.0.1:8787',
+      autoConnect: false,
+    );
+
+    final copied = settings.copyWith(
       endpointMode: RelayEndpointMode.personalHub,
       personalHubRelayUrl: 'https://my-mac.tailnet.ts.net',
     );
 
-    expect(settings.effectiveRelayUrl, 'https://my-mac.tailnet.ts.net');
-    expect(settings.usesPersonalHubPlaceholder, isFalse);
+    expect(copied.endpointMode, RelayEndpointMode.official);
+    expect(copied.effectiveRelayUrl, ReadArcRelayConfig.officialRelayUrl);
+    expect(copied.autoConnect, isFalse);
   });
 
-  test('migrates Tailscale-like legacy relayUrl to personal hub mode', () {
-    final settings = SyncSettings.fromJson({
-      'relayUrl': 'https://my-mac.tailnet.ts.net',
-    });
+  test('toJson stores only official relay fields', () {
+    const settings = SyncSettings();
+    final json = settings.toJson();
 
-    expect(settings.endpointMode, RelayEndpointMode.personalHub);
-    expect(settings.personalHubRelayUrl, 'https://my-mac.tailnet.ts.net');
+    expect(json['endpointMode'], 'official');
+    expect(json['relayUrl'], ReadArcRelayConfig.officialRelayUrl);
+    expect(json['customRelayUrl'], ReadArcRelayConfig.officialRelayUrl);
+    expect(json['personalHubRelayUrl'], ReadArcRelayConfig.officialRelayUrl);
+    expect(json['autoConnect'], isTrue);
   });
 }

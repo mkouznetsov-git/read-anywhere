@@ -539,9 +539,12 @@ class SyncService {
     required SyncSettings fallbackSettings,
   }) async {
     final parsed = _parsePairingInput(input);
-    final relayUrl = parsed.relayUrl ?? fallbackSettings.effectiveRelayUrl;
-    final effectiveSettings = _settingsForClaimedRelayUrl(relayUrl, fallbackSettings);
+    final effectiveSettings = _settingsForClaimedRelayUrl(
+      parsed.relayUrl ?? fallbackSettings.effectiveRelayUrl,
+      fallbackSettings,
+    );
     _validateEndpointForPairing(effectiveSettings);
+    final relayUrl = effectiveSettings.effectiveRelayUrl;
 
     final local = await _storage.loadManifest();
     final uri = _buildEndpointUri(relayUrl, '/pairing/claim');
@@ -573,7 +576,7 @@ class SyncService {
     final ownerDeviceId = response?['ownerDeviceId']?.toString() ?? parsed.ownerDeviceId ?? '';
     final ownerDeviceName = response?['ownerDeviceName']?.toString() ?? parsed.ownerDeviceName ?? 'Устройство';
     final accountEncryptionKey = parsed.accountEncryptionKey ?? response?['accountEncryptionKey']?.toString() ?? '';
-    final returnedRelayUrl = response?['relayUrl']?.toString() ?? relayUrl;
+    final returnedRelayUrl = relayUrl;
     if (accountId.isEmpty || ownerDeviceId.isEmpty) {
       throw StateError('Relay вернул неполные pairing-данные${claimError == null ? '' : ': $claimError'}');
     }
@@ -592,11 +595,11 @@ class SyncService {
       ownerDeviceName: ownerDeviceName,
     );
     _appendLog('Pairing выполнен. Аккаунт подключён автоматически.');
-    await connect(relayUrl: returnedRelayUrl);
+    await connect(relayUrl: relayUrl);
     await refreshMetadata(reason: 'pairing_completed');
     return PairingClaimResult(
       accountId: accountId,
-      relayUrl: returnedRelayUrl,
+      relayUrl: relayUrl,
       ownerDeviceId: ownerDeviceId,
       ownerDeviceName: ownerDeviceName,
       accountEncryptionKey: accountEncryptionKey,
@@ -605,10 +608,7 @@ class SyncService {
 
   void _validateEndpointForPairing(SyncSettings settings) {
     if (settings.usesOfficialPlaceholder) {
-      throw StateError('Официальный relay ещё не настроен в этой сборке. Выберите Personal Hub или свой relay.');
-    }
-    if (settings.usesPersonalHubPlaceholder) {
-      throw StateError('Для Personal Hub вставьте реальный Funnel/Tunnel URL.');
+      throw StateError('Официальный relay ReadArc не настроен в этой сборке.');
     }
   }
 
@@ -686,26 +686,11 @@ class SyncService {
 
   String _normalizePairingCode(String raw) => raw.replaceAll(RegExp(r'[^0-9]'), '');
 
-  SyncSettings _settingsForClaimedRelayUrl(String relayUrl, SyncSettings fallback) {
-    final normalized = relayUrl.trim();
-    final looksLocal = normalized.contains('127.0.0.1') || normalized.contains('localhost');
-    final looksPersonalHub = normalized.contains('.ts.net') ||
-        normalized.contains('trycloudflare.com') ||
-        normalized.contains('tailscale') ||
-        normalized.contains('funnel');
-    if (looksLocal) {
-      return fallback.copyWith(endpointMode: RelayEndpointMode.localDevelopment);
-    }
-    if (looksPersonalHub) {
-      return fallback.copyWith(
-        endpointMode: RelayEndpointMode.personalHub,
-        personalHubRelayUrl: normalized,
-      );
-    }
-    return fallback.copyWith(
-      endpointMode: RelayEndpointMode.custom,
-      customRelayUrl: normalized,
-    );
+  SyncSettings _settingsForClaimedRelayUrl(String _relayUrl, SyncSettings fallback) {
+    // Sprint 25: all client connections use the official ReadArc relay.
+    // Older QR links may still carry a custom/Tailscale relay parameter; keep
+    // accepting the link but ignore that endpoint for the actual connection.
+    return fallback.asOfficial(autoConnect: true);
   }
 
   Future<bool> requestBookFile(BookRecord book) async {

@@ -37,8 +37,8 @@ docker compose up --build relay
 
 ```bash
 cd server/rendezvous_relay
-docker build -t readanywhere-relay .
-docker run --rm -p 8787:8787 -e PORT=8787 readanywhere-relay
+docker build -t readarc-relay .
+docker run --rm -p 8787:8787 -e PORT=8787 readarc-relay
 ```
 
 ## Endpoint

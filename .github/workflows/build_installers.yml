@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       default_relay_url:
-        description: 'Optional default relay URL compiled into the app, e.g. https://your-hub.ts.net'
+        description: 'Optional default relay URL compiled into the app. Default is https://relay.readarc.ru'
         required: false
         default: ''
       build_debug_artifacts:
@@ -56,8 +56,8 @@ permissions:
 env:
   # Set repository variable READARC_DEFAULT_RELAY_URL after choosing a relay,
   # or pass default_relay_url when manually running this workflow.
-  READARC_DEFAULT_RELAY_URL: ${{ github.event.inputs.default_relay_url || vars.READARC_DEFAULT_RELAY_URL || vars.READANYWHERE_DEFAULT_RELAY_URL || '' }}
-  READANYWHERE_DEFAULT_RELAY_URL: ${{ github.event.inputs.default_relay_url || vars.READARC_DEFAULT_RELAY_URL || vars.READANYWHERE_DEFAULT_RELAY_URL || '' }}
+  READARC_DEFAULT_RELAY_URL: ${{ github.event.inputs.default_relay_url || vars.READARC_DEFAULT_RELAY_URL || vars.READANYWHERE_DEFAULT_RELAY_URL || 'https://relay.readarc.ru' }}
+  READANYWHERE_DEFAULT_RELAY_URL: ${{ github.event.inputs.default_relay_url || vars.READARC_DEFAULT_RELAY_URL || vars.READANYWHERE_DEFAULT_RELAY_URL || 'https://relay.readarc.ru' }}
   READARC_BASE_VERSION: '0.1.0'
   READARC_BUILD_NUMBER: ${{ github.run_number }}
   BUILD_DEBUG_ARTIFACTS: ${{ github.event.inputs.build_debug_artifacts || 'false' }}
