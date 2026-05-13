@@ -202,6 +202,42 @@ class StorageService {
   }
 
 
+  /// Creates a fresh local device identity when this installation was previously
+  /// revoked and the user scans a new owner QR code. Reusing the old deviceId
+  /// would immediately match the owner's revocation tombstone again, so a
+  /// reconnected phone/tablet must come back as a new trusted device. The old
+  /// revoked record is preserved for audit/history.
+  Future<LibraryManifest> rotateCurrentDeviceIdentityForPairing() async {
+    final manifest = await loadManifest();
+    if (!manifest.isCurrentDeviceRevoked) return manifest;
+
+    final newDeviceId = 'device-${_uuid.v4()}';
+    final newKeyPair = await _newDeviceSigningKeyPair();
+    final now = DateTime.now().toUtc();
+    final devices = [
+      ...manifest.trustedDevices,
+      TrustedDeviceRecord(
+        deviceId: newDeviceId,
+        name: manifest.deviceName,
+        role: 'device',
+        publicKey: newKeyPair.publicKey,
+        keyFingerprint: _fingerprint(newKeyPair.publicKey),
+        addedAt: now,
+        lastSeenAt: now,
+      ),
+    ];
+
+    final updated = manifest.copyWith(
+      deviceId: newDeviceId,
+      deviceSigningPublicKey: newKeyPair.publicKey,
+      deviceSigningPrivateKey: newKeyPair.privateKey,
+      trustedDevices: devices,
+    );
+    await saveManifest(updated);
+    return updated;
+  }
+
+
 
   Future<LibraryManifest> revokeTrustedDevice(String deviceId, {String reason = 'revoked_by_owner'}) async {
     final manifest = await loadManifest();

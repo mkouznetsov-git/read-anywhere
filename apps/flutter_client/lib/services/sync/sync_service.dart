@@ -561,7 +561,12 @@ class SyncService {
     _validateEndpointForPairing(effectiveSettings);
     final relayUrl = effectiveSettings.effectiveRelayUrl;
 
-    final local = await _storage.loadManifest();
+    var local = await _storage.loadManifest();
+    if (local.isCurrentDeviceRevoked) {
+      local = await _storage.rotateCurrentDeviceIdentityForPairing();
+      _appendLog('Создана новая идентичность устройства для повторного подключения после отзыва доступа.');
+    }
+
     final uri = _buildEndpointUri(relayUrl, '/pairing/claim');
     Map<String, dynamic>? response;
     Object? claimError;
