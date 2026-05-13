@@ -1,6 +1,7 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
+use std::io::Write;
 
 use djvu_rs::Document;
 
@@ -133,4 +134,104 @@ pub extern "C" fn readarc_djvu_render_page_rgba(
         -5
     }))
     .unwrap_or(-99)
+}
+
+
+fn readarc_pixmap_to_rgba(data: &[u8], pixels: usize) -> Option<Vec<u8>> {
+    let required = pixels.checked_mul(4)?;
+    if data.len() == required {
+        return Some(data.to_vec());
+    }
+    if data.len() == pixels.checked_mul(3)? {
+        let mut out = vec![0u8; required];
+        for i in 0..pixels {
+            let src = i * 3;
+            let dst = i * 4;
+            out[dst] = data[src];
+            out[dst + 1] = data[src + 1];
+            out[dst + 2] = data[src + 2];
+            out[dst + 3] = 255;
+        }
+        return Some(out);
+    }
+    if data.len() == pixels {
+        let mut out = vec![0u8; required];
+        for i in 0..pixels {
+            let v = data[i];
+            let dst = i * 4;
+            out[dst] = v;
+            out[dst + 1] = v;
+            out[dst + 2] = v;
+            out[dst + 3] = 255;
+        }
+        return Some(out);
+    }
+    None
+}
+
+#[no_mangle]
+pub extern "C" fn readarc_djvu_render_page_png(
+    data: *const u8,
+    len: usize,
+    page_index: u32,
+    target_width: u32,
+    target_height: u32,
+    out_len: *mut usize,
+) -> *mut u8 {
+    if data.is_null() || len == 0 || out_len.is_null() || target_width == 0 || target_height == 0 {
+        return ptr::null_mut();
+    }
+
+    catch_unwind(AssertUnwindSafe(|| {
+        unsafe { *out_len = 0; }
+        let bytes = unsafe { slice::from_raw_parts(data, len) }.to_vec();
+        let Ok(doc) = Document::from_bytes(bytes) else {
+            return ptr::null_mut();
+        };
+        let Ok(page) = doc.page(page_index as usize) else {
+            return ptr::null_mut();
+        };
+        let Ok(pixmap) = page.render_to_size(target_width, target_height) else {
+            return ptr::null_mut();
+        };
+        let pixels = (target_width as usize).saturating_mul(target_height as usize);
+        let Some(rgba) = readarc_pixmap_to_rgba(pixmap.as_ref(), pixels) else {
+            return ptr::null_mut();
+        };
+
+        let mut png_bytes = Vec::<u8>::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, target_width, target_height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_compression(png::Compression::Fast);
+            encoder.set_filter(png::FilterType::NoFilter);
+            let Ok(mut writer) = encoder.write_header() else {
+                return ptr::null_mut();
+            };
+            if writer.write_image_data(&rgba).is_err() {
+                return ptr::null_mut();
+            }
+        }
+        if png_bytes.is_empty() {
+            return ptr::null_mut();
+        }
+        let len = png_bytes.len();
+        let mut boxed = png_bytes.into_boxed_slice();
+        let ptr = boxed.as_mut_ptr();
+        std::mem::forget(boxed);
+        unsafe { *out_len = len; }
+        ptr
+    }))
+    .unwrap_or(ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "C" fn readarc_djvu_free_buffer(ptr: *mut u8, len: usize) {
+    if ptr.is_null() || len == 0 {
+        return;
+    }
+    unsafe {
+        let _ = Vec::from_raw_parts(ptr, len, len);
+    }
 }
