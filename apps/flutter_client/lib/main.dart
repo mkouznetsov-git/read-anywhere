@@ -625,10 +625,10 @@ class ReaderScreen extends StatelessWidget {
       case 'doc':
         return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.doc);
       case 'chm':
-        return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.chm);
+        return _ChmSafeReaderScreen(book: book, storage: storage, sync: sync);
       case 'djvu':
       case 'djv':
-        return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.djvu);
+        return _DjvuReaderScreen(book: book, storage: storage, sync: sync);
       case 'pdf':
         return _PdfReaderScreen(book: book, storage: storage, sync: sync);
       default:
@@ -3174,6 +3174,693 @@ String? _attr(String attrs, String name) {
 }
 
 
+
+class _ChmSafeReaderScreen extends StatelessWidget {
+  const _ChmSafeReaderScreen({required this.book, required this.storage, required this.sync});
+
+  final BookRecord book;
+  final StorageService storage;
+  final SyncService sync;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF3E7CF),
+      appBar: AppBar(title: Text(book.title, maxLines: 1, overflow: TextOverflow.ellipsis)),
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 720),
+          child: Padding(
+            padding: const EdgeInsets.all(28),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.archive_outlined, color: Color(0xFF2A2F4A)),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            'CHM safe mode',
+                            style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                  color: const Color(0xFF2A2F4A),
+                                  fontWeight: FontWeight.w800,
+                                ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    const Text(
+                      'CHM-файл сохранён в библиотеке, но встроенный CHM-адаптер временно отключён, потому что на части файлов он закрывал приложение. '
+                      'ReadArc больше не пытается открывать CHM через небезопасный путь. Полноценный CHM будет подключён через processed artifacts так же, как DJVU/DOCX.',
+                      style: TextStyle(fontSize: 16, height: 1.45, color: Color(0xFF2A2F4A)),
+                    ),
+                    const SizedBox(height: 14),
+                    Text(
+                      book.fileName,
+                      style: const TextStyle(fontSize: 13.5, color: Color(0xFF5E6380)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DjvuReaderScreen extends StatefulWidget {
+  const _DjvuReaderScreen({required this.book, required this.storage, required this.sync});
+
+  final BookRecord book;
+  final StorageService storage;
+  final SyncService sync;
+
+  @override
+  State<_DjvuReaderScreen> createState() => _DjvuReaderScreenState();
+}
+
+class _DjvuReaderScreenState extends State<_DjvuReaderScreen> {
+  static const double _pageAspectRatio = 1.4142;
+  static const double _pageGap = 14.0;
+
+  final _scrollController = ScrollController();
+  BookRecord? _runtimeBook;
+  File? _sourceFile;
+  Directory? _pagesDir;
+  int _pageCount = 0;
+  int _page = 1;
+  String? _status;
+  String? _error;
+  String? _textLayer;
+  bool _fullScreen = false;
+  bool _restoringScroll = false;
+  double _lastViewportWidth = 0;
+  Timer? _saveDebounce;
+
+  BookRecord get _book => _runtimeBook ?? widget.book;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_onScroll);
+    unawaited(_load());
+  }
+
+  @override
+  void dispose() {
+    _saveDebounce?.cancel();
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    try {
+      final manifest = await widget.storage.loadManifest();
+      var book = widget.book;
+      for (final candidate in manifest.books) {
+        if (candidate.id == widget.book.id) {
+          book = candidate;
+          break;
+        }
+      }
+      if (book.localPath == null || book.localPath!.trim().isEmpty) {
+        if (mounted) setState(() => _error = 'DJVU-файл не скачан на это устройство.');
+        return;
+      }
+      final source = File(book.localPath!);
+      if (!await source.exists()) {
+        if (mounted) setState(() => _error = 'DJVU-файл отсутствует: ${book.localPath}');
+        return;
+      }
+      if (mounted) setState(() => _status = 'Проверяем DJVU и готовим кэш страниц…');
+      final artifact = await _prepareDjvuArtifact(
+        book: book,
+        sourceFile: source,
+        storage: widget.storage,
+      );
+      if (!mounted) return;
+      setState(() {
+        _runtimeBook = book;
+        _sourceFile = source;
+        _pagesDir = artifact.pagesDir;
+        _pageCount = artifact.pageCount;
+        _page = _targetPageForBook(book, pages: artifact.pageCount);
+        _status = null;
+        _error = null;
+      });
+      _scheduleScrollToPage(_page, animated: false);
+      unawaited(_loadTextLayerLater(source));
+    } catch (error, stackTrace) {
+      debugPrint('DJVU reader load failed: $error\n$stackTrace');
+      if (mounted) {
+        setState(() {
+          _status = null;
+          _error = _djvuFriendlyError(error);
+        });
+      }
+    }
+  }
+
+  Future<void> _loadTextLayerLater(File sourceFile) async {
+    try {
+      final textDoc = await _tryExtractDjvuText(sourceFile).timeout(const Duration(seconds: 35));
+      final text = textDoc?.blocks.map((block) => block.plainText).where((text) => text.trim().isNotEmpty).join('\n\n').trim() ?? '';
+      if (!mounted || text.isEmpty) return;
+      setState(() => _textLayer = text);
+    } catch (error) {
+      debugPrint('DJVU text layer extraction skipped: $error');
+    }
+  }
+
+  int _targetPageForBook(BookRecord book, {required int pages}) {
+    try {
+      final decoded = jsonDecode(book.currentLocator);
+      if (decoded is Map && (decoded['type'] == 'djvu-page-v2' || decoded['type'] == 'djvu-unit-anchor-v1')) {
+        final page = ((decoded['page'] as num?)?.round() ?? 1).clamp(1, pages).toInt();
+        return page;
+      }
+    } catch (_) {}
+    final p = book.progressPercent.clamp(0, 100).toDouble();
+    if (pages <= 1 || p <= 0) return 1;
+    return (1 + ((p / 100.0) * (pages - 1)).round()).clamp(1, pages).toInt();
+  }
+
+  void _onScroll() {
+    if (_restoringScroll || !_scrollController.hasClients || _pageCount <= 0 || _lastViewportWidth <= 0) return;
+    final page = _pageForOffset(_scrollController.offset, _lastViewportWidth).clamp(1, _pageCount).toInt();
+    if (page == _page) return;
+    setState(() => _page = page);
+    _saveDebounce?.cancel();
+    _saveDebounce = Timer(const Duration(milliseconds: 700), () {
+      unawaited(_savePage(page));
+    });
+  }
+
+  double _pageHeight(double viewportWidth) => viewportWidth.clamp(240.0, 1800.0).toDouble() * _pageAspectRatio;
+
+  double _offsetForPage(int page, double viewportWidth) {
+    final safe = page.clamp(1, _pageCount).toInt();
+    return 12.0 + (safe - 1) * (_pageHeight(viewportWidth) + _pageGap);
+  }
+
+  int _pageForOffset(double offset, double viewportWidth) {
+    final itemExtent = _pageHeight(viewportWidth) + _pageGap;
+    if (itemExtent <= 0) return 1;
+    return (1 + ((offset - 12.0 + itemExtent * 0.45) / itemExtent).floor()).clamp(1, _pageCount).toInt();
+  }
+
+  void _scheduleScrollToPage(int page, {required bool animated}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted || !_scrollController.hasClients || _lastViewportWidth <= 0) return;
+      _restoringScroll = true;
+      try {
+        final offset = _offsetForPage(page, _lastViewportWidth).clamp(0.0, _scrollController.position.maxScrollExtent);
+        if (animated) {
+          await _scrollController.animateTo(offset, duration: const Duration(milliseconds: 220), curve: Curves.easeOutCubic);
+        } else {
+          _scrollController.jumpTo(offset);
+        }
+      } finally {
+        _restoringScroll = false;
+      }
+    });
+  }
+
+  String _locatorJson(int page) => jsonEncode({
+        'type': 'djvu-page-v2',
+        'page': page,
+        'pages': _pageCount,
+        'progressPercent': _progress(page),
+        'updatedAt': DateTime.now().toUtc().toIso8601String(),
+      });
+
+  double _progress(int page) => _pageCount <= 1 ? 0.0 : (((page - 1) / (_pageCount - 1)) * 100).clamp(0.0, 100.0).toDouble();
+
+  Future<void> _savePage(int page) async {
+    await widget.storage.updateProgress(
+      bookId: widget.book.id,
+      progressPercent: _progress(page),
+      locator: _locatorJson(page),
+    );
+    await widget.sync.broadcastLibrarySnapshot(reason: 'djvu_progress_updated');
+  }
+
+  Future<void> _addBookmark() async {
+    await widget.storage.addBookmark(
+      bookId: widget.book.id,
+      label: 'Закладка DJVU, стр. $_page ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
+      locator: _locatorJson(_page),
+    );
+    await widget.sync.broadcastLibrarySnapshot(reason: 'bookmark_added');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Закладка добавлена')));
+  }
+
+  Future<void> _copyDjvuTextLayer() async {
+    final text = (_textLayer ?? '').trim();
+    if (text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Текстовый слой DJVU скопирован')));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final source = _sourceFile;
+    final pagesDir = _pagesDir;
+    return Scaffold(
+      backgroundColor: const Color(0xFFF3E7CF),
+      appBar: _fullScreen
+          ? null
+          : AppBar(
+              title: Text(_book.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+              actions: [
+                IconButton(
+                  tooltip: 'Скопировать текстовый слой DJVU',
+                  onPressed: (_textLayer ?? '').trim().isEmpty ? null : _copyDjvuTextLayer,
+                  icon: const Icon(Icons.copy_all_rounded),
+                ),
+                IconButton(
+                  tooltip: 'Полный экран',
+                  onPressed: source == null ? null : () => setState(() => _fullScreen = true),
+                  icon: const Icon(Icons.fullscreen_rounded),
+                ),
+                IconButton(
+                  tooltip: 'Добавить закладку',
+                  onPressed: source == null ? null : _addBookmark,
+                  icon: const Icon(Icons.bookmark_add_outlined),
+                ),
+              ],
+            ),
+      floatingActionButton: _fullScreen
+          ? Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FloatingActionButton.small(
+                  heroTag: 'djvu-bookmark-${widget.book.id}',
+                  tooltip: 'Добавить закладку',
+                  onPressed: source == null ? null : _addBookmark,
+                  child: const Icon(Icons.bookmark_add_outlined),
+                ),
+                const SizedBox(height: 8),
+                FloatingActionButton.small(
+                  heroTag: 'djvu-exit-fullscreen-${widget.book.id}',
+                  tooltip: 'Выйти из полного экрана',
+                  onPressed: () => setState(() => _fullScreen = false),
+                  child: const Icon(Icons.fullscreen_exit_rounded),
+                ),
+              ],
+            )
+          : null,
+      body: _error != null
+          ? _ReaderDiagnosticPage(title: 'DJVU не подготовлен', message: _error!)
+          : source == null || pagesDir == null || _pageCount <= 0
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const CircularProgressIndicator(),
+                      const SizedBox(height: 16),
+                      Text(_status ?? 'Открываем DJVU…', textAlign: TextAlign.center),
+                    ],
+                  ),
+                )
+              : Column(
+                  children: [
+                    Expanded(
+                      child: LayoutBuilder(
+                        builder: (context, constraints) {
+                          _lastViewportWidth = constraints.maxWidth;
+                          final displayWidth = constraints.maxWidth.clamp(240.0, 1800.0).toDouble();
+                          final displayHeight = _pageHeight(displayWidth);
+                          final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, Platform.isAndroid ? 1.25 : 1.6).toDouble();
+                          return Scrollbar(
+                            controller: _scrollController,
+                            thumbVisibility: true,
+                            interactive: true,
+                            child: ListView.builder(
+                              controller: _scrollController,
+                              padding: const EdgeInsets.only(top: 12),
+                              cacheExtent: constraints.maxHeight * 0.55,
+                              itemCount: _pageCount,
+                              itemBuilder: (context, index) {
+                                final page = index + 1;
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: _pageGap),
+                                  child: Center(
+                                    child: _DjvuPageView(
+                                      sourceFile: source,
+                                      pagesDir: pagesDir,
+                                      pageNumber: page,
+                                      displayWidth: displayWidth,
+                                      displayHeight: displayHeight,
+                                      devicePixelRatio: dpr,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    if (!_fullScreen)
+                      SafeArea(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: LinearProgressIndicator(
+                                  value: _pageCount <= 1 ? 0 : ((_page - 1) / (_pageCount - 1)).clamp(0.0, 1.0).toDouble(),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Text('$_page / $_pageCount', style: const TextStyle(color: Color(0xFF2A2F4A))),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+    );
+  }
+}
+
+class _ReaderDiagnosticPage extends StatelessWidget {
+  const _ReaderDiagnosticPage({required this.title, required this.message});
+
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(28),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 760),
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.error_outline_rounded, color: Color(0xFF8A5B00)),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          title,
+                          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                color: const Color(0xFF2A2F4A),
+                                fontWeight: FontWeight.w800,
+                              ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  Text(message, style: const TextStyle(fontSize: 16, height: 1.45, color: Color(0xFF2A2F4A))),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DjvuArtifact {
+  const _DjvuArtifact({required this.pageCount, required this.pagesDir});
+
+  final int pageCount;
+  final Directory pagesDir;
+}
+
+Future<_DjvuArtifact> _prepareDjvuArtifact({
+  required BookRecord book,
+  required File sourceFile,
+  required StorageService storage,
+}) async {
+  final root = await storage.processedArtifactDir(book.id);
+  final pagesDir = Directory('${root.path}${Platform.pathSeparator}pages');
+  if (!await pagesDir.exists()) await pagesDir.create(recursive: true);
+  final manifestFile = await storage.processedArtifactManifestFile(book.id);
+
+  // First try an existing processed artifact. This lets Android/opened devices
+  // use a prepared DJVU cache once artifact sync is enabled, without needing a
+  // native DjVuLibre binary locally.
+  if (await manifestFile.exists()) {
+    try {
+      final data = jsonDecode(await manifestFile.readAsString()) as Map<String, dynamic>;
+      final cachedPageCount = (data['pageCount'] as num?)?.toInt() ?? 0;
+      final firstPage = File('${pagesDir.path}${Platform.pathSeparator}page_00001.png');
+      if (data['kind'] == 'djvu-pages-v1' &&
+          data['sourceSha256'] == book.contentSha256 &&
+          cachedPageCount > 0 &&
+          await firstPage.exists() &&
+          await firstPage.length() > 0) {
+        return _DjvuArtifact(pageCount: cachedPageCount, pagesDir: pagesDir);
+      }
+    } catch (_) {}
+  }
+
+  if (!(Platform.isMacOS || Platform.isLinux || Platform.isWindows)) {
+    throw StateError('На этом устройстве пока нет нативного DJVU-конвертера. Откройте DJVU на Mac/desktop после установки DjVuLibre; подготовленные страницы будут использоваться как processed artifact.');
+  }
+  await _requireNativeTool('djvused');
+  await _requireNativeTool('ddjvu');
+
+  final pageCount = await _readDjvuPageCount(sourceFile);
+  if (pageCount == null || pageCount <= 0) {
+    throw StateError('Не удалось определить количество страниц DJVU через djvused. Проверьте, что файл открывается в DjVuLibre.');
+  }
+
+  var reuse = false;
+  if (await manifestFile.exists()) {
+    try {
+      final data = jsonDecode(await manifestFile.readAsString()) as Map<String, dynamic>;
+      reuse = data['kind'] == 'djvu-pages-v1' &&
+          data['sourceSha256'] == book.contentSha256 &&
+          data['pageCount'] == pageCount;
+    } catch (_) {
+      reuse = false;
+    }
+  }
+  if (!reuse) {
+    if (await pagesDir.exists()) {
+      await for (final entity in pagesDir.list(recursive: false, followLinks: false)) {
+        try {
+          if (entity is File && entity.path.toLowerCase().endsWith('.png')) await entity.delete();
+        } catch (_) {}
+      }
+    }
+    const encoder = JsonEncoder.withIndent('  ');
+    await manifestFile.writeAsString(
+      encoder.convert({
+        'kind': 'djvu-pages-v1',
+        'sourceSha256': book.contentSha256,
+        'pageCount': pageCount,
+        'pageFormat': 'png',
+        'rendering': 'lazy-ddjvu',
+        'preparedAt': DateTime.now().toUtc().toIso8601String(),
+      }),
+      flush: true,
+    );
+  }
+  return _DjvuArtifact(pageCount: pageCount, pagesDir: pagesDir);
+}
+
+class _DjvuPageView extends StatefulWidget {
+  const _DjvuPageView({
+    required this.sourceFile,
+    required this.pagesDir,
+    required this.pageNumber,
+    required this.displayWidth,
+    required this.displayHeight,
+    required this.devicePixelRatio,
+  });
+
+  final File sourceFile;
+  final Directory pagesDir;
+  final int pageNumber;
+  final double displayWidth;
+  final double displayHeight;
+  final double devicePixelRatio;
+
+  @override
+  State<_DjvuPageView> createState() => _DjvuPageViewState();
+}
+
+class _DjvuPageViewState extends State<_DjvuPageView> {
+  static final Map<String, Future<File?>> _renderJobs = <String, Future<File?>>{};
+  static final List<String> _renderOrder = <String>[];
+  static Future<void> _queue = Future<void>.value();
+
+  late Future<File?> _imageFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _imageFuture = _cachedRender();
+  }
+
+  @override
+  void didUpdateWidget(covariant _DjvuPageView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.sourceFile.path != widget.sourceFile.path ||
+        oldWidget.pageNumber != widget.pageNumber ||
+        (oldWidget.displayWidth - widget.displayWidth).abs() > 8 ||
+        (oldWidget.devicePixelRatio - widget.devicePixelRatio).abs() > 0.2) {
+      _imageFuture = _cachedRender();
+    }
+  }
+
+  File _pageFile() => File('${widget.pagesDir.path}${Platform.pathSeparator}page_${widget.pageNumber.toString().padLeft(5, '0')}.png');
+
+  Future<File?> _cachedRender() async {
+    final out = _pageFile();
+    try {
+      if (await out.exists() && await out.length() > 0) return out;
+    } catch (_) {}
+    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio).round().clamp(720, Platform.isAndroid ? 1200 : 1700).toInt();
+    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio).round().clamp(900, Platform.isAndroid ? 1800 : 2400).toInt();
+    final key = '${widget.sourceFile.path}:${widget.pageNumber}:$pixelWidth:$pixelHeight';
+    final existing = _renderJobs[key];
+    if (existing != null) return existing;
+    while (_renderOrder.length >= 8) {
+      final oldest = _renderOrder.removeAt(0);
+      _renderJobs.remove(oldest);
+    }
+    final job = _enqueueRender(out, pixelWidth, pixelHeight);
+    _renderJobs[key] = job;
+    _renderOrder.add(key);
+    return job;
+  }
+
+  Future<File?> _enqueueRender(File out, int pixelWidth, int pixelHeight) {
+    final completer = Completer<File?>();
+    _queue = _queue.then((_) async {
+      try {
+        completer.complete(await _render(out, pixelWidth, pixelHeight));
+      } catch (error, stackTrace) {
+        debugPrint('DJVU page render failed: $error\n$stackTrace');
+        completer.complete(null);
+      }
+    });
+    return completer.future;
+  }
+
+  Future<File?> _render(File out, int pixelWidth, int pixelHeight) async {
+    try {
+      if (await out.exists() && await out.length() > 0) return out;
+    } catch (_) {}
+    final tmp = File('${out.path}.tmp');
+    try {
+      if (await tmp.exists()) await tmp.delete();
+    } catch (_) {}
+    final result = await _runNativeTool(
+      'ddjvu',
+      ['-format=png', '-page=${widget.pageNumber}', '-size=${pixelWidth}x$pixelHeight', widget.sourceFile.path, tmp.path],
+      timeout: const Duration(seconds: 45),
+    );
+    if (result.exitCode != 0) {
+      throw StateError('ddjvu exit ${result.exitCode}: ${result.stderr}');
+    }
+    if (!await tmp.exists() || await tmp.length() <= 0) {
+      throw StateError('ddjvu не создал изображение страницы ${widget.pageNumber}.');
+    }
+    try {
+      if (await out.exists()) await out.delete();
+    } catch (_) {}
+    await tmp.rename(out.path);
+    return out;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: widget.displayWidth,
+      height: widget.displayHeight,
+      child: FutureBuilder<File?>(
+        future: _imageFuture,
+        builder: (context, snapshot) {
+          final file = snapshot.data;
+          if (file == null) {
+            if (snapshot.connectionState == ConnectionState.done) {
+              return const ColoredBox(
+                color: Color(0xFFF8F1E3),
+                child: Center(child: Text('Не удалось отрисовать страницу DJVU')),
+              );
+            }
+            return const ColoredBox(
+              color: Color(0xFFF8F1E3),
+              child: Center(child: CircularProgressIndicator()),
+            );
+          }
+          return DecoratedBox(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.12), blurRadius: 8, offset: const Offset(0, 3))],
+            ),
+            child: Image.file(
+              file,
+              width: widget.displayWidth,
+              height: widget.displayHeight,
+              fit: BoxFit.fill,
+              gaplessPlayback: true,
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+String _djvuFriendlyError(Object error) {
+  final message = '$error';
+  if (message.contains('ddjvu') || message.contains('djvused') || message.contains('No such file')) {
+    return 'Для чтения DJVU на macOS/Linux нужен DjVuLibre: команды ddjvu и djvused. На Mac установите его командой: brew install djvulibre. ReadArc теперь использует безопасный processed-reader: приложение не должно закрываться, но без этих инструментов подготовить страницы нельзя.\n\nТехнически: $message';
+  }
+  return '$message\n\nReadArc оставил приложение открытым и не стал показывать бинарный DJVU как текст.';
+}
+
+Future<void> _requireNativeTool(String executable) async {
+  final resolved = await _resolveNativeTool(executable);
+  if (resolved == executable && !(await File(executable).exists())) {
+    // Process.start will still find tools from PATH in terminal/dev builds. For
+    // packaged macOS apps the PATH is short, so _resolveNativeTool checks the
+    // Homebrew/MacPorts locations before we get here.
+  }
+  try {
+    if (executable == 'djvused') {
+      await _runNativeTool(executable, ['-v'], timeout: const Duration(seconds: 5));
+    } else if (executable == 'ddjvu') {
+      await _runNativeTool(executable, ['-help'], timeout: const Duration(seconds: 5));
+    }
+  } catch (error) {
+    // Some tools return non-zero for help/version, so only throw when the
+    // executable cannot be resolved to PATH or common desktop locations.
+    final common = await _resolveNativeTool(executable);
+    if (common == executable) {
+      throw StateError('Не найдена команда $executable.');
+    }
+  }
+}
+
 class _PdfReaderScreen extends StatefulWidget {
   const _PdfReaderScreen({required this.book, required this.storage, required this.sync});
 
@@ -3196,6 +3883,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
   String? _textLayer;
   Timer? _saveDebounce;
   Timer? _scrollRedrawThrottle;
+  bool _textLayerLoading = false;
   bool _fullScreen = false;
   bool _showTextLayer = false;
   bool _restoringScroll = false;
@@ -3240,11 +3928,11 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
       return;
     }
     try {
-      final doc = await PdfDocument.openFile(file.path);
+      final fileSize = await file.length();
+      final doc = await PdfDocument.openFile(file.path).timeout(const Duration(seconds: 15));
       final pages = doc.pagesCount;
-      final geometries = await _readPdfPageGeometries(doc, pages);
+      final geometries = await _readPdfPageGeometries(doc, pages).timeout(const Duration(seconds: 8));
       final initialPage = _targetPageForBook(book, pages: pages);
-      final textLayer = await _extractPdfTextLayer(file);
       if (!mounted) {
         unawaited(Future<void>.sync(() => doc.close()));
         return;
@@ -3255,27 +3943,48 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
         _pages = pages;
         _pageGeometries = geometries;
         _document = doc;
-        _textLayer = textLayer;
+        _textLayer = '';
         _loadError = null;
       });
       _schedulePdfScrollToPage(initialPage, animated: false);
+      if (fileSize <= 12 * 1024 * 1024) {
+        unawaited(_loadPdfTextLayerLater(file));
+      } else {
+        debugPrint('ReadArc PDF text extraction skipped for large file: ${fileSize ~/ (1024 * 1024)} MB');
+      }
     } catch (error) {
       if (mounted) setState(() => _loadError = 'Не удалось открыть PDF: $error');
     }
   }
 
-  Future<List<_PdfPageGeometry>> _readPdfPageGeometries(PdfDocument doc, int pages) async {
-    final result = <_PdfPageGeometry>[];
-    for (var pageNumber = 1; pageNumber <= pages; pageNumber++) {
-      try {
-        final page = await doc.getPage(pageNumber);
-        result.add(_PdfPageGeometry(width: page.width.toDouble(), height: page.height.toDouble()));
-        await Future<void>.sync(() => page.close());
-      } catch (_) {
-        result.add(const _PdfPageGeometry(width: 595, height: 842));
-      }
+  Future<void> _loadPdfTextLayerLater(File file) async {
+    if (_textLayerLoading) return;
+    _textLayerLoading = true;
+    try {
+      final textLayer = await _extractPdfTextLayer(file).timeout(const Duration(seconds: 20), onTimeout: () => '');
+      if (!mounted) return;
+      if (textLayer.trim().isNotEmpty) setState(() => _textLayer = textLayer);
+    } catch (error) {
+      debugPrint('ReadArc PDF text layer extraction skipped: $error');
+    } finally {
+      _textLayerLoading = false;
     }
-    return List.unmodifiable(result);
+  }
+
+  Future<List<_PdfPageGeometry>> _readPdfPageGeometries(PdfDocument doc, int pages) async {
+    if (pages <= 0) return const [];
+    _PdfPageGeometry fallback = const _PdfPageGeometry(width: 595, height: 842);
+    try {
+      final first = await doc.getPage(1).timeout(const Duration(seconds: 4));
+      fallback = _PdfPageGeometry(width: first.width.toDouble(), height: first.height.toDouble());
+      await Future<void>.sync(() => first.close());
+    } catch (_) {}
+    // Do not probe every page during open. Large PDFs can have hundreds of
+    // pages; asking pdfium for each geometry made both macOS and Android look
+    // frozen before the first page was visible. Most books use a stable page
+    // size, so the first page is a safe fast estimate and individual rendered
+    // pages still come from the real PDF.
+    return List<_PdfPageGeometry>.filled(pages, fallback, growable: false);
   }
 
   int _targetPageForBook(BookRecord book, {required int pages}) {
@@ -3475,7 +4184,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                           : LayoutBuilder(
                               builder: (context, constraints) {
                                 _lastViewportWidth = constraints.maxWidth;
-                                final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, 2.0).toDouble();
+                                final dpr = MediaQuery.of(context).devicePixelRatio.clamp(1.0, Platform.isAndroid ? 1.15 : 1.45).toDouble();
                                 return ColoredBox(
                                   color: const Color(0xFFF3E7CF),
                                   child: Scrollbar(
@@ -3485,7 +4194,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
                                     child: ListView.builder(
                                       controller: _scrollController,
                                       padding: const EdgeInsets.only(top: 12),
-                                      cacheExtent: constraints.maxHeight * 2.2,
+                                      cacheExtent: constraints.maxHeight * 0.55,
                                       itemCount: _pages,
                                       itemBuilder: (context, index) {
                                         final geometry = index < _pageGeometries.length
@@ -3562,6 +4271,7 @@ class _PdfFitWidthPage extends StatefulWidget {
 class _PdfFitWidthPageState extends State<_PdfFitWidthPage> {
   static final Map<String, Future<Uint8List?>> _renderCache = <String, Future<Uint8List?>>{};
   static final List<String> _renderCacheOrder = <String>[];
+  static Future<void> _renderQueue = Future<void>.value();
 
   late Future<Uint8List?> _imageFuture;
 
@@ -3583,19 +4293,33 @@ class _PdfFitWidthPageState extends State<_PdfFitWidthPage> {
   }
 
   Future<Uint8List?> _cachedRender() {
-    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio).round().clamp(320, 4096);
-    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio).round().clamp(320, 8192);
+    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio).round().clamp(320, Platform.isAndroid ? 1200 : 1800);
+    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio).round().clamp(320, Platform.isAndroid ? 1800 : 2600);
     final key = '${identityHashCode(widget.document)}:${widget.pageNumber}:$pixelWidth:$pixelHeight';
     final existing = _renderCache[key];
     if (existing != null) return existing;
-    while (_renderCacheOrder.length >= 28) {
+    final maxCachedPages = Platform.isAndroid ? 3 : 5;
+    while (_renderCacheOrder.length >= maxCachedPages) {
       final oldest = _renderCacheOrder.removeAt(0);
       _renderCache.remove(oldest);
     }
-    final future = _render(pixelWidth.toDouble(), pixelHeight.toDouble());
+    final future = _queuedRender(pixelWidth.toDouble(), pixelHeight.toDouble());
     _renderCache[key] = future;
     _renderCacheOrder.add(key);
     return future;
+  }
+
+  Future<Uint8List?> _queuedRender(double pixelWidth, double pixelHeight) {
+    final completer = Completer<Uint8List?>();
+    _renderQueue = _renderQueue.then((_) async {
+      try {
+        completer.complete(await _render(pixelWidth, pixelHeight).timeout(const Duration(seconds: 20), onTimeout: () => null));
+      } catch (error, stackTrace) {
+        debugPrint('PDF page render failed: $error\n$stackTrace');
+        completer.complete(null);
+      }
+    });
+    return completer.future;
   }
 
   Future<Uint8List?> _render(double pixelWidth, double pixelHeight) async {
@@ -4339,12 +5063,32 @@ Future<int?> _readDjvuPageCount(File sourceFile) async {
   return null;
 }
 
+Future<String> _resolveNativeTool(String executable) async {
+  if (executable.contains(Platform.pathSeparator)) return executable;
+  final candidates = <String>[
+    executable,
+    if (Platform.isMacOS) '/opt/homebrew/bin/$executable',
+    if (Platform.isMacOS) '/usr/local/bin/$executable',
+    if (Platform.isMacOS) '/opt/local/bin/$executable',
+    if (!Platform.isWindows) '/usr/bin/$executable',
+    if (!Platform.isWindows) '/bin/$executable',
+  ];
+  for (final candidate in candidates.skip(1)) {
+    try {
+      final file = File(candidate);
+      if (await file.exists()) return candidate;
+    } catch (_) {}
+  }
+  return executable;
+}
+
 Future<ProcessResult> _runNativeTool(String executable, List<String> arguments, {Duration timeout = const Duration(seconds: 20)}) async {
   Process? process;
   final stdout = <int>[];
   final stderr = <int>[];
   try {
-    process = await Process.start(executable, arguments, runInShell: Platform.isWindows);
+    final resolvedExecutable = await _resolveNativeTool(executable);
+    process = await Process.start(resolvedExecutable, arguments, runInShell: Platform.isWindows);
     final stdoutDone = process.stdout.listen(stdout.addAll).asFuture<void>();
     final stderrDone = process.stderr.listen(stderr.addAll).asFuture<void>();
     final exitCode = await process.exitCode.timeout(timeout, onTimeout: () {
