@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -21,7 +22,20 @@ import 'services/sync/sync_service.dart';
 import 'ui/app_theme.dart';
 
 void main() {
-  runApp(const ReadAnywhereApp());
+  runZonedGuarded(() {
+    WidgetsFlutterBinding.ensureInitialized();
+    FlutterError.onError = (details) {
+      FlutterError.presentError(details);
+      debugPrint('ReadArc Flutter error: ${details.exceptionAsString()}\n${details.stack}');
+    };
+    PlatformDispatcher.instance.onError = (error, stack) {
+      debugPrint('ReadArc uncaught platform error: $error\n$stack');
+      return true;
+    };
+    runApp(const ReadAnywhereApp());
+  }, (error, stack) {
+    debugPrint('ReadArc uncaught zone error: $error\n$stack');
+  });
 }
 
 class ReadAnywhereApp extends StatefulWidget {
@@ -1559,6 +1573,68 @@ _Fb2Document _parseRichDocumentFromBytes(_RichSourceKind kind, Uint8List bytes) 
       _RichSourceKind.djvu => _makeFb2Document([_Fb2Block.paragraph([_Fb2Inline(_safeUnsupportedBinaryPreview('DJVU'))])]),
     };
 
+
+Future<_Fb2Document> _parseReaderDocumentFromFileSafely({
+  required _RichSourceKind kind,
+  required File file,
+}) async {
+  final label = _richFormatLabel(kind);
+  try {
+    return await _parseReaderDocumentFromFile(kind: kind, file: file).timeout(
+      kind == _RichSourceKind.djvu ? const Duration(seconds: 75) : const Duration(seconds: 45),
+    );
+  } on TimeoutException {
+    return _formatAdapterFailureDocument(
+      label,
+      'Подготовка файла заняла слишком много времени и была остановлена. Приложение продолжает работать; файл сохранён в библиотеке.',
+    );
+  } catch (error, stackTrace) {
+    debugPrint('ReadArc $label adapter failed: $error\n$stackTrace');
+    return _formatAdapterFailureDocument(
+      label,
+      'Не удалось безопасно подготовить файл: $error',
+    );
+  }
+}
+
+Future<_Fb2Document> _parseReaderDocumentFromFile({
+  required _RichSourceKind kind,
+  required File file,
+}) async {
+  switch (kind) {
+    case _RichSourceKind.chm:
+      return _parseChmDocumentFromFile(file);
+    case _RichSourceKind.djvu:
+      return _parseDjvuDocumentFromFile(file);
+    case _RichSourceKind.fb2:
+    case _RichSourceKind.epub:
+    case _RichSourceKind.docx:
+    case _RichSourceKind.doc:
+      final length = await file.length();
+      if (length > 256 * 1024 * 1024) {
+        return _formatAdapterFailureDocument(
+          _richFormatLabel(kind),
+          'Файл слишком большой для текущего встроенного адаптера (${(length / (1024 * 1024)).toStringAsFixed(1)} MB).',
+        );
+      }
+      return _parseRichDocumentFromBytes(kind, await file.readAsBytes());
+  }
+}
+
+_Fb2Document _formatAdapterFailureDocument(String label, String message) {
+  return _makeFb2Document([
+    _Fb2Block.title(label),
+    _Fb2Block.paragraph([
+      _Fb2Inline(message),
+    ]),
+    _Fb2Block.paragraph([
+      _Fb2Inline(
+        'ReadArc больше не должен закрываться при ошибке адаптера. Для тяжёлых форматов будет использоваться pipeline processed artifacts: оригинал хранится в библиотеке, а подготовленное представление создаётся отдельно и безопасно переиспользуется на устройствах.',
+      ),
+    ]),
+  ]);
+}
+
 bool _selectionAreaIsCheapForRichReader() => Platform.isMacOS || Platform.isWindows || Platform.isLinux;
 
 class _Fb2ReaderScreen extends StatefulWidget {
@@ -1659,11 +1735,10 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
       return;
     }
     try {
-      final document = switch (widget.sourceKind) {
-        _RichSourceKind.chm => await _parseChmDocumentFromFile(file),
-        _RichSourceKind.djvu => await _parseDjvuDocumentFromFile(file),
-        _ => _parseRichDocumentFromBytes(widget.sourceKind, await file.readAsBytes()),
-      };
+      final document = await _parseReaderDocumentFromFileSafely(
+        kind: widget.sourceKind,
+        file: file,
+      );
       if (!mounted) return;
       setState(() {
         _runtimeBook = book;
@@ -4132,24 +4207,29 @@ Future<String> _extractChmPreviewFromFile(File sourceFile) async {
 }
 
 Future<_Fb2Document> _parseChmDocumentFromFile(File sourceFile) async {
-  final extracted = await _tryExtractChmWithNativeTools(sourceFile);
-  if (extracted.isNotEmpty) {
-    final doc = _parseExtractedHtmlDocument(extracted, formatLabel: 'CHM');
-    if (doc.blocks.length > 1 || (doc.blocks.isNotEmpty && doc.blocks.first.plainText.length > 120)) {
-      return doc;
+  try {
+    final extracted = await _tryExtractChmWithNativeTools(sourceFile);
+    if (extracted.isNotEmpty) {
+      final doc = _parseExtractedHtmlDocument(extracted, formatLabel: 'CHM');
+      if (doc.blocks.length > 1 || (doc.blocks.isNotEmpty && doc.blocks.first.plainText.length > 120)) {
+        return doc;
+      }
     }
-  }
 
-  final preview = await _extractChmPreviewFromFile(sourceFile);
-  final blocks = preview
-      .split(RegExp(r'\n{2,}'))
-      .map((part) => part.trim())
-      .where((part) => part.isNotEmpty)
-      .map((part) => _Fb2Block.paragraph([_Fb2Inline(part)]))
-      .toList(growable: false);
-  return _makeFb2Document(blocks.isEmpty
-      ? [_Fb2Block.paragraph([_Fb2Inline(_safeUnsupportedBinaryPreview('CHM'))])]
-      : blocks);
+    final preview = await _extractChmPreviewFromFile(sourceFile);
+    final blocks = preview
+        .split(RegExp(r'\n{2,}'))
+        .map((part) => part.trim())
+        .where((part) => part.isNotEmpty)
+        .map((part) => _Fb2Block.paragraph([_Fb2Inline(part)]))
+        .toList(growable: false);
+    return _makeFb2Document(blocks.isEmpty
+        ? [_Fb2Block.paragraph([_Fb2Inline(_safeUnsupportedBinaryPreview('CHM'))])]
+        : blocks);
+  } catch (error, stackTrace) {
+    debugPrint('CHM adapter failure: $error\n$stackTrace');
+    return _formatAdapterFailureDocument('CHM', 'CHM-адаптер завершился ошибкой: $error');
+  }
 }
 
 Future<List<File>> _tryExtractChmWithNativeTools(File sourceFile) async {
@@ -4219,7 +4299,7 @@ Future<_Fb2Document?> _tryRenderDjvuPagesWithNativeTools(File sourceFile) async 
   try {
     tempDir = await Directory.systemTemp.createTemp('readarc_djvu_');
     final pages = await _readDjvuPageCount(sourceFile) ?? 12;
-    final maxPages = pages.clamp(1, 24).toInt();
+    final maxPages = pages.clamp(1, 12).toInt();
     final blocks = <_Fb2Block>[];
     blocks.add(_Fb2Block.title('DJVU'));
     for (var page = 1; page <= maxPages; page++) {
@@ -4227,8 +4307,8 @@ Future<_Fb2Document?> _tryRenderDjvuPagesWithNativeTools(File sourceFile) async 
       var rendered = false;
       for (final command in const ['ddjvu']) {
         try {
-          final result = await _runNativeTool(command, ['-format=png', '-page=$page', '-size=1200x1600', sourceFile.path, out.path], timeout: const Duration(seconds: 18));
-          if (result.exitCode == 0 && await out.exists() && await out.length() > 0 && await out.length() <= 8 * 1024 * 1024) {
+          final result = await _runNativeTool(command, ['-format=png', '-page=$page', '-size=1100x1500', sourceFile.path, out.path], timeout: const Duration(seconds: 18));
+          if (result.exitCode == 0 && await out.exists() && await out.length() > 0 && await out.length() <= 6 * 1024 * 1024) {
             rendered = true;
             break;
           }
@@ -4236,7 +4316,12 @@ Future<_Fb2Document?> _tryRenderDjvuPagesWithNativeTools(File sourceFile) async 
       }
       if (!rendered) break;
       blocks.add(_Fb2Block.title('Страница $page'));
-      blocks.add(_Fb2Block.image(await out.readAsBytes()));
+      try {
+        blocks.add(_Fb2Block.image(await out.readAsBytes()));
+      } catch (error) {
+        debugPrint('Cannot read rendered DJVU page $page: $error');
+        break;
+      }
     }
     if (blocks.length > 1) return _makeFb2Document(blocks);
   } catch (_) {}
@@ -4254,8 +4339,31 @@ Future<int?> _readDjvuPageCount(File sourceFile) async {
   return null;
 }
 
-Future<ProcessResult> _runNativeTool(String executable, List<String> arguments, {Duration timeout = const Duration(seconds: 20)}) {
-  return Process.run(executable, arguments, runInShell: Platform.isWindows).timeout(timeout);
+Future<ProcessResult> _runNativeTool(String executable, List<String> arguments, {Duration timeout = const Duration(seconds: 20)}) async {
+  Process? process;
+  final stdout = <int>[];
+  final stderr = <int>[];
+  try {
+    process = await Process.start(executable, arguments, runInShell: Platform.isWindows);
+    final stdoutDone = process.stdout.listen(stdout.addAll).asFuture<void>();
+    final stderrDone = process.stderr.listen(stderr.addAll).asFuture<void>();
+    final exitCode = await process.exitCode.timeout(timeout, onTimeout: () {
+      process?.kill(ProcessSignal.sigkill);
+      throw TimeoutException('Native tool timeout: $executable', timeout);
+    });
+    await Future.wait([stdoutDone, stderrDone]).timeout(const Duration(seconds: 2), onTimeout: () => const []);
+    return ProcessResult(
+      process.pid,
+      exitCode,
+      utf8.decode(stdout, allowMalformed: true),
+      utf8.decode(stderr, allowMalformed: true),
+    );
+  } on TimeoutException {
+    try {
+      process?.kill(ProcessSignal.sigkill);
+    } catch (_) {}
+    rethrow;
+  }
 }
 
 Future<List<File>> _collectReadableDocumentFiles(Directory root) async {

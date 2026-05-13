@@ -35,6 +35,27 @@ class StorageService {
     return dir;
   }
 
+  Future<Directory> processedArtifactsDir() async {
+    final dir = Directory(p.join((await appDir()).path, 'processed_artifacts'));
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    return dir;
+  }
+
+  Future<Directory> processedArtifactDir(String bookId) async {
+    final safeBookId = bookId.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_');
+    final dir = Directory(p.join((await processedArtifactsDir()).path, safeBookId));
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    return dir;
+  }
+
+  Future<File> processedArtifactManifestFile(String bookId) async {
+    return File(p.join((await processedArtifactDir(bookId)).path, 'artifact.json'));
+  }
+
   Future<File> manifestFile() async {
     return File(p.join((await appDir()).path, 'manifest.json'));
   }

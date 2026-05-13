@@ -18,6 +18,9 @@ import 'relay_client.dart';
 
 const _uuid = Uuid();
 const _defaultChunkSize = 1024 * 1024; // Binary chunks: 1 MiB keeps Tailscale/Android stable and reduces ACK overhead.
+const _downloadOfferTimeout = Duration(seconds: 24);
+const _downloadIdleTimeout = Duration(seconds: 28);
+const _directStreamIdleTimeout = Duration(seconds: 18);
 
 class PairingInvite {
   const PairingInvite({
@@ -849,7 +852,7 @@ class SyncService {
       }));
     }
 
-    unawaited(Future<void>.delayed(const Duration(seconds: 30), () async {
+    unawaited(Future<void>.delayed(_downloadOfferTimeout, () async {
       final current = _downloadsByTransferId[transferId];
       if (current == null) return;
       if (current.sourceDeviceId == null) {
@@ -1190,7 +1193,24 @@ class SyncService {
     final book = _findBook(local, bookId);
     if (book == null || book.localPath == null) return;
     final file = File(book.localPath!);
-    if (!await file.exists()) return;
+    if (!await file.exists()) {
+      _appendLog('Файл больше не доступен на этом устройстве: ${book.title}');
+      try {
+        final updated = await _storage.removeLocalBookCopy(book.id);
+        _manifestChanges.add(updated);
+        await broadcastLibrarySnapshot(reason: 'file_missing_on_source');
+      } catch (_) {
+        // Best effort: transfer must still be terminated for the requester.
+      }
+      await _sendFileError(
+        local,
+        transferId,
+        bookId,
+        requestingDeviceId,
+        'Файл больше недоступен на устройстве-источнике. Включите другое устройство с этой книгой или добавьте файл заново.',
+      );
+      return;
+    }
 
     final chunkSize = math.min(
       (payload['preferredChunkSize'] as num?)?.toInt() ?? _defaultChunkSize,
@@ -1356,6 +1376,29 @@ class SyncService {
     }
   }
 
+  Future<void> _handleSourceFileUnavailable(
+    LibraryManifest local,
+    String transferId,
+    String bookId,
+    String requestingDeviceId,
+    String message,
+  ) async {
+    try {
+      final updated = await _storage.removeLocalBookCopy(bookId);
+      _manifestChanges.add(updated);
+      await broadcastLibrarySnapshot(reason: 'file_unavailable_on_source');
+    } catch (_) {
+      // The transfer error is more important than local manifest cleanup here.
+    }
+    await _sendFileError(
+      local,
+      transferId,
+      bookId,
+      requestingDeviceId,
+      '$message. Файл больше недоступен на устройстве-источнике.',
+    );
+  }
+
   Future<void> _sendFileChunks({
     required LibraryManifest local,
     required String transferId,
@@ -1372,11 +1415,17 @@ class SyncService {
     }
     final file = File(book.localPath!);
     if (!await file.exists()) {
-      await _sendFileError(local, transferId, bookId, requestingDeviceId, 'Локальный файл отсутствует');
+      await _handleSourceFileUnavailable(local, transferId, bookId, requestingDeviceId, 'Локальный файл отсутствует');
       return;
     }
 
-    final size = await file.length();
+    int size;
+    try {
+      size = await file.length();
+    } catch (_) {
+      await _handleSourceFileUnavailable(local, transferId, bookId, requestingDeviceId, 'Не удалось прочитать локальный файл');
+      return;
+    }
     final safeChunkSize = chunkSize.clamp(256 * 1024, _defaultChunkSize).toInt();
     final totalChunks = (size / safeChunkSize).ceil();
     final safeStartChunkIndex = startChunkIndex.clamp(0, totalChunks).toInt();
@@ -1400,8 +1449,14 @@ class SyncService {
       ),
     );
 
-    final raf = await file.open(mode: FileMode.read);
-    await raf.setPosition(startOffset);
+    RandomAccessFile raf;
+    try {
+      raf = await file.open(mode: FileMode.read);
+      await raf.setPosition(startOffset);
+    } catch (_) {
+      await _handleSourceFileUnavailable(local, transferId, bookId, requestingDeviceId, 'Не удалось открыть файл для отправки');
+      return;
+    }
     var chunkIndex = safeStartChunkIndex;
     var sentBytes = startOffset;
     var failed = false;
@@ -1410,6 +1465,11 @@ class SyncService {
       while (true) {
         if (_cancelledTransfers.contains(transferId)) {
           _appendLog('Отправка отменена получателем: ${book.title}');
+          break;
+        }
+        if (!await file.exists()) {
+          failed = true;
+          await _handleSourceFileUnavailable(local, transferId, bookId, requestingDeviceId, 'Файл был удалён во время передачи');
           break;
         }
         final data = await raf.read(safeChunkSize);
@@ -1806,7 +1866,7 @@ class SyncService {
 
   void _resetDownloadWatchdog(_DownloadSession session) {
     session.watchdog?.cancel();
-    session.watchdog = Timer(const Duration(seconds: 90), () {
+    session.watchdog = Timer(_downloadIdleTimeout, () {
       final current = _downloadsByTransferId[session.transferId];
       if (current == null || current.sourceDeviceId == null) return;
       unawaited(_failDownload(current, 'Источник перестал отвечать во время скачивания'));
@@ -1955,9 +2015,16 @@ class SyncService {
       }
       final token = segments[1];
       final share = _directShares[token];
-      if (share == null || share.expiresAt.isBefore(DateTime.now().toUtc()) || !await share.file.exists()) {
+      if (share == null || share.expiresAt.isBefore(DateTime.now().toUtc())) {
         _directShares.remove(token);
         request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+        return;
+      }
+      if (!await share.file.exists()) {
+        _directShares.remove(token);
+        request.response.statusCode = HttpStatus.gone;
+        request.response.headers.set('X-ReadArc-Error', 'source-file-unavailable');
         await request.response.close();
         return;
       }
@@ -2080,6 +2147,7 @@ class SyncService {
     for (final uri in ordered.take(3)) {
       final ok = await _downloadFromDirectUri(session, uri, tempFile);
       if (ok) return true;
+      if (!_downloadsByTransferId.containsKey(session.transferId)) return true;
     }
     _resetDownloadWatchdog(session);
     return false;
@@ -2105,6 +2173,11 @@ class SyncService {
       final request = await client.getUrl(uri).timeout(const Duration(seconds: 3));
       if (resumeBytes > 0) request.headers.set(HttpHeaders.rangeHeader, 'bytes=$resumeBytes-');
       final response = await request.close().timeout(const Duration(seconds: 5));
+      if (response.statusCode == HttpStatus.notFound || response.statusCode == HttpStatus.gone) {
+        await response.drain();
+        await _failDownload(session, 'Файл больше недоступен на устройстве-источнике');
+        return true;
+      }
       if (response.statusCode != HttpStatus.ok && response.statusCode != HttpStatus.partialContent) {
         await response.drain();
         return false;
@@ -2117,7 +2190,7 @@ class SyncService {
       sink = tempFile.openWrite(mode: FileMode.append);
       final startedAt = DateTime.now();
       var lastUi = DateTime.fromMillisecondsSinceEpoch(0);
-      await for (final chunk in response.timeout(const Duration(seconds: 120))) {
+      await for (final chunk in response.timeout(_directStreamIdleTimeout)) {
         sink.add(chunk);
         session.receivedBytes += chunk.length;
         final now = DateTime.now();
