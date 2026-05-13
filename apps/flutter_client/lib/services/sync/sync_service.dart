@@ -221,6 +221,7 @@ class SyncService {
 
   Timer? _reconnectTimer;
   Timer? _healthTimer;
+  Timer? _metadataRefreshTimer;
   bool _manualDisconnect = true;
   bool _reconnectInProgress = false;
   bool _relayUnavailableLogged = false;
@@ -321,8 +322,10 @@ class SyncService {
       state.value.copyWith(connected: true, statusText: 'Подключено'),
     );
     _startHealthMonitor(relayUrl);
+    _startMetadataRefreshLoop(client);
     unawaited(_ensureDirectFileServer());
 
+    await pullOfflineQueue(reason: 'connected');
     await refreshMetadata(reason: 'connected');
     _scheduleStartupMetadataRefresh(client);
   }
@@ -330,6 +333,8 @@ class SyncService {
   Future<void> disconnect({bool manual = true}) async {
     _healthTimer?.cancel();
     _healthTimer = null;
+    _metadataRefreshTimer?.cancel();
+    _metadataRefreshTimer = null;
     if (manual) {
       _manualDisconnect = true;
       _reconnectTimer?.cancel();
@@ -450,8 +455,37 @@ class SyncService {
     ]) {
       unawaited(Future<void>.delayed(delay, () async {
         if (_client != client || !state.value.connected) return;
+        await pullOfflineQueue(reason: 'startup_retry_${delay.inMilliseconds}ms');
         await refreshMetadata(reason: 'startup_retry_${delay.inMilliseconds}ms');
       }));
+    }
+  }
+
+  void _startMetadataRefreshLoop(RelayClient client) {
+    _metadataRefreshTimer?.cancel();
+    _metadataRefreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (_client != client || !state.value.connected || _manualDisconnect) return;
+      unawaited(pullOfflineQueue(reason: 'periodic'));
+      unawaited(requestLibrarySnapshot(reason: 'periodic_metadata_pull'));
+    });
+  }
+
+  Future<bool> pullOfflineQueue({required String reason}) async {
+    final client = _client;
+    if (client == null || !state.value.connected) return false;
+    try {
+      client.sendControl({
+        'type': 'offline_queue_pull',
+        'accountId': client.accountId,
+        'deviceId': client.deviceId,
+        'payload': {
+          'reason': reason,
+        },
+      });
+      return true;
+    } catch (error) {
+      _appendLog('Не удалось запросить offline queue: $error');
+      return false;
     }
   }
 
@@ -470,7 +504,30 @@ class SyncService {
       },
     );
 
-    return _sendEnvelope(envelope, logLabel: 'Отправлен E2E snapshot: $reason');
+    final sent = await _sendEnvelope(envelope, logLabel: 'Отправлен E2E snapshot: $reason');
+    if (_shouldRetrySnapshotBroadcast(reason)) {
+      _scheduleSnapshotBroadcastRetries(reason: reason);
+    }
+    return sent;
+  }
+
+  bool _shouldRetrySnapshotBroadcast(String reason) {
+    if (reason.contains('_retry_')) return false;
+    return reason.contains('book_imported') ||
+        reason.contains('local_copy_removed') ||
+        reason.contains('book_deleted') ||
+        reason.contains('trusted_device_revoked') ||
+        reason.contains('pairing_claimed') ||
+        reason.contains('device_name_changed');
+  }
+
+  void _scheduleSnapshotBroadcastRetries({required String reason}) {
+    for (final delay in const [Duration(seconds: 2), Duration(seconds: 8)]) {
+      unawaited(Future<void>.delayed(delay, () async {
+        if (!state.value.connected || _manualDisconnect) return;
+        await broadcastLibrarySnapshot(reason: '${reason}_retry_${delay.inSeconds}s');
+      }));
+    }
   }
 
   Future<bool> requestLibrarySnapshot({required String reason}) async {
