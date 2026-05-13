@@ -36,6 +36,8 @@ const Color _raPaper = Color(0xFFF3E7CF);
 const Color _raPaperSoft = Color(0xFFF8F1E3);
 const Color _raInkBlue = Color(0xFF2A2F4A);
 const Color _raMutedInk = Color(0xFF6F6658);
+const Color _raMutedPaper = Color(0xFFCFC5B5);
+const Color _raFaintIndigo = Color(0xFF4A405F);
 
 void main() {
   runZonedGuarded(() {
@@ -517,11 +519,11 @@ class _BookCard extends StatelessWidget {
     final progressText = '${book.progressPercent.clamp(0, 100).toStringAsFixed(0)}%';
 
     return Card(
-      color: _raPaper,
+      color: _raIndigoCard,
       elevation: 0,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(22),
-        side: BorderSide(color: _raWarmGold.withOpacity(0.28)),
+        side: BorderSide(color: _raWarmGold.withOpacity(0.18)),
       ),
       child: InkWell(
         borderRadius: BorderRadius.circular(22),
@@ -537,7 +539,7 @@ class _BookCard extends StatelessWidget {
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: _raInkBlue,
+                      color: _raPaper,
                       fontWeight: FontWeight.w800,
                     ),
               ),
@@ -547,7 +549,7 @@ class _BookCard extends StatelessWidget {
                   _LibraryMetaChip(label: format),
                   const Padding(
                     padding: EdgeInsets.symmetric(horizontal: 6),
-                    child: Text('•', style: TextStyle(color: _raMutedInk, fontSize: 11)),
+                    child: Text('•', style: TextStyle(color: _raMutedPaper, fontSize: 11)),
                   ),
                   _LibraryMetaChip(label: sizeText),
                   const SizedBox(width: 10),
@@ -560,7 +562,7 @@ class _BookCard extends StatelessWidget {
                           value: progressValue,
                           minHeight: 4,
                           valueColor: const AlwaysStoppedAnimation<Color>(_raWarmGold),
-                          backgroundColor: _raWarmGold.withOpacity(0.18),
+                          backgroundColor: _raFaintIndigo.withOpacity(0.95),
                         ),
                       ),
                     ),
@@ -570,7 +572,7 @@ class _BookCard extends StatelessWidget {
                     IconButton(
                       tooltip: 'Отменить скачивание',
                       visualDensity: VisualDensity.compact,
-                      color: _raInkBlue,
+                      color: _raWarmGold,
                       onPressed: onCancelDownload,
                       icon: const Icon(Icons.cancel_outlined),
                     )
@@ -581,15 +583,15 @@ class _BookCard extends StatelessWidget {
                       label: Text(book.isDownloaded ? 'Читать' : 'Скачать'),
                       style: TextButton.styleFrom(
                         visualDensity: VisualDensity.compact,
-                        foregroundColor: _raInkBlue,
-                        backgroundColor: _raWarmGold.withOpacity(0.30),
+                        foregroundColor: _raWarmGold,
+                        backgroundColor: _raWarmGold.withOpacity(0.12),
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
                       ),
                     ),
                   PopupMenuButton<_BookAction>(
                     tooltip: 'Действия с книгой',
-                    iconColor: _raInkBlue,
+                    iconColor: _raWarmGold,
                     onSelected: (action) {
                       switch (action) {
                         case _BookAction.removeLocalCopy:
@@ -638,7 +640,7 @@ class _LibraryMetaChip extends StatelessWidget {
         fontSize: 11,
         fontWeight: FontWeight.w600,
         letterSpacing: 0.2,
-        color: _raMutedInk,
+        color: _raMutedPaper,
       ),
     );
   }
@@ -3640,7 +3642,8 @@ class _DjvuReaderScreenState extends State<_DjvuReaderScreen> {
                       child: LayoutBuilder(
                         builder: (context, constraints) {
                           _lastViewportWidth = constraints.maxWidth;
-                          final displayWidth = constraints.maxWidth.clamp(240.0, 1800.0).toDouble();
+                          final horizontalInset = _isAndroidReaderPlatform ? 10.0 : 18.0;
+                          final displayWidth = (constraints.maxWidth - horizontalInset * 2).clamp(240.0, 1800.0).toDouble();
                           final geometry = (_page - 1) < _pageGeometries.length
                               ? _pageGeometries[_page - 1]
                               : const _DjvuPageGeometry(width: 595, height: 842, dpi: 300);
@@ -3813,13 +3816,13 @@ class _DjvuSinglePageReaderState extends State<_DjvuSinglePageReader> {
       onHorizontalDragEnd: _onHorizontalDragEnd,
       onLongPress: widget.onLongPressContent,
       child: ColoredBox(
-        color: const Color(0xFFF3E7CF),
+        color: const Color(0xFFE9DEC9),
         child: Scrollbar(
           controller: _controller,
           thumbVisibility: true,
           child: SingleChildScrollView(
             controller: _controller,
-            padding: const EdgeInsets.fromLTRB(0, 8, 0, 16),
+            padding: const EdgeInsets.fromLTRB(0, 10, 0, 18),
             child: page,
           ),
         ),
@@ -3931,7 +3934,7 @@ Future<_DjvuArtifact> _prepareDjvuArtifact({
   final pagesDir = Directory('${root.path}${Platform.pathSeparator}pages');
   if (!await pagesDir.exists()) await pagesDir.create(recursive: true);
   final manifestFile = await storage.processedArtifactManifestFile(book.id);
-  const renderProfile = 'paged-hidpi-v5-native-fast';
+  const renderProfile = 'paged-hidpi-v6-full-canvas-fast';
 
   // First try an existing processed artifact. This lets Android/opened devices
   // use a prepared DJVU cache once artifact sync is enabled, without needing a
@@ -4060,9 +4063,9 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
     // DJVU pages often contain scanned text; render above physical DPR and
     // downscale with high filtering. This keeps Android text crisp while the
     // paged viewer limits memory to one visible page plus a small cache.
-    final qualityScale = Platform.isAndroid ? 2.45 : 1.95;
-    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio * qualityScale).round().clamp(1600, Platform.isAndroid ? 4200 : 3600).toInt();
-    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio * qualityScale).round().clamp(2200, Platform.isAndroid ? 6200 : 5200).toInt();
+    final qualityScale = Platform.isAndroid ? 2.05 : 1.75;
+    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio * qualityScale).round().clamp(1700, Platform.isAndroid ? 3600 : 3200).toInt();
+    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio * qualityScale).round().clamp(2400, Platform.isAndroid ? 5400 : 4800).toInt();
     final key = '${widget.sourceFile.path}:${widget.pageNumber}:$pixelWidth:$pixelHeight';
     final existing = _renderJobs[key];
     if (existing != null) return existing;
@@ -4077,7 +4080,7 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
   }
 
   Future<void> _precacheAdjacentPages() async {
-    final nextPages = <int>[widget.pageNumber + 1, widget.pageNumber - 1]
+    final nextPages = <int>[widget.pageNumber + 1, widget.pageNumber + 2, widget.pageNumber + 3, widget.pageNumber - 1]
         .where((page) => page >= 1 && page <= widget.pageCount)
         .toList(growable: false);
     for (final page in nextPages) {
@@ -4085,12 +4088,12 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
       try {
         if (await out.exists() && await out.length() > 0) continue;
       } catch (_) {}
-      final qualityScale = Platform.isAndroid ? 2.45 : 1.95;
-      final pixelWidth = (widget.displayWidth * widget.devicePixelRatio * qualityScale).round().clamp(1600, Platform.isAndroid ? 4200 : 3600).toInt();
-      final pixelHeight = (widget.displayHeight * widget.devicePixelRatio * qualityScale).round().clamp(2200, Platform.isAndroid ? 6200 : 5200).toInt();
+      final qualityScale = Platform.isAndroid ? 2.05 : 1.75;
+      final pixelWidth = (widget.displayWidth * widget.devicePixelRatio * qualityScale).round().clamp(1700, Platform.isAndroid ? 3600 : 3200).toInt();
+      final pixelHeight = (widget.displayHeight * widget.devicePixelRatio * qualityScale).round().clamp(2400, Platform.isAndroid ? 5400 : 4800).toInt();
       final key = '${widget.sourceFile.path}:$page:$pixelWidth:$pixelHeight';
       if (_renderJobs.containsKey(key)) continue;
-      while (_renderOrder.length >= 10) {
+      while (_renderOrder.length >= 14) {
         final oldest = _renderOrder.removeAt(0);
         _renderJobs.remove(oldest);
       }
@@ -4138,26 +4141,18 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
           final file = snapshot.data;
           if (file == null) {
             if (snapshot.connectionState == ConnectionState.done) {
-              return const ColoredBox(
-                color: Color(0xFFF8F1E3),
+              return const _DjvuPageSheet(
                 child: Center(child: Padding(padding: EdgeInsets.all(18), child: Text('Не удалось отрисовать страницу DJVU встроенным движком ReadArc. Проверьте, что native engine вошёл в сборку.'))),
               );
             }
-            return const ColoredBox(
-              color: Color(0xFFF8F1E3),
-              child: Center(child: CircularProgressIndicator()),
-            );
+            return const _DjvuPageSheet(child: Center(child: CircularProgressIndicator()));
           }
-          return DecoratedBox(
-            decoration: BoxDecoration(
-              color: Colors.white,
-              boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.12), blurRadius: 8, offset: const Offset(0, 3))],
-            ),
+          return _DjvuPageSheet(
             child: Image.file(
               file,
               width: widget.displayWidth,
               height: widget.displayHeight,
-              fit: BoxFit.fill,
+              fit: BoxFit.contain,
               gaplessPlayback: true,
               filterQuality: FilterQuality.high,
               isAntiAlias: true,
@@ -4165,6 +4160,31 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
           );
         },
       ),
+    );
+  }
+}
+
+
+class _DjvuPageSheet extends StatelessWidget {
+  const _DjvuPageSheet({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: Colors.black.withOpacity(0.34), width: 1.1),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.22),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: ClipRect(child: child),
     );
   }
 }
@@ -4769,7 +4789,7 @@ class _ContinuousReaderProgressBarState extends State<_ContinuousReaderProgressB
     const indigo = _raInkBlue;
     const gold = _raWarmGold;
     final hitAreaHeight = _isDesktopReaderPlatform ? 34.0 : 46.0;
-    final visualHeight = active ? 8.0 : 4.0;
+    final visualHeight = active ? 6.0 : 3.0;
     return SafeArea(
       top: false,
       child: Padding(
@@ -4861,7 +4881,7 @@ class _PagedReaderProgressBarState extends State<_PagedReaderProgressBar> {
     const indigo = _raInkBlue;
     const gold = _raWarmGold;
     final hitAreaHeight = _isDesktopReaderPlatform ? 34.0 : 46.0;
-    final visualHeight = active ? 8.0 : 4.0;
+    final visualHeight = active ? 6.0 : 3.0;
 
     return SafeArea(
       top: false,
@@ -4970,15 +4990,18 @@ class _AndroidPageTurnButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final enabled = onPressed != null;
     return Material(
-      color: _raWarmGold.withOpacity(enabled ? 0.28 : 0.10),
-      borderRadius: BorderRadius.circular(17),
+      color: _raWarmGold.withOpacity(enabled ? 0.20 : 0.08),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(17),
+        side: BorderSide(color: _raWarmGold.withOpacity(enabled ? 0.34 : 0.12), width: 0.8),
+      ),
       child: InkWell(
         borderRadius: BorderRadius.circular(17),
         onTap: onPressed,
         child: SizedBox(
           width: 50,
           height: 38,
-          child: Icon(icon, size: 27, color: _raDeepIndigo.withOpacity(enabled ? 0.86 : 0.24)),
+          child: Icon(icon, size: 27, color: _raWarmGold.withOpacity(enabled ? 0.92 : 0.24)),
         ),
       ),
     );

@@ -99,39 +99,20 @@ pub extern "C" fn readarc_djvu_render_page_rgba(
         let Ok(page) = doc.doc.page(page_index as usize) else {
             return -3;
         };
-        let Ok(pixmap) = page.render_to_size(target_width, target_height) else {
+        let (inner_width, inner_height) = readarc_inner_render_size(target_width, target_height);
+        let Ok(pixmap) = page.render_to_size(inner_width, inner_height) else {
             return -4;
         };
-        let data: &[u8] = pixmap.as_ref();
-        let pixels = (target_width as usize).saturating_mul(target_height as usize);
+        let inner_pixels = (inner_width as usize).saturating_mul(inner_height as usize);
+        let Some(inner_rgba) = readarc_pixmap_to_rgba(pixmap.as_ref(), inner_pixels) else {
+            return -5;
+        };
+        let Some(canvas) = readarc_rgba_canvas_with_page(inner_rgba, inner_width, inner_height, target_width, target_height) else {
+            return -6;
+        };
         let out = unsafe { slice::from_raw_parts_mut(out_rgba, required) };
-        if data.len() == required {
-            out.copy_from_slice(data);
-            return 0;
-        }
-        if data.len() == pixels.saturating_mul(3) {
-            for i in 0..pixels {
-                let src = i * 3;
-                let dst = i * 4;
-                out[dst] = data[src];
-                out[dst + 1] = data[src + 1];
-                out[dst + 2] = data[src + 2];
-                out[dst + 3] = 255;
-            }
-            return 0;
-        }
-        if data.len() == pixels {
-            for i in 0..pixels {
-                let v = data[i];
-                let dst = i * 4;
-                out[dst] = v;
-                out[dst + 1] = v;
-                out[dst + 2] = v;
-                out[dst + 3] = 255;
-            }
-            return 0;
-        }
-        -5
+        out.copy_from_slice(&canvas);
+        0
     }))
     .unwrap_or(-99)
 }
@@ -169,6 +150,52 @@ fn readarc_pixmap_to_rgba(data: &[u8], pixels: usize) -> Option<Vec<u8>> {
     None
 }
 
+
+fn readarc_margin_for_dimension(value: u32) -> u32 {
+    let margin = ((value as f32) * 0.028).round() as u32;
+    margin.clamp(10, 72)
+}
+
+fn readarc_rgba_canvas_with_page(
+    page_rgba: Vec<u8>,
+    page_width: u32,
+    page_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> Option<Vec<u8>> {
+    let target_pixels = (target_width as usize).checked_mul(target_height as usize)?;
+    let mut canvas = vec![255u8; target_pixels.checked_mul(4)?];
+    let src_stride = (page_width as usize).checked_mul(4)?;
+    let dst_stride = (target_width as usize).checked_mul(4)?;
+    if page_rgba.len() < src_stride.checked_mul(page_height as usize)? {
+        return None;
+    }
+    let offset_x = ((target_width.saturating_sub(page_width)) / 2) as usize;
+    let offset_y = ((target_height.saturating_sub(page_height)) / 2) as usize;
+    let dst_x_bytes = offset_x.checked_mul(4)?;
+    for row in 0..(page_height as usize) {
+        let src_start = row.checked_mul(src_stride)?;
+        let src_end = src_start.checked_add(src_stride)?;
+        let dst_start = (offset_y + row)
+            .checked_mul(dst_stride)?
+            .checked_add(dst_x_bytes)?;
+        let dst_end = dst_start.checked_add(src_stride)?;
+        if dst_end > canvas.len() || src_end > page_rgba.len() {
+            return None;
+        }
+        canvas[dst_start..dst_end].copy_from_slice(&page_rgba[src_start..src_end]);
+    }
+    Some(canvas)
+}
+
+fn readarc_inner_render_size(target_width: u32, target_height: u32) -> (u32, u32) {
+    let margin_x = readarc_margin_for_dimension(target_width);
+    let margin_y = readarc_margin_for_dimension(target_height);
+    let inner_width = target_width.saturating_sub(margin_x.saturating_mul(2)).max(1);
+    let inner_height = target_height.saturating_sub(margin_y.saturating_mul(2)).max(1);
+    (inner_width, inner_height)
+}
+
 #[no_mangle]
 pub extern "C" fn readarc_djvu_render_page_png(
     data: *const u8,
@@ -191,11 +218,15 @@ pub extern "C" fn readarc_djvu_render_page_png(
         let Ok(page) = doc.page(page_index as usize) else {
             return ptr::null_mut();
         };
-        let Ok(pixmap) = page.render_to_size(target_width, target_height) else {
+        let (inner_width, inner_height) = readarc_inner_render_size(target_width, target_height);
+        let Ok(pixmap) = page.render_to_size(inner_width, inner_height) else {
             return ptr::null_mut();
         };
-        let pixels = (target_width as usize).saturating_mul(target_height as usize);
-        let Some(rgba) = readarc_pixmap_to_rgba(pixmap.as_ref(), pixels) else {
+        let inner_pixels = (inner_width as usize).saturating_mul(inner_height as usize);
+        let Some(inner_rgba) = readarc_pixmap_to_rgba(pixmap.as_ref(), inner_pixels) else {
+            return ptr::null_mut();
+        };
+        let Some(rgba) = readarc_rgba_canvas_with_page(inner_rgba, inner_width, inner_height, target_width, target_height) else {
             return ptr::null_mut();
         };
 
