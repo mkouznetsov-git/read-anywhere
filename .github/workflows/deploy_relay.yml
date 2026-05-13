@@ -11,6 +11,8 @@ on:
 jobs:
   deploy-relay:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout selected ref
@@ -21,12 +23,9 @@ jobs:
       - name: Build relay deployment archive
         run: |
           set -Eeuo pipefail
-
           sudo apt-get update
           sudo apt-get install -y zip
-
           rm -f /tmp/readarc-relay-deploy.zip
-
           zip -r /tmp/readarc-relay-deploy.zip . \
             -x ".git/*" \
             -x ".github/*" \
@@ -34,46 +33,57 @@ jobs:
             -x "apps/flutter_client/.dart_tool/*" \
             -x "**/.DS_Store" \
             -x "**/__pycache__/*"
-
           ls -lh /tmp/readarc-relay-deploy.zip
 
       - name: Prepare SSH
+        env:
+          RELAY_HOST: ${{ secrets.RELAY_HOST }}
+          RELAY_USER: ${{ secrets.RELAY_USER }}
+          RELAY_SSH_KEY: ${{ secrets.RELAY_SSH_KEY }}
         run: |
           set -Eeuo pipefail
-
+          if [[ -z "$RELAY_HOST" ]]; then
+            echo "::error::Missing GitHub repository secret RELAY_HOST"
+            exit 1
+          fi
+          if [[ -z "$RELAY_USER" ]]; then
+            echo "::error::Missing GitHub repository secret RELAY_USER"
+            exit 1
+          fi
+          if [[ -z "$RELAY_SSH_KEY" ]]; then
+            echo "::error::Missing GitHub repository secret RELAY_SSH_KEY"
+            exit 1
+          fi
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-
-          cat > ~/.ssh/readarc_relay_deploy <<'KEY'
-          ${{ secrets.RELAY_SSH_KEY }}
-          KEY
-
-          sed -i 's/^          //' ~/.ssh/readarc_relay_deploy
+          printf '%s\n' "$RELAY_SSH_KEY" > ~/.ssh/readarc_relay_deploy
           chmod 600 ~/.ssh/readarc_relay_deploy
-
-          ssh-keyscan -H "${{ secrets.RELAY_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -H "$RELAY_HOST" >> ~/.ssh/known_hosts
 
       - name: Upload archive to relay server
+        env:
+          RELAY_HOST: ${{ secrets.RELAY_HOST }}
+          RELAY_USER: ${{ secrets.RELAY_USER }}
         run: |
           set -Eeuo pipefail
-
           scp \
             -i ~/.ssh/readarc_relay_deploy \
             /tmp/readarc-relay-deploy.zip \
-            "${{ secrets.RELAY_USER }}@${{ secrets.RELAY_HOST }}:/tmp/readarc-update.zip"
+            "$RELAY_USER@$RELAY_HOST:/tmp/readarc-update.zip"
 
       - name: Deploy relay on server
+        env:
+          RELAY_HOST: ${{ secrets.RELAY_HOST }}
+          RELAY_USER: ${{ secrets.RELAY_USER }}
         run: |
           set -Eeuo pipefail
-
           ssh \
             -i ~/.ssh/readarc_relay_deploy \
-            "${{ secrets.RELAY_USER }}@${{ secrets.RELAY_HOST }}" \
+            "$RELAY_USER@$RELAY_HOST" \
             "readarc-update-relay /tmp/readarc-update.zip"
 
       - name: Verify public health
         run: |
           set -Eeuo pipefail
-
           curl -fsS https://relay.readarc.ru/health
           echo

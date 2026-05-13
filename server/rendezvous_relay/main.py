@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketState
 
-app = FastAPI(title="ReadArc Rendezvous Relay", version="0.3.0")
+app = FastAPI(title="ReadArc Rendezvous Relay", version="0.3.1")
 
 # The relay never stores books or decrypted metadata. It keeps online websocket
 # rooms in RAM, caches the latest encrypted metadata snapshot in RAM, and since
@@ -145,6 +145,16 @@ async def claim_pairing(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": "Pairing code is invalid or expired"}, status_code=404)
     if record["expiresAt"] < time.time():
         return JSONResponse({"ok": False, "message": "Pairing code expired"}, status_code=410)
+
+    await _broadcast_system(record["accountId"], {
+        "type": "pairing_claimed",
+        "accountId": record["accountId"],
+        "deviceId": "relay",
+        "ownerDeviceId": record["ownerDeviceId"],
+        "acceptedDeviceId": new_device_id,
+        "acceptedDeviceName": new_device_name or "Устройство",
+        "acceptedDevicePublicKey": new_device_public_key,
+    })
 
     return JSONResponse({
         "ok": True,

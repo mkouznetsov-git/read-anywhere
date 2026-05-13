@@ -913,6 +913,11 @@ class SyncService {
       return;
     }
 
+    if (envelope.type == 'pairing_claimed') {
+      await _handlePairingClaimed(envelope, local);
+      return;
+    }
+
     if (envelope.type == 'error') {
       _appendLog('Relay вернул ошибку: ${envelope.payload['message'] ?? envelope.payload}');
       return;
@@ -1043,6 +1048,28 @@ class SyncService {
 
     _appendLog('Отклонено событие от недоверенного устройства: ${envelope.deviceId}');
     return false;
+  }
+
+  Future<void> _handlePairingClaimed(SyncEnvelope envelope, LibraryManifest local) async {
+    if (envelope.deviceId != 'relay') return;
+    final ownerDeviceId = envelope.payload['ownerDeviceId']?.toString() ?? '';
+    if (ownerDeviceId.isNotEmpty && ownerDeviceId != local.deviceId) return;
+
+    final acceptedDeviceId = envelope.payload['acceptedDeviceId']?.toString().trim() ?? '';
+    if (acceptedDeviceId.isEmpty || acceptedDeviceId == local.deviceId) return;
+
+    final acceptedDeviceName = envelope.payload['acceptedDeviceName']?.toString().trim() ?? 'Устройство';
+    final acceptedDevicePublicKey = envelope.payload['acceptedDevicePublicKey']?.toString().trim() ?? '';
+
+    final updated = await _storage.trustDevice(
+      deviceId: acceptedDeviceId,
+      name: acceptedDeviceName.isEmpty ? 'Устройство' : acceptedDeviceName,
+      role: 'device',
+      publicKey: acceptedDevicePublicKey,
+    );
+    _manifestChanges.add(updated);
+    _appendLog('Устройство снова доверено через QR: $acceptedDeviceName');
+    await broadcastLibrarySnapshot(reason: 'pairing_claimed_reauthorized_device');
   }
 
   Future<void> _handleLibrarySnapshotRequested(

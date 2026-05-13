@@ -115,7 +115,7 @@ class RelayClient {
       }
       final decoded = Map<String, dynamic>.from(decodedRaw);
       final type = decoded['type'] as String?;
-      if (type == 'peer_joined' || type == 'peer_left' || type == 'peer_list' || type == 'error') {
+      if (type == 'peer_joined' || type == 'peer_left' || type == 'peer_list' || type == 'pairing_claimed' || type == 'error') {
         _incoming.add(
           SyncEnvelope(
             type: type ?? 'relay_system',

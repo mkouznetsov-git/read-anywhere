@@ -4709,21 +4709,102 @@ class _SyncScreenState extends State<SyncScreen> {
   SyncSettings _settingsFromForm({bool? autoConnect}) =>
       SyncSettings(autoConnect: autoConnect ?? true).asOfficial(autoConnect: true);
 
-  Future<void> _saveIdentity() async {
+  Future<void> _editDeviceName() async {
+    final controller = TextEditingController(text: _deviceNameController.text.trim());
+    final value = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Название устройства'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          textInputAction: TextInputAction.done,
+          decoration: const InputDecoration(
+            labelText: 'Название устройства',
+            helperText: 'Это имя будет видно другим доверенным устройствам.',
+          ),
+          onSubmitted: (value) => Navigator.of(context).pop(value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('Сохранить'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    final normalized = value?.trim() ?? '';
+    if (normalized.isEmpty || normalized == _deviceNameController.text.trim()) return;
     setState(() => _busy = true);
     try {
-      await widget.sync.disconnect();
-      var manifest = await widget.storage.changeAccountId(_accountController.text);
-      manifest = await widget.storage.changeDeviceName(_deviceNameController.text);
+      final manifest = await widget.storage.changeDeviceName(normalized);
+      await widget.sync.broadcastLibrarySnapshot(reason: 'device_name_changed');
       if (!mounted) return;
+      _deviceNameController.text = manifest.deviceName;
       setState(() => _manifest = manifest);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Идентификатор аккаунта и имя устройства сохранены')),
+        const SnackBar(content: Text('Название устройства сохранено')),
       );
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не удалось сохранить: $error')),
+        SnackBar(content: Text('Не удалось изменить название устройства: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _editAccountId() async {
+    final controller = TextEditingController(text: _accountController.text.trim());
+    final value = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Аккаунт'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          textInputAction: TextInputAction.done,
+          decoration: const InputDecoration(
+            labelText: 'Аккаунт',
+            helperText: 'Обычно менять не нужно. Используйте только для восстановления/переноса аккаунта вручную.',
+          ),
+          onSubmitted: (value) => Navigator.of(context).pop(value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('Сохранить'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    final normalized = value?.trim() ?? '';
+    if (normalized.isEmpty || normalized == _accountController.text.trim()) return;
+    setState(() => _busy = true);
+    try {
+      await widget.sync.disconnect();
+      final manifest = await widget.storage.changeAccountId(normalized);
+      if (!mounted) return;
+      _accountController.text = manifest.accountId;
+      setState(() => _manifest = manifest);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Аккаунт сохранён')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Не удалось изменить аккаунт: $error')),
       );
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -4943,6 +5024,58 @@ class _SyncScreenState extends State<SyncScreen> {
             padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
             children: [
               _SectionCard(
+                title: 'Устройство',
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                manifest.deviceName,
+                                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                              ),
+                              const SizedBox(height: 6),
+                              SelectableText('Аккаунт: ${manifest.accountId}'),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        FilledButton.tonalIcon(
+                          onPressed: _busy ? null : _editDeviceName,
+                          icon: const Icon(Icons.edit_rounded),
+                          label: const Text('Редактировать'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 12,
+                      runSpacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed: _busy ? null : _editAccountId,
+                          icon: const Icon(Icons.manage_accounts_rounded),
+                          label: const Text('Редактировать аккаунт'),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: _copyAccountId,
+                          icon: const Icon(Icons.copy_rounded),
+                          label: const Text('Скопировать аккаунт'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              _SectionCard(
                 title: 'Статус',
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -4951,12 +5084,10 @@ class _SyncScreenState extends State<SyncScreen> {
                     if (manifest.isCurrentDeviceRevoked) ...[
                       const SizedBox(height: 10),
                       const Text(
-                        'Доступ этого устройства отозван. Локальная библиотека остаётся доступной, но синхронизация остановлена.',
+                        'Доступ этого устройства отозван. Локальная библиотека остаётся доступной, но синхронизация остановлена. Для повторного подключения отсканируйте новый QR-код владельца аккаунта.',
                       ),
                     ],
                     const SizedBox(height: 10),
-                    SelectableText('Аккаунт: ${manifest.accountId}'),
-                    Text('Название устройства: ${manifest.deviceName}'),
                     SelectableText('Идентификатор устройства: ${manifest.deviceId}'),
                     SelectableText("Ключ устройства: ${manifest.currentDeviceTrust?.effectiveFingerprint ?? 'не создан'}"),
                   ],
@@ -4968,30 +5099,52 @@ class _SyncScreenState extends State<SyncScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'QR-код уже содержит всю информацию для подключения к аккаунту. На новом устройстве достаточно отсканировать QR. Короткий код оставлен как запасной вариант.',
+                      'Основной сценарий — QR-код. Он содержит всю информацию для подключения к аккаунту через официальный relay ReadArc.',
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 14),
                     Row(
                       children: [
                         Expanded(
                           child: FilledButton.icon(
-                            onPressed: _pairingBusy ? null : _createPairingInvite,
+                            onPressed: _pairingBusy ? null : _showPairingQrCode,
                             icon: _pairingBusy
                                 ? const SizedBox(
                                     width: 18,
                                     height: 18,
                                     child: CircularProgressIndicator(strokeWidth: 2),
                                   )
-                                : const Icon(Icons.add_link_rounded),
-                            label: const Text('Создать код подключения'),
+                                : const Icon(Icons.qr_code_2_rounded),
+                            label: const Text('Показать QR-код'),
+                          ),
+                        ),
+                        if (Platform.isAndroid || Platform.isIOS) ...[
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: FilledButton.icon(
+                              onPressed: _pairingBusy ? null : _scanPairingQrCode,
+                              icon: const Icon(Icons.qr_code_scanner_rounded),
+                              label: const Text('Сканировать QR'),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: _pairingBusy ? null : _createPairingInvite,
+                            icon: const Icon(Icons.pin_rounded),
+                            label: const Text('Создать короткий код'),
                           ),
                         ),
                         const SizedBox(width: 12),
                         Expanded(
                           child: OutlinedButton.icon(
-                            onPressed: _pairingBusy ? null : _showPairingQrCode,
-                            icon: const Icon(Icons.qr_code_2_rounded),
-                            label: const Text('Создать QR-код'),
+                            onPressed: _pairingBusy ? null : _claimPairingInvite,
+                            icon: const Icon(Icons.login_rounded),
+                            label: const Text('Подключиться по коду'),
                           ),
                         ),
                       ],
@@ -5033,30 +5186,8 @@ class _SyncScreenState extends State<SyncScreen> {
                       controller: _pairingInputController,
                       decoration: const InputDecoration(
                         labelText: 'Код или приглашение',
-                        helperText: 'Например: 483-921 или полное приглашение readarc://pair?...',
+                        helperText: 'Запасной вариант: 483-921 или полное приглашение readarc://pair?...',
                       ),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: FilledButton.icon(
-                            onPressed: _pairingBusy ? null : _claimPairingInvite,
-                            icon: const Icon(Icons.login_rounded),
-                            label: const Text('Подключиться по коду'),
-                          ),
-                        ),
-                        if (Platform.isAndroid || Platform.isIOS) ...[
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              onPressed: _pairingBusy ? null : _scanPairingQrCode,
-                              icon: const Icon(Icons.qr_code_scanner_rounded),
-                              label: const Text('Сканировать QR'),
-                            ),
-                          ),
-                        ],
-                      ],
                     ),
                   ],
                 ),
@@ -5078,7 +5209,7 @@ class _SyncScreenState extends State<SyncScreen> {
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text('Доступ можно отозвать у любого другого устройства. Отзыв синхронизируется как security-событие: новые события и файлы от отозванного устройства будут отклоняться.'),
+                          const Text('Доступ можно отозвать у любого другого устройства. Повторное подключение возможно по новому QR-коду владельца аккаунта.'),
                           const SizedBox(height: 8),
                           ...manifest.activeTrustedDevices.map((device) {
                             final isCurrent = device.deviceId == manifest.deviceId;
@@ -5121,49 +5252,6 @@ class _SyncScreenState extends State<SyncScreen> {
                           ),
                         ],
                       ),
-                  ],
-                ),
-              ),
-              Card(
-                child: ExpansionTile(
-                  title: const Text('Дополнительно'),
-                  subtitle: const Text('Ручное изменение аккаунта и названия устройства'),
-                  childrenPadding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
-                  children: [
-                    const Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text('Этот раздел нужен только как fallback. В обычном сценарии используйте подключение по коду выше.'),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: _accountController,
-                      decoration: const InputDecoration(labelText: 'Аккаунт'),
-                    ),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: _deviceNameController,
-                      decoration: const InputDecoration(labelText: 'Название устройства'),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: FilledButton.icon(
-                            onPressed: _busy ? null : _saveIdentity,
-                            icon: const Icon(Icons.save_rounded),
-                            label: const Text('Сохранить'),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: _copyAccountId,
-                            icon: const Icon(Icons.copy_rounded),
-                            label: const Text('Скопировать аккаунт'),
-                          ),
-                        ),
-                      ],
-                    ),
                   ],
                 ),
               ),
