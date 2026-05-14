@@ -126,6 +126,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   bool _pairingBusy = false;
   bool _bulkDownloadBusy = false;
   bool _logExpanded = false;
+  String? _libraryLoadError;
   PairingInvite? _pairingInvite;
   StreamSubscription<LibraryManifest>? _syncSubscription;
 
@@ -143,8 +144,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _reload() async {
-    final manifest = await widget.storage.loadManifest();
-    if (mounted) setState(() => _manifest = manifest);
+    try {
+      final manifest = await widget.storage.loadManifest().timeout(const Duration(seconds: 12));
+      if (mounted) {
+        setState(() {
+          _manifest = manifest;
+          _libraryLoadError = null;
+        });
+      }
+    } catch (error, stackTrace) {
+      debugPrint('ReadArc manifest load failed: $error\n$stackTrace');
+      if (!mounted) return;
+      setState(() => _libraryLoadError = 'Не удалось загрузить библиотеку: $error');
+    }
   }
 
   Future<void> _addBook() async {
@@ -414,11 +426,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
             : const Icon(Icons.add_rounded),
         label: const Text('Добавить книгу'),
       ),
-      body: manifest == null
-          ? const Center(child: CircularProgressIndicator())
-          : books.isEmpty
-              ? const _EmptyLibrary()
-              : ValueListenableBuilder<SyncStateSnapshot>(
+      body: _libraryLoadError != null && manifest == null
+          ? _LibraryLoadErrorView(
+              message: _libraryLoadError!,
+              onRetry: _reload,
+            )
+          : manifest == null
+              ? const Center(child: CircularProgressIndicator())
+              : books.isEmpty
+                  ? const _EmptyLibrary()
+                  : ValueListenableBuilder<SyncStateSnapshot>(
                   valueListenable: widget.sync.state,
                   builder: (context, syncState, _) {
                     return ListView.builder(
@@ -469,6 +486,41 @@ String _formatUiBytes(int bytes) {
   if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
   if (bytes < 1024 * 1024 * 1024) return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+}
+
+
+class _LibraryLoadErrorView extends StatelessWidget {
+  const _LibraryLoadErrorView({required this.message, required this.onRetry});
+
+  final String message;
+  final Future<void> Function() onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.error_outline_rounded, size: 42, color: _raWarmGold),
+            const SizedBox(height: 14),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: _raMutedPaper),
+            ),
+            const SizedBox(height: 18),
+            FilledButton.icon(
+              onPressed: () => unawaited(onRetry()),
+              icon: const Icon(Icons.refresh_rounded),
+              label: const Text('Повторить'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _EmptyLibrary extends StatelessWidget {
@@ -1474,20 +1526,26 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
                         child: GestureDetector(
                           behavior: HitTestBehavior.translucent,
                           onTap: _deactivateDocxProgressScrub,
-                          child: SelectionArea(
-                            child: Scrollbar(
-                              controller: _scrollController,
-                              thumbVisibility: true,
-                              interactive: !Platform.isAndroid && !Platform.isIOS,
-                              child: ListView(
-                              controller: _scrollController,
-                              padding: const EdgeInsets.fromLTRB(14, 18, 14, 32),
-                              cacheExtent: 3600,
-                              children: [
-                                Center(child: _DocxPageView(document: document)),
-                                ],
-                              ),
-                            ),
+                          child: Builder(
+                            builder: (context) {
+                              final reader = Scrollbar(
+                                controller: _scrollController,
+                                thumbVisibility: true,
+                                interactive: !Platform.isAndroid && !Platform.isIOS,
+                                child: ListView(
+                                  controller: _scrollController,
+                                  padding: const EdgeInsets.fromLTRB(14, 18, 14, 32),
+                                  cacheExtent: 3600,
+                                  children: [
+                                    Center(child: _DocxPageView(document: document)),
+                                  ],
+                                ),
+                              );
+                              // Android/iOS selection over a scaled Office page can trigger platform-specific
+                              // layout/paint failures. Keep the document visible on mobile and preserve
+                              // desktop text selection; mobile still has the toolbar "copy all" action.
+                              return _selectionAreaIsCheapForRichReader() ? SelectionArea(child: reader) : reader;
+                            },
                           ),
                         ),
                       ),
@@ -1556,7 +1614,8 @@ class _DocxPageView extends StatelessWidget {
   }
 }
 
-class _DocxScaledPaperPage extends StatefulWidget {
+
+class _DocxScaledPaperPage extends StatelessWidget {
   const _DocxScaledPaperPage({
     required this.document,
     required this.blocks,
@@ -1572,52 +1631,26 @@ class _DocxScaledPaperPage extends StatefulWidget {
   final int pageCount;
 
   @override
-  State<_DocxScaledPaperPage> createState() => _DocxScaledPaperPageState();
-}
-
-class _DocxScaledPaperPageState extends State<_DocxScaledPaperPage> {
-  Size? _contentSize;
-
-  @override
   Widget build(BuildContext context) {
-    final page = widget.document.officePageFormat;
+    final page = document.officePageFormat;
     final fixedPageWidth = page.logicalPageWidth;
-    final availableWidth = (widget.viewportWidth - 8).clamp(280.0, fixedPageWidth).toDouble();
+    final availableWidth = (viewportWidth - 8).clamp(280.0, fixedPageWidth).toDouble();
     final scale = availableWidth >= fixedPageWidth ? 1.0 : (availableWidth / fixedPageWidth).clamp(0.20, 1.0).toDouble();
-    final measuredHeight = _contentSize?.height ?? page.logicalPageHeight;
-    final scaledWidth = fixedPageWidth * scale;
-    final scaledHeight = measuredHeight * scale;
 
-    return SizedBox(
-      width: scaledWidth,
-      height: scaledHeight,
-      child: ClipRect(
-        child: OverflowBox(
-          alignment: Alignment.topCenter,
-          minWidth: fixedPageWidth,
-          maxWidth: fixedPageWidth,
-          minHeight: 0,
-          maxHeight: double.infinity,
-          child: Transform.scale(
-            scale: scale,
-            alignment: Alignment.topCenter,
-            child: SizedBox(
-              width: fixedPageWidth,
-              child: _OfficeMeasureSize(
-                onChange: (size) {
-                  if (!mounted) return;
-                  if (_contentSize == null || (size.height - _contentSize!.height).abs() > 1 || (size.width - _contentSize!.width).abs() > 1) {
-                    setState(() => _contentSize = size);
-                  }
-                },
-                child: _DocxPaperPage(
-                  document: widget.document,
-                  blocks: widget.blocks,
-                  pageIndex: widget.pageIndex,
-                  pageCount: widget.pageCount,
-                ),
-              ),
-            ),
+    return Align(
+      alignment: Alignment.topCenter,
+      widthFactor: scale,
+      heightFactor: scale,
+      child: Transform.scale(
+        scale: scale,
+        alignment: Alignment.topCenter,
+        child: SizedBox(
+          width: fixedPageWidth,
+          child: _DocxPaperPage(
+            document: document,
+            blocks: blocks,
+            pageIndex: pageIndex,
+            pageCount: pageCount,
           ),
         ),
       ),
@@ -1690,34 +1723,6 @@ class _DocxPaperPage extends StatelessWidget {
         ),
       ),
     );
-  }
-}
-
-class _OfficeMeasureSize extends StatefulWidget {
-  const _OfficeMeasureSize({required this.child, required this.onChange});
-
-  final Widget child;
-  final ValueChanged<Size> onChange;
-
-  @override
-  State<_OfficeMeasureSize> createState() => _OfficeMeasureSizeState();
-}
-
-class _OfficeMeasureSizeState extends State<_OfficeMeasureSize> {
-  Size? _oldSize;
-
-  @override
-  Widget build(BuildContext context) {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      final size = context.size;
-      if (size == null) return;
-      if (_oldSize == null || (size.width - _oldSize!.width).abs() > 1 || (size.height - _oldSize!.height).abs() > 1) {
-        _oldSize = size;
-        widget.onChange(size);
-      }
-    });
-    return widget.child;
   }
 }
 
@@ -3971,7 +3976,6 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     if (title != null && title.isNotEmpty) partBlocks.add(_Fb2Block.title(title));
     var xml = _decodeTextFile(_archiveFileBytes(file));
     xml = xml.replaceAll(RegExp(r'<w:tab\b[^>]*/>', caseSensitive: false), '<w:tab/>');
-    xml = xml.replaceAll(RegExp(r'<w:br\b[^>]*/>', caseSensitive: false), '<w:br/>');
     xml = xml.replaceAll(RegExp(r'<w:cr\b[^>]*/>', caseSensitive: false), '<w:cr/>');
     final rels = relationshipsFor(path);
 
