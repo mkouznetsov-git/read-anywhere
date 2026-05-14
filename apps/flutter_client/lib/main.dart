@@ -1404,7 +1404,7 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
       ...doc.officeHeaderBlocks,
       ...doc.blocks,
       ...doc.officeFooterBlocks,
-    ].map((block) => block.plainText).where((line) => line.trim().isNotEmpty).join('\n\n');
+    ].map((block) => block.plainText).where((line) => line.trim().isNotEmpty && line != _officePageBreakMarker).join('\n\n');
     if (text.trim().isEmpty) return;
     await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
@@ -1506,54 +1506,117 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
   }
 }
 
+
 class _DocxPageView extends StatelessWidget {
   const _DocxPageView({required this.document});
 
   final _Fb2Document document;
 
+  List<List<_Fb2Block>> _pages() {
+    final pages = <List<_Fb2Block>>[];
+    var current = <_Fb2Block>[];
+    for (final block in document.blocks) {
+      if (block.plainText == _officePageBreakMarker) {
+        if (current.any((item) => item.plainText.trim().isNotEmpty || item.kind == _Fb2BlockKind.image || item.kind == _Fb2BlockKind.table)) {
+          pages.add(List.unmodifiable(current));
+        }
+        current = <_Fb2Block>[];
+        continue;
+      }
+      current.add(block);
+    }
+    if (current.any((item) => item.plainText.trim().isNotEmpty || item.kind == _Fb2BlockKind.image || item.kind == _Fb2BlockKind.table)) {
+      pages.add(List.unmodifiable(current));
+    }
+    return pages.isEmpty ? <List<_Fb2Block>>[const <_Fb2Block>[]] : List.unmodifiable(pages);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final page = document.officePageFormat;
-    final screenWidth = MediaQuery.of(context).size.width;
-    final targetWidth = page.logicalPageWidth.clamp(620.0, 920.0).toDouble();
-    final isNarrow = screenWidth < 620;
-    final horizontalMarginScale = isNarrow ? 0.55 : 1.0;
-    final verticalMarginScale = isNarrow ? 0.62 : 1.0;
-    final left = (page.logicalLeftMargin * horizontalMarginScale).clamp(22.0, 96.0).toDouble();
-    final right = (page.logicalRightMargin * horizontalMarginScale).clamp(22.0, 96.0).toDouble();
-    final top = (page.logicalTopMargin * verticalMarginScale).clamp(24.0, 92.0).toDouble();
-    final bottom = (page.logicalBottomMargin * verticalMarginScale).clamp(24.0, 92.0).toDouble();
-    final minHeight = (targetWidth / page.aspectRatio).clamp(760.0, 1300.0).toDouble();
-
-    return ConstrainedBox(
-      constraints: BoxConstraints(maxWidth: targetWidth),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          border: Border.all(color: const Color(0xFFE0E0E0), width: 0.8),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.18),
-              blurRadius: 22,
-              offset: const Offset(0, 10),
-            ),
+    final pages = _pages();
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            for (var index = 0; index < pages.length; index++) ...[
+              _DocxScaledPaperPage(
+                document: document,
+                blocks: pages[index],
+                viewportWidth: constraints.maxWidth.isFinite ? constraints.maxWidth : MediaQuery.of(context).size.width,
+                pageIndex: index,
+                pageCount: pages.length,
+              ),
+              if (index < pages.length - 1) const SizedBox(height: 22),
+            ],
           ],
-        ),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(minHeight: minHeight),
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(left, top, right, bottom),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (document.officeHeaderBlocks.isNotEmpty)
-                  _DocxHeaderFooterView(blocks: document.officeHeaderBlocks, isHeader: true),
-                for (final block in document.blocks) _DocxBlockView(block: block),
-                if (document.officeFooterBlocks.isNotEmpty) ...[
-                  const SizedBox(height: 28),
-                  _DocxHeaderFooterView(blocks: document.officeFooterBlocks, isHeader: false),
-                ],
-              ],
+        );
+      },
+    );
+  }
+}
+
+class _DocxScaledPaperPage extends StatefulWidget {
+  const _DocxScaledPaperPage({
+    required this.document,
+    required this.blocks,
+    required this.viewportWidth,
+    required this.pageIndex,
+    required this.pageCount,
+  });
+
+  final _Fb2Document document;
+  final List<_Fb2Block> blocks;
+  final double viewportWidth;
+  final int pageIndex;
+  final int pageCount;
+
+  @override
+  State<_DocxScaledPaperPage> createState() => _DocxScaledPaperPageState();
+}
+
+class _DocxScaledPaperPageState extends State<_DocxScaledPaperPage> {
+  Size? _contentSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final page = widget.document.officePageFormat;
+    final fixedPageWidth = page.logicalPageWidth;
+    final availableWidth = (widget.viewportWidth - 8).clamp(280.0, fixedPageWidth).toDouble();
+    final scale = availableWidth >= fixedPageWidth ? 1.0 : (availableWidth / fixedPageWidth).clamp(0.20, 1.0).toDouble();
+    final measuredHeight = _contentSize?.height ?? page.logicalPageHeight;
+    final scaledWidth = fixedPageWidth * scale;
+    final scaledHeight = measuredHeight * scale;
+
+    return SizedBox(
+      width: scaledWidth,
+      height: scaledHeight,
+      child: ClipRect(
+        child: OverflowBox(
+          alignment: Alignment.topCenter,
+          minWidth: fixedPageWidth,
+          maxWidth: fixedPageWidth,
+          minHeight: 0,
+          maxHeight: double.infinity,
+          child: Transform.scale(
+            scale: scale,
+            alignment: Alignment.topCenter,
+            child: SizedBox(
+              width: fixedPageWidth,
+              child: _OfficeMeasureSize(
+                onChange: (size) {
+                  if (!mounted) return;
+                  if (_contentSize == null || (size.height - _contentSize!.height).abs() > 1 || (size.width - _contentSize!.width).abs() > 1) {
+                    setState(() => _contentSize = size);
+                  }
+                },
+                child: _DocxPaperPage(
+                  document: widget.document,
+                  blocks: widget.blocks,
+                  pageIndex: widget.pageIndex,
+                  pageCount: widget.pageCount,
+                ),
+              ),
             ),
           ),
         ),
@@ -1562,18 +1625,121 @@ class _DocxPageView extends StatelessWidget {
   }
 }
 
+class _DocxPaperPage extends StatelessWidget {
+  const _DocxPaperPage({
+    required this.document,
+    required this.blocks,
+    required this.pageIndex,
+    required this.pageCount,
+  });
+
+  final _Fb2Document document;
+  final List<_Fb2Block> blocks;
+  final int pageIndex;
+  final int pageCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final page = document.officePageFormat;
+    final fixedPageWidth = page.logicalPageWidth;
+    final minHeight = page.logicalPageHeight;
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: const Color(0xFFE0E0E0), width: 0.8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.18),
+            blurRadius: 22,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(minWidth: fixedPageWidth, minHeight: minHeight),
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            page.logicalLeftMargin,
+            page.logicalTopMargin,
+            page.logicalRightMargin,
+            page.logicalBottomMargin,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (document.officeHeaderBlocks.isNotEmpty)
+                _DocxHeaderFooterView(
+                  blocks: document.officeHeaderBlocks,
+                  isHeader: true,
+                  pageIndex: pageIndex,
+                  pageCount: pageCount,
+                ),
+              for (final block in blocks) _DocxBlockView(block: block),
+              if (document.officeFooterBlocks.isNotEmpty) ...[
+                const SizedBox(height: 28),
+                _DocxHeaderFooterView(
+                  blocks: document.officeFooterBlocks,
+                  isHeader: false,
+                  pageIndex: pageIndex,
+                  pageCount: pageCount,
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _OfficeMeasureSize extends StatefulWidget {
+  const _OfficeMeasureSize({required this.child, required this.onChange});
+
+  final Widget child;
+  final ValueChanged<Size> onChange;
+
+  @override
+  State<_OfficeMeasureSize> createState() => _OfficeMeasureSizeState();
+}
+
+class _OfficeMeasureSizeState extends State<_OfficeMeasureSize> {
+  Size? _oldSize;
+
+  @override
+  Widget build(BuildContext context) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final size = context.size;
+      if (size == null) return;
+      if (_oldSize == null || (size.width - _oldSize!.width).abs() > 1 || (size.height - _oldSize!.height).abs() > 1) {
+        _oldSize = size;
+        widget.onChange(size);
+      }
+    });
+    return widget.child;
+  }
+}
+
 class _DocxHeaderFooterView extends StatelessWidget {
-  const _DocxHeaderFooterView({required this.blocks, required this.isHeader});
+  const _DocxHeaderFooterView({
+    required this.blocks,
+    required this.isHeader,
+    this.pageIndex = 0,
+    this.pageCount = 1,
+  });
 
   final List<_Fb2Block> blocks;
   final bool isHeader;
+  final int pageIndex;
+  final int pageCount;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: EdgeInsets.only(bottom: isHeader ? 18 : 0, top: isHeader ? 0 : 8),
       child: DefaultTextStyle.merge(
-        style: const TextStyle(color: Color(0xFF777777), fontSize: 12.5, height: 1.25, fontFamily: 'Times New Roman'),
+        style: const TextStyle(color: Color(0xFF777777), fontSize: 9.5, height: 1.12, fontFamily: 'Times New Roman'),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -1593,6 +1759,7 @@ class _DocxBlockView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (block.plainText == _officePageBreakMarker) return const SizedBox.shrink();
     switch (block.kind) {
       case _Fb2BlockKind.image:
         final bytes = block.imageBytes;
@@ -1612,10 +1779,10 @@ class _DocxBlockView extends StatelessWidget {
       case _Fb2BlockKind.paragraph:
         final format = block.officeFormat;
         final isTitle = block.kind == _Fb2BlockKind.title || format.headingLevel > 0;
-        final size = compact ? (format.fontSize * 0.82).clamp(10.5, 14.0).toDouble() : format.fontSize;
+        final size = compact ? (format.fontSize * 0.82).clamp(8.0, 12.0).toDouble() : format.fontSize;
         final style = TextStyle(
           color: compact ? const Color(0xFF777777) : const Color(0xFF111111),
-          fontSize: isTitle && !compact ? size.clamp(17.0, 24.0).toDouble() : size,
+          fontSize: isTitle && !compact ? size.clamp(12.0, 17.0).toDouble() : size,
           height: format.lineHeight,
           fontFamily: 'Times New Roman',
           fontWeight: isTitle || format.bold ? FontWeight.w700 : FontWeight.w400,
@@ -1653,7 +1820,7 @@ InlineSpan _docxInlineSpan(_Fb2Inline inline, _OfficeParagraphFormat format, {bo
     text: inline.text,
     style: TextStyle(
       color: compact ? const Color(0xFF777777) : (inline.color ?? const Color(0xFF111111)),
-      fontSize: compact ? (size * 0.82).clamp(10.5, 14.0).toDouble() : size,
+      fontSize: compact ? (size * 0.82).clamp(8.0, 12.0).toDouble() : size,
       fontFamily: inline.fontFamily ?? 'Times New Roman',
       fontWeight: inline.bold || format.bold ? FontWeight.w700 : FontWeight.w400,
       fontStyle: inline.italic || format.italic ? FontStyle.italic : FontStyle.normal,
@@ -1695,13 +1862,14 @@ class _DocxDocumentTableView extends StatelessWidget {
               children: [
                 for (var column = 0; column < columnCount; column++)
                   Padding(
-                    padding: EdgeInsets.symmetric(horizontal: compact ? 3.0 : 5.5, vertical: compact ? 2.5 : 4.5),
+                    padding: EdgeInsets.symmetric(horizontal: compact ? 2.5 : 3.2, vertical: compact ? 1.8 : 2.4),
                     child: Text(
                       column < rows[rowIndex].length ? rows[rowIndex][column] : '',
+                      textAlign: _docxTableCellAlign(column < rows[rowIndex].length ? rows[rowIndex][column] : '', column, columnCount),
                       style: TextStyle(
                         color: compact ? const Color(0xFF777777) : Colors.black,
-                        fontSize: compact ? 10.5 : 12.6,
-                        height: 1.18,
+                        fontSize: compact ? 8.5 : 10.2,
+                        height: 1.08,
                         fontFamily: 'Times New Roman',
                         fontWeight: rowIndex == 0 ? FontWeight.w700 : FontWeight.w400,
                       ),
@@ -1714,6 +1882,16 @@ class _DocxDocumentTableView extends StatelessWidget {
       ),
     );
   }
+}
+
+
+TextAlign _docxTableCellAlign(String text, int column, int columnCount) {
+  final trimmed = text.trim();
+  if (trimmed.isEmpty) return TextAlign.left;
+  if (RegExp(r'^(?:итого|итог|total)\b', caseSensitive: false).hasMatch(trimmed)) return TextAlign.right;
+  if (RegExp(r'^[\d\s.,]+$').hasMatch(trimmed)) return TextAlign.center;
+  if (column >= columnCount - 3) return TextAlign.center;
+  return TextAlign.left;
 }
 
 List<double> _docxColumnWidths(List<List<String>> rows, int columnCount, _OfficeTableFormat? format) {
@@ -2745,6 +2923,8 @@ List<double> _buildFb2UnitOffsets(List<_Fb2RenderUnit> units) {
   return offsets;
 }
 
+const String _officePageBreakMarker = '\uE000READARC_PAGE_BREAK';
+
 enum _OfficeTextAlign { left, center, right, justify }
 
 class _OfficePageFormat {
@@ -2776,10 +2956,10 @@ class _OfficePageFormat {
 class _OfficeParagraphFormat {
   const _OfficeParagraphFormat({
     this.align = _OfficeTextAlign.left,
-    this.fontSize = 16.0,
-    this.lineHeight = 1.30,
+    this.fontSize = 12.0,
+    this.lineHeight = 1.15,
     this.spaceBefore = 0.0,
-    this.spaceAfter = 7.0,
+    this.spaceAfter = 0.0,
     this.leftIndent = 0.0,
     this.rightIndent = 0.0,
     this.firstLineIndent = 0.0,
@@ -2875,7 +3055,7 @@ class _Fb2Block {
   const _Fb2Block.title(
     String text, {
     this.anchors = const [],
-    this.officeFormat = const _OfficeParagraphFormat(headingLevel: 1, fontSize: 22.0, bold: true, spaceBefore: 12.0, spaceAfter: 8.0),
+    this.officeFormat = const _OfficeParagraphFormat(headingLevel: 1, fontSize: 15.0, bold: true, spaceBefore: 6.0, spaceAfter: 4.0, align: _OfficeTextAlign.center),
   })  : kind = _Fb2BlockKind.title,
         inlines = const [],
         imageBytes = null,
@@ -2957,7 +3137,7 @@ _Fb2Document _makeFb2Document(
   var cursor = 0;
   for (final block in blocks) {
     starts.add(cursor);
-    final length = block.kind == _Fb2BlockKind.image ? 1 : block.plainText.trimRight().length;
+    final length = block.plainText == _officePageBreakMarker ? 0 : (block.kind == _Fb2BlockKind.image ? 1 : block.plainText.trimRight().length);
     cursor += length <= 0 ? 1 : length;
     cursor += 1; // Stable separator between blocks; keeps progress based on top logical line.
   }
@@ -3546,7 +3726,7 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     final tag = firstTag(rPr, 'sz') ?? firstTag(rPr, 'szCs');
     final value = tag == null ? null : intAttr(tag, 'val');
     if (value == null || value <= 0) return null;
-    return (value / 1.5).clamp(8.0, 48.0).toDouble();
+    return (value / 2.0).clamp(7.0, 40.0).toDouble();
   }
 
   Color? colorFromRPr(String rPr) {
@@ -3596,20 +3776,20 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       result = result.copyWith(
         headingLevel: level,
         bold: true,
-        fontSize: (22.0 - ((level - 1) * 1.6)).clamp(16.5, 22.0).toDouble(),
-        lineHeight: 1.18,
-        spaceBefore: level == 1 ? 12.0 : 8.0,
-        spaceAfter: 6.0,
+        fontSize: (16.0 - ((level - 1) * 0.8)).clamp(12.0, 16.0).toDouble(),
+        lineHeight: 1.12,
+        spaceBefore: level == 1 ? 6.0 : 4.0,
+        spaceAfter: 3.0,
       );
     } else if (styleToken.contains('title') || styleToken.contains('название')) {
       result = result.copyWith(
         headingLevel: 1,
         bold: true,
-        fontSize: 22.0,
+        fontSize: 15.5,
         align: _OfficeTextAlign.center,
-        lineHeight: 1.18,
-        spaceBefore: 10.0,
-        spaceAfter: 8.0,
+        lineHeight: 1.12,
+        spaceBefore: 6.0,
+        spaceAfter: 4.0,
       );
     }
 
@@ -3763,11 +3943,21 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       final cells = <String>[];
       final rowBody = row.group(1) ?? '';
       for (final cell in RegExp(r'<w:tc\b[^>]*>(.*?)</w:tc>', caseSensitive: false, dotAll: true).allMatches(rowBody)) {
-        final cellText = textFromXml(cell.group(1) ?? '')
-            .replaceAll(RegExp(r'[ \t\u00A0]*\n[ \t\u00A0]*'), '\n')
-            .replaceAll(RegExp(r'[ \t\u00A0]+'), ' ')
-            .trim();
+        final cellXml = cell.group(1) ?? '';
+        final tcPr = innerTagBody(cellXml, 'tcPr');
+        final spanTag = firstTag(tcPr, 'gridSpan') ?? '';
+        final span = (int.tryParse(wordVal(spanTag) ?? '') ?? 1).clamp(1, 12).toInt();
+        final isVMergeContinuation = RegExp(r'''<w:vMerge\b[^>]*(?:/>|[^>]*(?:w:)?val\s*=\s*["']continue["'][^>]*/?>''', caseSensitive: false).hasMatch(tcPr);
+        final cellText = isVMergeContinuation
+            ? ''
+            : textFromXml(cellXml)
+                .replaceAll(RegExp(r'[ \t\u00A0]*\n[ \t\u00A0]*'), '\n')
+                .replaceAll(RegExp(r'[ \t\u00A0]+'), ' ')
+                .trim();
         cells.add(cellText.isEmpty ? ' ' : cellText);
+        for (var extra = 1; extra < span; extra++) {
+          cells.add('');
+        }
       }
       if (cells.any((cell) => cell.trim().isNotEmpty)) rows.add(List.unmodifiable(cells));
     }
@@ -3798,6 +3988,14 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
         continue;
       }
 
+      final hasPageBreak = RegExp(r'''<w:br\b[^>]*(?:w:)?type\s*=\s*["']page["'][^>]*/?>''', caseSensitive: false).hasMatch(raw);
+      final firstBreakIndex = hasPageBreak ? raw.indexOf(RegExp(r'<w:br\b', caseSensitive: false)) : -1;
+      final firstTextIndex = raw.indexOf(RegExp(r'<w:t\b', caseSensitive: false));
+      final breakBeforeText = hasPageBreak && (firstTextIndex < 0 || firstBreakIndex < firstTextIndex);
+      if (breakBeforeText) {
+        partBlocks.add(const _Fb2Block.paragraph([_Fb2Inline(_officePageBreakMarker)]));
+      }
+
       final pPr = innerTagBody(raw, 'pPr');
       final rPr = innerTagBody(raw, 'rPr');
       final styleTag = firstTag(pPr, 'pStyle') ?? '';
@@ -3805,15 +4003,19 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       final styleFormat = styleId == null ? const _OfficeParagraphFormat() : (styles[styleId] ?? const _OfficeParagraphFormat());
       final paragraphFormat = formatFromPr(pPr, rPr, base: styleFormat, styleId: styleId);
       final inlines = inlinesFromParagraphXml(raw, paragraphFormat);
-      if (inlines.isEmpty) continue;
       final text = inlines.map((inline) => inline.text).join().replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trim();
-      if (text.isEmpty) continue;
-      if (paragraphFormat.headingLevel > 0) {
-        partBlocks.add(_Fb2Block.title(text, officeFormat: paragraphFormat));
-      } else if (paragraphFormat.isList && !text.startsWith('•') && !RegExp(r'^\d+[.)]').hasMatch(text)) {
-        partBlocks.add(_Fb2Block.paragraph([const _Fb2Inline('• '), ...inlines], officeFormat: paragraphFormat));
-      } else {
-        partBlocks.add(_Fb2Block.paragraph(inlines, officeFormat: paragraphFormat));
+      if (text.isNotEmpty) {
+        if (paragraphFormat.headingLevel > 0) {
+          partBlocks.add(_Fb2Block.title(text, officeFormat: paragraphFormat));
+        } else if (paragraphFormat.isList && !text.startsWith('•') && !RegExp(r'^\d+[.)]').hasMatch(text)) {
+          partBlocks.add(_Fb2Block.paragraph([const _Fb2Inline('• '), ...inlines], officeFormat: paragraphFormat));
+        } else {
+          partBlocks.add(_Fb2Block.paragraph(inlines, officeFormat: paragraphFormat));
+        }
+      }
+
+      if (hasPageBreak && !breakBeforeText) {
+        partBlocks.add(const _Fb2Block.paragraph([_Fb2Inline(_officePageBreakMarker)]));
       }
     }
     return partBlocks;
