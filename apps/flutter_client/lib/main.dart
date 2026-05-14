@@ -1637,22 +1637,14 @@ class _DocxScaledPaperPage extends StatelessWidget {
     final availableWidth = (viewportWidth - 8).clamp(280.0, fixedPageWidth).toDouble();
     final scale = availableWidth >= fixedPageWidth ? 1.0 : (availableWidth / fixedPageWidth).clamp(0.20, 1.0).toDouble();
 
-    return Align(
-      alignment: Alignment.topCenter,
-      widthFactor: scale,
-      heightFactor: scale,
-      child: Transform.scale(
+    return SizedBox(
+      width: fixedPageWidth * scale,
+      child: _DocxPaperPage(
+        document: document,
+        blocks: blocks,
+        pageIndex: pageIndex,
+        pageCount: pageCount,
         scale: scale,
-        alignment: Alignment.topCenter,
-        child: SizedBox(
-          width: fixedPageWidth,
-          child: _DocxPaperPage(
-            document: document,
-            blocks: blocks,
-            pageIndex: pageIndex,
-            pageCount: pageCount,
-          ),
-        ),
       ),
     );
   }
@@ -1664,18 +1656,20 @@ class _DocxPaperPage extends StatelessWidget {
     required this.blocks,
     required this.pageIndex,
     required this.pageCount,
+    required this.scale,
   });
 
   final _Fb2Document document;
   final List<_Fb2Block> blocks;
   final int pageIndex;
   final int pageCount;
+  final double scale;
 
   @override
   Widget build(BuildContext context) {
     final page = document.officePageFormat;
-    final fixedPageWidth = page.logicalPageWidth;
-    final minHeight = page.logicalPageHeight;
+    final fixedPageWidth = page.logicalPageWidth * scale;
+    final minHeight = page.logicalPageHeight * scale;
 
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -1693,10 +1687,10 @@ class _DocxPaperPage extends StatelessWidget {
         constraints: BoxConstraints(minWidth: fixedPageWidth, minHeight: minHeight),
         child: Padding(
           padding: EdgeInsets.fromLTRB(
-            page.logicalLeftMargin,
-            page.logicalTopMargin,
-            page.logicalRightMargin,
-            page.logicalBottomMargin,
+            page.logicalLeftMargin * scale,
+            page.logicalTopMargin * scale,
+            page.logicalRightMargin * scale,
+            page.logicalBottomMargin * scale,
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1707,15 +1701,17 @@ class _DocxPaperPage extends StatelessWidget {
                   isHeader: true,
                   pageIndex: pageIndex,
                   pageCount: pageCount,
+                  scale: scale,
                 ),
-              for (final block in blocks) _DocxBlockView(block: block),
+              for (final block in blocks) _DocxBlockView(block: block, scale: scale),
               if (document.officeFooterBlocks.isNotEmpty) ...[
-                const SizedBox(height: 28),
+                SizedBox(height: 28 * scale),
                 _DocxHeaderFooterView(
                   blocks: document.officeFooterBlocks,
                   isHeader: false,
                   pageIndex: pageIndex,
                   pageCount: pageCount,
+                  scale: scale,
                 ),
               ],
             ],
@@ -1732,23 +1728,25 @@ class _DocxHeaderFooterView extends StatelessWidget {
     required this.isHeader,
     this.pageIndex = 0,
     this.pageCount = 1,
+    this.scale = 1.0,
   });
 
   final List<_Fb2Block> blocks;
   final bool isHeader;
   final int pageIndex;
   final int pageCount;
+  final double scale;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: EdgeInsets.only(bottom: isHeader ? 18 : 0, top: isHeader ? 0 : 8),
+      padding: EdgeInsets.only(bottom: isHeader ? 18 * scale : 0, top: isHeader ? 0 : 8 * scale),
       child: DefaultTextStyle.merge(
-        style: const TextStyle(color: Color(0xFF777777), fontSize: 9.5, height: 1.12, fontFamily: 'Times New Roman'),
+        style: TextStyle(color: const Color(0xFF777777), fontSize: 9.5 * scale, height: 1.12, fontFamily: 'Times New Roman'),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            for (final block in blocks) _DocxBlockView(block: block, compact: true),
+            for (final block in blocks) _DocxBlockView(block: block, compact: true, scale: scale),
           ],
         ),
       ),
@@ -1757,10 +1755,11 @@ class _DocxHeaderFooterView extends StatelessWidget {
 }
 
 class _DocxBlockView extends StatelessWidget {
-  const _DocxBlockView({required this.block, this.compact = false});
+  const _DocxBlockView({required this.block, this.compact = false, this.scale = 1.0});
 
   final _Fb2Block block;
   final bool compact;
+  final double scale;
 
   @override
   Widget build(BuildContext context) {
@@ -1770,21 +1769,21 @@ class _DocxBlockView extends StatelessWidget {
         final bytes = block.imageBytes;
         if (bytes == null || bytes.isEmpty) return const SizedBox.shrink();
         return Padding(
-          padding: EdgeInsets.symmetric(vertical: compact ? 5 : 10),
+          padding: EdgeInsets.symmetric(vertical: (compact ? 5 : 10) * scale),
           child: Center(
             child: ConstrainedBox(
-              constraints: BoxConstraints(maxHeight: compact ? 160 : 520),
+              constraints: BoxConstraints(maxHeight: (compact ? 160 : 520) * scale),
               child: Image.memory(bytes, fit: BoxFit.contain, errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined)),
             ),
           ),
         );
       case _Fb2BlockKind.table:
-        return _DocxDocumentTableView(rows: block.tableRows, format: block.officeTableFormat, compact: compact);
+        return _DocxDocumentTableView(rows: block.tableRows, format: block.officeTableFormat, compact: compact, scale: scale);
       case _Fb2BlockKind.title:
       case _Fb2BlockKind.paragraph:
         final format = block.officeFormat;
         final isTitle = block.kind == _Fb2BlockKind.title || format.headingLevel > 0;
-        final size = compact ? (format.fontSize * 0.82).clamp(8.0, 12.0).toDouble() : format.fontSize;
+        final size = (compact ? (format.fontSize * 0.82).clamp(8.0, 12.0).toDouble() : format.fontSize) * scale;
         final style = TextStyle(
           color: compact ? const Color(0xFF777777) : const Color(0xFF111111),
           fontSize: isTitle && !compact ? size.clamp(12.0, 17.0).toDouble() : size,
@@ -1795,18 +1794,18 @@ class _DocxBlockView extends StatelessWidget {
         );
         final text = block.kind == _Fb2BlockKind.title
             ? TextSpan(text: block.plainText)
-            : TextSpan(children: block.inlines.map((inline) => _docxInlineSpan(inline, format, compact: compact)).toList());
+            : TextSpan(children: block.inlines.map((inline) => _docxInlineSpan(inline, format, compact: compact, scale: scale)).toList());
         final leftIndent = compact ? 0.0 : format.leftIndent.clamp(0.0, 96.0).toDouble();
         final firstLine = compact ? 0.0 : format.firstLineIndent.clamp(-48.0, 72.0).toDouble();
         return Padding(
           padding: EdgeInsets.only(
-            top: compact ? 0 : format.spaceBefore.clamp(0.0, 32.0).toDouble(),
-            bottom: compact ? 2 : format.spaceAfter.clamp(0.0, 32.0).toDouble(),
-            left: (leftIndent + (firstLine < 0 ? -firstLine : 0)).clamp(0.0, 112.0).toDouble(),
-            right: compact ? 0 : format.rightIndent.clamp(0.0, 96.0).toDouble(),
+            top: compact ? 0 : format.spaceBefore.clamp(0.0, 32.0).toDouble() * scale,
+            bottom: (compact ? 2 : format.spaceAfter.clamp(0.0, 32.0).toDouble()) * scale,
+            left: (leftIndent + (firstLine < 0 ? -firstLine : 0)).clamp(0.0, 112.0).toDouble() * scale,
+            right: compact ? 0 : format.rightIndent.clamp(0.0, 96.0).toDouble() * scale,
           ),
           child: Transform.translate(
-            offset: Offset(firstLine > 0 ? firstLine : 0, 0),
+            offset: Offset(firstLine > 0 ? firstLine * scale : 0, 0),
             child: Text.rich(
               text,
               style: style,
@@ -1819,8 +1818,8 @@ class _DocxBlockView extends StatelessWidget {
   }
 }
 
-InlineSpan _docxInlineSpan(_Fb2Inline inline, _OfficeParagraphFormat format, {bool compact = false}) {
-  final size = inline.fontSize ?? format.fontSize;
+InlineSpan _docxInlineSpan(_Fb2Inline inline, _OfficeParagraphFormat format, {bool compact = false, double scale = 1.0}) {
+  final size = (inline.fontSize ?? format.fontSize) * scale;
   return TextSpan(
     text: inline.text,
     style: TextStyle(
@@ -1842,11 +1841,12 @@ TextAlign _officeTextAlign(_OfficeTextAlign align) => switch (align) {
     };
 
 class _DocxDocumentTableView extends StatelessWidget {
-  const _DocxDocumentTableView({required this.rows, this.format, this.compact = false});
+  const _DocxDocumentTableView({required this.rows, this.format, this.compact = false, this.scale = 1.0});
 
   final List<List<String>> rows;
   final _OfficeTableFormat? format;
   final bool compact;
+  final double scale;
 
   @override
   Widget build(BuildContext context) {
@@ -1854,26 +1854,26 @@ class _DocxDocumentTableView extends StatelessWidget {
     final columnCount = rows.fold<int>(0, (max, row) => row.length > max ? row.length : max).clamp(1, 24).toInt();
     final widths = _docxColumnWidths(rows, columnCount, format);
     return Padding(
-      padding: EdgeInsets.symmetric(vertical: compact ? 4 : 8),
+      padding: EdgeInsets.symmetric(vertical: (compact ? 4 : 8) * scale),
       child: Table(
         columnWidths: {
           for (var column = 0; column < columnCount; column++) column: FlexColumnWidth(widths[column]),
         },
         defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-        border: TableBorder.all(color: compact ? const Color(0xFF999999) : Colors.black, width: compact ? 0.45 : 0.85),
+        border: TableBorder.all(color: compact ? const Color(0xFF999999) : Colors.black, width: (compact ? 0.45 : 0.85) * scale),
         children: [
           for (var rowIndex = 0; rowIndex < rows.length; rowIndex++)
             TableRow(
               children: [
                 for (var column = 0; column < columnCount; column++)
                   Padding(
-                    padding: EdgeInsets.symmetric(horizontal: compact ? 2.5 : 3.2, vertical: compact ? 1.8 : 2.4),
+                    padding: EdgeInsets.symmetric(horizontal: (compact ? 2.5 : 3.2) * scale, vertical: (compact ? 1.8 : 2.4) * scale),
                     child: Text(
                       column < rows[rowIndex].length ? rows[rowIndex][column] : '',
                       textAlign: _docxTableCellAlign(column < rows[rowIndex].length ? rows[rowIndex][column] : '', column, columnCount),
                       style: TextStyle(
                         color: compact ? const Color(0xFF777777) : Colors.black,
-                        fontSize: compact ? 8.5 : 10.2,
+                        fontSize: (compact ? 8.5 : 10.2) * scale,
                         height: 1.08,
                         fontFamily: 'Times New Roman',
                         fontWeight: rowIndex == 0 ? FontWeight.w700 : FontWeight.w400,

@@ -91,7 +91,8 @@ class StorageService {
       return manifest;
     }
     final raw = await file.readAsString();
-    final manifest = LibraryManifest.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    final decoded = await _decodeManifestJson(raw, file);
+    final manifest = LibraryManifest.fromJson(decoded);
     final withKey = manifest.accountEncryptionKey.trim().isEmpty
         ? manifest.copyWith(accountEncryptionKey: _newAccountEncryptionKey())
         : manifest;
@@ -107,7 +108,130 @@ class StorageService {
     final file = await manifestFile();
     await _backupManifestIfPresent(file);
     const encoder = JsonEncoder.withIndent('  ');
-    await file.writeAsString(encoder.convert(_normalizeManifest(manifest).toJson()), flush: true);
+    final payload = encoder.convert(_normalizeManifest(manifest).toJson());
+    final tmp = File('${file.path}.tmp-${_uuid.v4()}');
+    await tmp.writeAsString(payload, flush: true);
+    try {
+      if (await file.exists()) await file.delete();
+      await tmp.rename(file.path);
+    } catch (_) {
+      await tmp.copy(file.path);
+      try {
+        await tmp.delete();
+      } catch (_) {
+        // Best-effort cleanup only.
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>> _decodeManifestJson(String raw, File manifestFile) async {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) return decoded;
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+      throw const FormatException('manifest.json root is not an object');
+    } on FormatException catch (error) {
+      final repaired = _tryDecodeRepairedManifest(raw);
+      if (repaired != null) {
+        await _quarantineBrokenManifest(manifestFile, raw, error);
+        await manifestFile.writeAsString(const JsonEncoder.withIndent('  ').convert(repaired), flush: true);
+        return repaired;
+      }
+      final backup = await _loadLatestValidManifestBackup();
+      if (backup != null) {
+        await _quarantineBrokenManifest(manifestFile, raw, error);
+        await manifestFile.writeAsString(const JsonEncoder.withIndent('  ').convert(backup), flush: true);
+        return backup;
+      }
+      rethrow;
+    }
+  }
+
+  Map<String, dynamic>? _tryDecodeRepairedManifest(String raw) {
+    final candidate = _firstCompleteJsonObject(raw);
+    if (candidate == null || candidate.trim() == raw.trim()) return null;
+    try {
+      final decoded = jsonDecode(candidate);
+      if (decoded is Map<String, dynamic>) return decoded;
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    } catch (_) {
+      // Try backups below.
+    }
+    return null;
+  }
+
+  String? _firstCompleteJsonObject(String raw) {
+    final start = raw.indexOf('{');
+    if (start < 0) return null;
+    var depth = 0;
+    var inString = false;
+    var escaping = false;
+    for (var i = start; i < raw.length; i++) {
+      final code = raw.codeUnitAt(i);
+      if (inString) {
+        if (escaping) {
+          escaping = false;
+        } else if (code == 0x5C) {
+          escaping = true;
+        } else if (code == 0x22) {
+          inString = false;
+        }
+        continue;
+      }
+      if (code == 0x22) {
+        inString = true;
+      } else if (code == 0x7B || code == 0x5B) {
+        depth++;
+      } else if (code == 0x7D || code == 0x5D) {
+        depth--;
+        if (depth == 0) return raw.substring(start, i + 1);
+        if (depth < 0) return null;
+      }
+    }
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> _loadLatestValidManifestBackup() async {
+    try {
+      final backupDir = Directory(p.join((await appDir()).path, 'manifest_backups'));
+      if (!await backupDir.exists()) return null;
+      final backups = await backupDir
+          .list()
+          .where((entity) => entity is File && p.basename(entity.path).startsWith('manifest_'))
+          .cast<File>()
+          .toList();
+      backups.sort((a, b) => b.path.compareTo(a.path));
+      for (final backup in backups) {
+        try {
+          final decoded = jsonDecode(await backup.readAsString());
+          if (decoded is Map<String, dynamic>) return decoded;
+          if (decoded is Map) return Map<String, dynamic>.from(decoded);
+        } catch (_) {
+          // Try the next backup.
+        }
+      }
+    } catch (_) {
+      // Recovery is best-effort only.
+    }
+    return null;
+  }
+
+  Future<void> _quarantineBrokenManifest(File manifestFile, String raw, Object error) async {
+    try {
+      final recoveryDir = Directory(p.join((await appDir()).path, 'manifest_recovery'));
+      if (!await recoveryDir.exists()) await recoveryDir.create(recursive: true);
+      final ts = DateTime.now()
+          .toUtc()
+          .toIso8601String()
+          .replaceAll(':', '-')
+          .replaceAll('.', '-');
+      final broken = File(p.join(recoveryDir.path, 'broken_manifest_$ts.json'));
+      await broken.writeAsString(raw, flush: true);
+      final note = File(p.join(recoveryDir.path, 'broken_manifest_$ts.txt'));
+      await note.writeAsString('Recovered from manifest parse error: $error\nSource: ${manifestFile.path}\n', flush: true);
+    } catch (_) {
+      // Never fail startup because recovery diagnostics cannot be written.
+    }
   }
 
   Future<SyncSettings> loadSyncSettings() async {
