@@ -1594,14 +1594,17 @@ class _DocxPageView extends StatelessWidget {
     final pages = _pages();
     return LayoutBuilder(
       builder: (context, constraints) {
+        final viewportWidth = constraints.maxWidth.isFinite && constraints.maxWidth > 0
+            ? constraints.maxWidth
+            : MediaQuery.of(context).size.width;
         return Column(
-          crossAxisAlignment: CrossAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             for (var index = 0; index < pages.length; index++) ...[
-              _DocxScaledPaperPage(
+              _DocxFixedPaperPage(
                 document: document,
                 blocks: pages[index],
-                viewportWidth: constraints.maxWidth.isFinite ? constraints.maxWidth : MediaQuery.of(context).size.width,
+                viewportWidth: viewportWidth,
                 pageIndex: index,
                 pageCount: pages.length,
               ),
@@ -1614,9 +1617,8 @@ class _DocxPageView extends StatelessWidget {
   }
 }
 
-
-class _DocxScaledPaperPage extends StatelessWidget {
-  const _DocxScaledPaperPage({
+class _DocxFixedPaperPage extends StatelessWidget {
+  const _DocxFixedPaperPage({
     required this.document,
     required this.blocks,
     required this.viewportWidth,
@@ -1633,18 +1635,34 @@ class _DocxScaledPaperPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final page = document.officePageFormat;
-    final fixedPageWidth = page.logicalPageWidth;
-    final availableWidth = (viewportWidth - 8).clamp(280.0, fixedPageWidth).toDouble();
-    final scale = availableWidth >= fixedPageWidth ? 1.0 : (availableWidth / fixedPageWidth).clamp(0.20, 1.0).toDouble();
+    final pageWidth = page.logicalPageWidth;
+    final safeViewportWidth = viewportWidth.isFinite && viewportWidth > 0 ? viewportWidth : MediaQuery.of(context).size.width;
 
+    // Hotfix 04 deliberately renders the DOCX paper at its fixed logical width and
+    // lets the user pan horizontally if the screen is narrower. This is less fancy
+    // than fit-to-width zoom, but it is deterministic and keeps DOCX content visible
+    // on Android/macOS while the professional page engine is being hardened.
     return SizedBox(
-      width: fixedPageWidth * scale,
-      child: _DocxPaperPage(
-        document: document,
-        blocks: blocks,
-        pageIndex: pageIndex,
-        pageCount: pageCount,
-        scale: scale,
+      width: safeViewportWidth,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        physics: const ClampingScrollPhysics(),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minWidth: safeViewportWidth),
+          child: Align(
+            alignment: Alignment.topCenter,
+            child: SizedBox(
+              width: pageWidth,
+              child: _DocxPaperPage(
+                document: document,
+                blocks: blocks,
+                pageIndex: pageIndex,
+                pageCount: pageCount,
+                scale: 1.0,
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
