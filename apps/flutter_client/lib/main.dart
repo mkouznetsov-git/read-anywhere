@@ -567,6 +567,21 @@ class _BookCard extends StatelessWidget {
                       ),
                     ),
                   ),
+                  const SizedBox(width: 7),
+                  SizedBox(
+                    width: 42,
+                    child: Text(
+                      progressText,
+                      textAlign: TextAlign.right,
+                      maxLines: 1,
+                      overflow: TextOverflow.clip,
+                      style: const TextStyle(
+                        color: _raMutedPaper,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
                   const SizedBox(width: 8),
                   if (isDownloading)
                     IconButton(
@@ -670,9 +685,9 @@ class ReaderScreen extends StatelessWidget {
       case 'epub':
         return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.epub);
       case 'docx':
-        return _DocxReaderScreen(book: book, storage: storage, sync: sync);
+        return _DocxReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.docx);
       case 'doc':
-        return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.doc);
+        return _DocxReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.doc);
       case 'chm':
         return _ChmSafeReaderScreen(book: book, storage: storage, sync: sync);
       case 'djvu':
@@ -1212,11 +1227,17 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
 
 
 class _DocxReaderScreen extends StatefulWidget {
-  const _DocxReaderScreen({required this.book, required this.storage, required this.sync});
+  const _DocxReaderScreen({
+    required this.book,
+    required this.storage,
+    required this.sync,
+    this.sourceKind = _RichSourceKind.docx,
+  });
 
   final BookRecord book;
   final StorageService storage;
   final SyncService sync;
+  final _RichSourceKind sourceKind;
 
   @override
   State<_DocxReaderScreen> createState() => _DocxReaderScreenState();
@@ -1266,17 +1287,19 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
         break;
       }
     }
+    final label = _richFormatLabel(widget.sourceKind);
     if (book.localPath == null) {
-      if (mounted) setState(() => _loadError = 'Файл DOCX не скачан на это устройство');
+      if (mounted) setState(() => _loadError = 'Файл $label не скачан на это устройство');
       return;
     }
     final file = File(book.localPath!);
     if (!await file.exists()) {
-      if (mounted) setState(() => _loadError = 'Файл DOCX отсутствует: ${book.localPath}');
+      if (mounted) setState(() => _loadError = 'Файл $label отсутствует: ${book.localPath}');
       return;
     }
     try {
-      final document = _parseDocxDocument(await file.readAsBytes());
+      final bytes = await file.readAsBytes();
+      final document = _parseRichDocumentFromBytes(widget.sourceKind, bytes);
       if (!mounted) return;
       setState(() {
         _runtimeBook = book;
@@ -1286,14 +1309,14 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
       });
       _restoreScroll(_targetProgressForBook(book));
     } catch (error) {
-      if (mounted) setState(() => _loadError = 'Не удалось открыть DOCX: $error');
+      if (mounted) setState(() => _loadError = 'Не удалось открыть $label: $error');
     }
   }
 
   double _targetProgressForBook(BookRecord book) {
     try {
       final decoded = jsonDecode(book.currentLocator);
-      if (decoded is Map && decoded['type'] == 'docx-rich-scroll-v1') {
+      if (decoded is Map && (decoded['type'] == _officeLocatorType || decoded['type'] == 'docx-rich-scroll-v1')) {
         return ((decoded['progressPercent'] as num?)?.toDouble() ?? book.progressPercent).clamp(0.0, 100.0).toDouble();
       }
     } catch (_) {}
@@ -1357,8 +1380,10 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
     });
   }
 
+  String get _officeLocatorType => widget.sourceKind == _RichSourceKind.doc ? 'doc-rich-scroll-v1' : 'docx-rich-scroll-v1';
+
   String _locatorJson(double progress) => jsonEncode({
-        'type': 'docx-rich-scroll-v1',
+        'type': _officeLocatorType,
         'progressPercent': progress.clamp(0.0, 100.0),
         'updatedAt': DateTime.now().toUtc().toIso8601String(),
       });
@@ -1379,14 +1404,14 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
     if (text.trim().isEmpty) return;
     await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Текст DOCX скопирован')));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Текст ${_richFormatLabel(widget.sourceKind)} скопирован')));
   }
 
   Future<void> _addBookmark() async {
     final progress = _currentProgress();
     await widget.storage.addBookmark(
       bookId: widget.book.id,
-      label: 'Закладка DOCX ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
+      label: 'Закладка ${_richFormatLabel(widget.sourceKind)} ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
       locator: _locatorJson(progress),
     );
     await widget.sync.broadcastLibrarySnapshot(reason: 'bookmark_added');
@@ -2910,17 +2935,331 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
 
 _Fb2Document _parseDocDocument(Uint8List bytes) {
   // Many “.doc” files in the wild are actually OOXML/DOCX with a wrong
-  // extension. Parse those as DOCX. True legacy binary .doc requires an
-  // external converter such as LibreOffice/antiword; showing binary garbage is
-  // worse than a clear adapter message.
+  // extension. Parse those as DOCX. Real legacy binary DOC is handled by the
+  // embedded Office engine below: no external LibreOffice/antiword/brew tools.
   if (_looksLikeZip(bytes)) return _parseDocxDocument(bytes);
+  final blocks = _parseLegacyDocBlocks(bytes);
+  if (blocks.isNotEmpty) return _makeFb2Document(blocks);
   return _makeFb2Document(const [
+    _Fb2Block.title('DOC'),
     _Fb2Block.paragraph([
       _Fb2Inline(
-        'Legacy binary DOC сохранён и синхронизируется как оригинал. Для встроенного просмотра нужен локальный конвертер DOC → HTML/текст. Пока ReadArc не показывает бинарное содержимое как текст.',
+        'ReadArc распознал legacy binary DOC, но не смог извлечь читаемое содержимое встроенным модулем. Оригинальный файл сохранён и синхронизируется; внешний конвертер не используется.',
       ),
     ]),
   ]);
+}
+
+List<_Fb2Block> _parseLegacyDocBlocks(Uint8List bytes) {
+  final streamPayloads = <Uint8List>[];
+  final ole = _OleCompoundFile.tryOpen(bytes);
+  if (ole != null) {
+    for (final name in const ['WordDocument', '0Table', '1Table', 'Data', 'SummaryInformation', 'DocumentSummaryInformation']) {
+      final stream = ole.stream(name);
+      if (stream != null && stream.isNotEmpty && stream.length <= 96 * 1024 * 1024) {
+        streamPayloads.add(stream);
+      }
+    }
+  }
+  if (streamPayloads.isEmpty) streamPayloads.add(bytes);
+
+  final candidates = <String>[];
+  for (final payload in streamPayloads) {
+    candidates.add(_extractUtf16LeRuns(payload, minLength: 10));
+    candidates.add(_extractSingleByteRuns(payload, minLength: 16));
+  }
+
+  final seen = <String>{};
+  final lines = <String>[];
+  for (final source in candidates) {
+    for (final raw in source.split(RegExp(r'[\r\n]+'))) {
+      final line = raw
+          .replaceAll('\x00', '')
+          .replaceAll(RegExp(r'[ \t\u00A0]+'), ' ')
+          .trim();
+      if (!_looksReadableOfficeLine(line)) continue;
+      final fingerprint = line.toLowerCase();
+      if (seen.add(fingerprint)) lines.add(line);
+      if (lines.length >= 25000) break;
+    }
+    if (lines.length >= 25000) break;
+  }
+
+  if (lines.isEmpty) return const [];
+  final blocks = <_Fb2Block>[
+    const _Fb2Block.title('DOC'),
+  ];
+  final paragraphBuffer = StringBuffer();
+  void flushParagraph() {
+    final text = paragraphBuffer.toString().trim();
+    if (text.isNotEmpty) blocks.add(_Fb2Block.paragraph([_Fb2Inline(text)]));
+    paragraphBuffer.clear();
+  }
+
+  for (final line in lines) {
+    final looksHeading = line.length <= 96 && !line.endsWith('.') && RegExp(r'[A-Za-zА-Яа-яЁё]').hasMatch(line);
+    if (looksHeading && paragraphBuffer.isNotEmpty) flushParagraph();
+    if (looksHeading && blocks.length < 80) {
+      blocks.add(_Fb2Block.title(line));
+      continue;
+    }
+    if (paragraphBuffer.isNotEmpty) paragraphBuffer.write(' ');
+    paragraphBuffer.write(line);
+    if (paragraphBuffer.length > 900) flushParagraph();
+  }
+  flushParagraph();
+  return blocks;
+}
+
+bool _looksLikeOleCompound(Uint8List bytes) =>
+    bytes.length >= 8 &&
+    bytes[0] == 0xD0 &&
+    bytes[1] == 0xCF &&
+    bytes[2] == 0x11 &&
+    bytes[3] == 0xE0 &&
+    bytes[4] == 0xA1 &&
+    bytes[5] == 0xB1 &&
+    bytes[6] == 0x1A &&
+    bytes[7] == 0xE1;
+
+bool _looksReadableOfficeLine(String line) {
+  final text = line.trim();
+  if (text.length < 4 || text.length > 1200) return false;
+  if (RegExp(r'^[\W_\d]+$').hasMatch(text)) return false;
+  if (RegExp(r'(?:[A-Za-z]:\\|/)[^ ]{20,}').hasMatch(text)) return false;
+  if (RegExp(r'^(?:Microsoft|WordDocument|Root Entry|CompObj|ObjInfo)$', caseSensitive: false).hasMatch(text)) return false;
+  final letters = RegExp(r'[A-Za-zА-Яа-яЁё]').allMatches(text).length;
+  final words = RegExp(r'[A-Za-zА-Яа-яЁё]{2,}').allMatches(text).length;
+  final bad = RegExp(r'[�\x00-\x08\x0B\x0C\x0E-\x1F]').allMatches(text).length;
+  final symbols = RegExp(r'''[^A-Za-zА-Яа-яЁё0-9 .,;:!?()\[\]{}«»"'\-–—/\n\t№%+=]''').allMatches(text).length;
+  final len = text.length;
+  if (letters < 3 || words < 1) return false;
+  if (bad / len > 0.01) return false;
+  if (symbols / len > 0.10) return false;
+  if (letters / len < 0.25) return false;
+  return true;
+}
+
+class _OleStreamEntry {
+  const _OleStreamEntry(this.name, this.type, this.startSector, this.size);
+  final String name;
+  final int type;
+  final int startSector;
+  final int size;
+}
+
+class _OleCompoundFile {
+  _OleCompoundFile._({
+    required this.bytes,
+    required this.sectorSize,
+    required this.miniSectorSize,
+    required this.fat,
+    required this.miniFat,
+    required this.directory,
+    required this.rootEntry,
+    required this.miniStreamCutoff,
+  });
+
+  static const _free = 0xFFFFFFFF;
+  static const _endOfChain = 0xFFFFFFFE;
+  static const _fatSector = 0xFFFFFFFD;
+  static const _difatSector = 0xFFFFFFFC;
+
+  final Uint8List bytes;
+  final int sectorSize;
+  final int miniSectorSize;
+  final List<int> fat;
+  final List<int> miniFat;
+  final List<_OleStreamEntry> directory;
+  final _OleStreamEntry? rootEntry;
+  final int miniStreamCutoff;
+
+  static _OleCompoundFile? tryOpen(Uint8List bytes) {
+    try {
+      if (!_looksLikeOleCompound(bytes) || bytes.length < 512) return null;
+      final sectorShift = _oleReadU16(bytes, 30);
+      final miniSectorShift = _oleReadU16(bytes, 32);
+      final sectorSize = 1 << sectorShift;
+      final miniSectorSize = 1 << miniSectorShift;
+      if (sectorSize < 512 || sectorSize > 8192) return null;
+      final directoryStart = _oleReadU32(bytes, 48);
+      final miniStreamCutoff = _oleReadU32(bytes, 56);
+      final miniFatStart = _oleReadU32(bytes, 60);
+      final miniFatSectorCount = _oleReadU32(bytes, 64);
+      final difatStart = _oleReadU32(bytes, 68);
+      final difatSectorCount = _oleReadU32(bytes, 72);
+
+      final fatSectorIds = <int>[];
+      for (var i = 0; i < 109; i++) {
+        final id = _oleReadU32(bytes, 76 + i * 4);
+        if (id != _free && id != _endOfChain) fatSectorIds.add(id);
+      }
+
+      var nextDifat = difatStart;
+      for (var d = 0; d < difatSectorCount && nextDifat != _endOfChain && nextDifat != _free; d++) {
+        final offset = _sectorOffset(nextDifat, sectorSize);
+        if (offset < 0 || offset + sectorSize > bytes.length) break;
+        final entriesPerDifat = (sectorSize ~/ 4) - 1;
+        for (var i = 0; i < entriesPerDifat; i++) {
+          final id = _oleReadU32(bytes, offset + i * 4);
+          if (id != _free && id != _endOfChain) fatSectorIds.add(id);
+        }
+        nextDifat = _oleReadU32(bytes, offset + entriesPerDifat * 4);
+      }
+
+      final fat = <int>[];
+      for (final sector in fatSectorIds) {
+        final offset = _sectorOffset(sector, sectorSize);
+        if (offset < 0 || offset + sectorSize > bytes.length) continue;
+        for (var p = offset; p + 3 < offset + sectorSize; p += 4) {
+          fat.add(_oleReadU32(bytes, p));
+        }
+      }
+
+      Uint8List readRegularChain(int startSector, {int? maxBytes}) {
+        final out = BytesBuilder(copy: false);
+        var sector = startSector;
+        final visited = <int>{};
+        while (sector != _endOfChain && sector != _free && sector >= 0 && sector < fat.length && visited.add(sector)) {
+          final offset = _sectorOffset(sector, sectorSize);
+          if (offset < 0 || offset + sectorSize > bytes.length) break;
+          final remaining = maxBytes == null ? sectorSize : maxBytes - out.length;
+          if (remaining <= 0) break;
+          out.add(bytes.sublist(offset, offset + remaining.clamp(0, sectorSize).toInt()));
+          sector = fat[sector];
+        }
+        final result = out.takeBytes();
+        if (maxBytes != null && result.length > maxBytes) return Uint8List.sublistView(result, 0, maxBytes);
+        return result;
+      }
+
+      final dirBytes = readRegularChain(directoryStart, maxBytes: 16 * 1024 * 1024);
+      final entries = <_OleStreamEntry>[];
+      for (var offset = 0; offset + 127 < dirBytes.length; offset += 128) {
+        final nameLength = _oleReadU16(dirBytes, offset + 64);
+        if (nameLength < 2 || nameLength > 64) continue;
+        final nameBytes = dirBytes.sublist(offset, offset + nameLength - 2);
+        final name = _decodeOleUtf16Name(nameBytes).trim();
+        if (name.isEmpty) continue;
+        final type = dirBytes[offset + 66];
+        final startSector = _oleReadU32(dirBytes, offset + 116);
+        final size64 = _oleReadU64(dirBytes, offset + 120);
+        final size = size64 > 0x7FFFFFFF ? 0x7FFFFFFF : size64.toInt();
+        entries.add(_OleStreamEntry(name, type, startSector, size));
+      }
+      _OleStreamEntry? root;
+      for (final entry in entries) {
+        if (entry.type == 5) {
+          root = entry;
+          break;
+        }
+      }
+
+      final miniFat = <int>[];
+      if (miniFatStart != _free && miniFatStart != _endOfChain && miniFatSectorCount > 0) {
+        final miniFatBytes = readRegularChain(miniFatStart, maxBytes: miniFatSectorCount * sectorSize);
+        for (var p = 0; p + 3 < miniFatBytes.length; p += 4) {
+          miniFat.add(_oleReadU32(miniFatBytes, p));
+        }
+      }
+
+      return _OleCompoundFile._(
+        bytes: bytes,
+        sectorSize: sectorSize,
+        miniSectorSize: miniSectorSize,
+        fat: fat,
+        miniFat: miniFat,
+        directory: entries,
+        rootEntry: root,
+        miniStreamCutoff: miniStreamCutoff <= 0 ? 4096 : miniStreamCutoff,
+      );
+    } catch (error) {
+      debugPrint('OLE parser failed: $error');
+      return null;
+    }
+  }
+
+  Uint8List? stream(String name) {
+    final wanted = name.toLowerCase();
+    _OleStreamEntry? entry;
+    for (final candidate in directory) {
+      final normalized = candidate.name.replaceAll('\x05', '').toLowerCase();
+      if (normalized == wanted || normalized.endsWith(wanted)) {
+        entry = candidate;
+        break;
+      }
+    }
+    if (entry == null || entry.type != 2 || entry.size <= 0) return null;
+    if (entry.size < miniStreamCutoff && miniFat.isNotEmpty && rootEntry != null && rootEntry!.startSector != _endOfChain) {
+      return _readMiniStream(entry);
+    }
+    return _readRegularStream(entry.startSector, entry.size);
+  }
+
+  Uint8List _readRegularStream(int startSector, int maxBytes) {
+    final out = BytesBuilder(copy: false);
+    var sector = startSector;
+    final visited = <int>{};
+    while (sector != _endOfChain && sector != _free && sector >= 0 && sector < fat.length && visited.add(sector)) {
+      final offset = _sectorOffset(sector, sectorSize);
+      if (offset < 0 || offset + sectorSize > bytes.length) break;
+      final remaining = maxBytes - out.length;
+      if (remaining <= 0) break;
+      out.add(bytes.sublist(offset, offset + remaining.clamp(0, sectorSize).toInt()));
+      sector = fat[sector];
+    }
+    final result = out.takeBytes();
+    return result.length > maxBytes ? Uint8List.sublistView(result, 0, maxBytes) : result;
+  }
+
+  Uint8List? _readMiniStream(_OleStreamEntry entry) {
+    final root = rootEntry;
+    if (root == null) return null;
+    final miniStream = _readRegularStream(root.startSector, root.size);
+    final out = BytesBuilder(copy: false);
+    var sector = entry.startSector;
+    final visited = <int>{};
+    while (sector != _endOfChain && sector != _free && sector >= 0 && sector < miniFat.length && visited.add(sector)) {
+      final offset = sector * miniSectorSize;
+      if (offset < 0 || offset >= miniStream.length) break;
+      final remaining = entry.size - out.length;
+      if (remaining <= 0) break;
+      final end = (offset + remaining.clamp(0, miniSectorSize).toInt()).clamp(0, miniStream.length).toInt();
+      out.add(miniStream.sublist(offset, end));
+      sector = miniFat[sector];
+    }
+    final result = out.takeBytes();
+    return result.length > entry.size ? Uint8List.sublistView(result, 0, entry.size) : result;
+  }
+
+  static int _sectorOffset(int sector, int sectorSize) => 512 + sector * sectorSize;
+}
+
+int _oleReadU16(List<int> bytes, int offset) {
+  if (offset + 1 >= bytes.length) return 0;
+  return bytes[offset] | (bytes[offset + 1] << 8);
+}
+
+int _oleReadU32(List<int> bytes, int offset) {
+  if (offset + 3 >= bytes.length) return 0xFFFFFFFF;
+  return bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24);
+}
+
+int _oleReadU64(List<int> bytes, int offset) {
+  if (offset + 7 >= bytes.length) return 0;
+  final low = _oleReadU32(bytes, offset);
+  final high = _oleReadU32(bytes, offset + 4);
+  return low + (high * 0x100000000);
+}
+
+String _decodeOleUtf16Name(List<int> bytes) {
+  final codes = <int>[];
+  for (var i = 0; i + 1 < bytes.length; i += 2) {
+    final code = bytes[i] | (bytes[i + 1] << 8);
+    if (code == 0) break;
+    codes.add(code);
+  }
+  return String.fromCharCodes(codes);
 }
 
 _Fb2Document _parseDocxDocument(Uint8List bytes) {
@@ -3074,8 +3413,22 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
   }
 
   parsePart('word/document.xml');
+
+  final extraParts = archive.files
+      .where((file) => file.isFile)
+      .map((file) => file.name.replaceAll('\\', '/'))
+      .where((name) =>
+          RegExp(r'^word/header\d+\.xml$', caseSensitive: false).hasMatch(name) ||
+          RegExp(r'^word/footer\d+\.xml$', caseSensitive: false).hasMatch(name))
+      .toList()
+    ..sort();
+  for (final part in extraParts) {
+    parsePart(part, title: part.contains('/header') ? 'Верхний колонтитул' : 'Нижний колонтитул');
+  }
+
   parsePart('word/footnotes.xml', title: 'Сноски');
   parsePart('word/endnotes.xml', title: 'Примечания');
+  parsePart('word/comments.xml', title: 'Комментарии');
   if (blocks.isEmpty) {
     return _makeFb2Document(const [
       _Fb2Block.paragraph([_Fb2Inline('DOCX не содержит извлекаемого текста.')]),
