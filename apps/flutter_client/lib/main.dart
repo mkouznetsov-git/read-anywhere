@@ -1400,7 +1400,11 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
   Future<void> _copyAll() async {
     final doc = _document;
     if (doc == null) return;
-    final text = doc.blocks.map((block) => block.plainText).where((line) => line.trim().isNotEmpty).join('\n\n');
+    final text = [
+      ...doc.officeHeaderBlocks,
+      ...doc.blocks,
+      ...doc.officeFooterBlocks,
+    ].map((block) => block.plainText).where((line) => line.trim().isNotEmpty).join('\n\n');
     if (text.trim().isEmpty) return;
     await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
@@ -1480,37 +1484,7 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
                               padding: const EdgeInsets.fromLTRB(14, 18, 14, 32),
                               cacheExtent: 3600,
                               children: [
-                                Center(
-                                  child: ConstrainedBox(
-                                    constraints: const BoxConstraints(maxWidth: 860),
-                                    child: DecoratedBox(
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFFFFFCF4),
-                                        border: Border.all(color: const Color(0xFFC9AA78).withOpacity(0.38)),
-                                        borderRadius: BorderRadius.circular(8),
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color: Colors.black.withOpacity(0.16),
-                                            blurRadius: 24,
-                                            offset: const Offset(0, 10),
-                                          ),
-                                        ],
-                                      ),
-                                      child: Padding(
-                                        padding: EdgeInsets.symmetric(
-                                          horizontal: MediaQuery.of(context).size.width < 560 ? 24 : 58,
-                                          vertical: MediaQuery.of(context).size.width < 560 ? 28 : 54,
-                                        ),
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                                          children: [
-                                            for (final block in document.blocks) _DocxBlockView(block: block),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
+                                Center(child: _DocxPageView(document: document)),
                                 ],
                               ),
                             ),
@@ -1532,10 +1506,90 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
   }
 }
 
+class _DocxPageView extends StatelessWidget {
+  const _DocxPageView({required this.document});
+
+  final _Fb2Document document;
+
+  @override
+  Widget build(BuildContext context) {
+    final page = document.officePageFormat;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final targetWidth = page.logicalPageWidth.clamp(620.0, 920.0).toDouble();
+    final isNarrow = screenWidth < 620;
+    final horizontalMarginScale = isNarrow ? 0.55 : 1.0;
+    final verticalMarginScale = isNarrow ? 0.62 : 1.0;
+    final left = (page.logicalLeftMargin * horizontalMarginScale).clamp(22.0, 96.0).toDouble();
+    final right = (page.logicalRightMargin * horizontalMarginScale).clamp(22.0, 96.0).toDouble();
+    final top = (page.logicalTopMargin * verticalMarginScale).clamp(24.0, 92.0).toDouble();
+    final bottom = (page.logicalBottomMargin * verticalMarginScale).clamp(24.0, 92.0).toDouble();
+    final minHeight = (targetWidth / page.aspectRatio).clamp(760.0, 1300.0).toDouble();
+
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: targetWidth),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          border: Border.all(color: const Color(0xFFE0E0E0), width: 0.8),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.18),
+              blurRadius: 22,
+              offset: const Offset(0, 10),
+            ),
+          ],
+        ),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: minHeight),
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(left, top, right, bottom),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (document.officeHeaderBlocks.isNotEmpty)
+                  _DocxHeaderFooterView(blocks: document.officeHeaderBlocks, isHeader: true),
+                for (final block in document.blocks) _DocxBlockView(block: block),
+                if (document.officeFooterBlocks.isNotEmpty) ...[
+                  const SizedBox(height: 28),
+                  _DocxHeaderFooterView(blocks: document.officeFooterBlocks, isHeader: false),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DocxHeaderFooterView extends StatelessWidget {
+  const _DocxHeaderFooterView({required this.blocks, required this.isHeader});
+
+  final List<_Fb2Block> blocks;
+  final bool isHeader;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: isHeader ? 18 : 0, top: isHeader ? 0 : 8),
+      child: DefaultTextStyle.merge(
+        style: const TextStyle(color: Color(0xFF777777), fontSize: 12.5, height: 1.25, fontFamily: 'Times New Roman'),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (final block in blocks) _DocxBlockView(block: block, compact: true),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _DocxBlockView extends StatelessWidget {
-  const _DocxBlockView({required this.block});
+  const _DocxBlockView({required this.block, this.compact = false});
 
   final _Fb2Block block;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -1544,119 +1598,142 @@ class _DocxBlockView extends StatelessWidget {
         final bytes = block.imageBytes;
         if (bytes == null || bytes.isEmpty) return const SizedBox.shrink();
         return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12),
+          padding: EdgeInsets.symmetric(vertical: compact ? 5 : 10),
           child: Center(
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 560),
+              constraints: BoxConstraints(maxHeight: compact ? 160 : 520),
               child: Image.memory(bytes, fit: BoxFit.contain, errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined)),
             ),
           ),
         );
       case _Fb2BlockKind.table:
-        return _DocxDocumentTableView(rows: block.tableRows);
+        return _DocxDocumentTableView(rows: block.tableRows, format: block.officeTableFormat, compact: compact);
       case _Fb2BlockKind.title:
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(0, 20, 0, 10),
-          child: Text(
-            block.plainText,
-            style: const TextStyle(
-              color: Color(0xFF2F261F),
-              fontSize: 25,
-              height: 1.22,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        );
       case _Fb2BlockKind.paragraph:
+        final format = block.officeFormat;
+        final isTitle = block.kind == _Fb2BlockKind.title || format.headingLevel > 0;
+        final size = compact ? (format.fontSize * 0.82).clamp(10.5, 14.0).toDouble() : format.fontSize;
+        final style = TextStyle(
+          color: compact ? const Color(0xFF777777) : const Color(0xFF111111),
+          fontSize: isTitle && !compact ? size.clamp(17.0, 24.0).toDouble() : size,
+          height: format.lineHeight,
+          fontFamily: 'Times New Roman',
+          fontWeight: isTitle || format.bold ? FontWeight.w700 : FontWeight.w400,
+          fontStyle: format.italic ? FontStyle.italic : FontStyle.normal,
+        );
+        final text = block.kind == _Fb2BlockKind.title
+            ? TextSpan(text: block.plainText)
+            : TextSpan(children: block.inlines.map((inline) => _docxInlineSpan(inline, format, compact: compact)).toList());
+        final leftIndent = compact ? 0.0 : format.leftIndent.clamp(0.0, 96.0).toDouble();
+        final firstLine = compact ? 0.0 : format.firstLineIndent.clamp(-48.0, 72.0).toDouble();
         return Padding(
-          padding: const EdgeInsets.only(bottom: 10),
-          child: Text.rich(
-            TextSpan(
-              style: const TextStyle(color: Color(0xFF2F261F), fontSize: 17.2, height: 1.55),
-              children: block.inlines.map(_docxInlineSpan).toList(),
+          padding: EdgeInsets.only(
+            top: compact ? 0 : format.spaceBefore.clamp(0.0, 32.0).toDouble(),
+            bottom: compact ? 2 : format.spaceAfter.clamp(0.0, 32.0).toDouble(),
+            left: (leftIndent + (firstLine < 0 ? -firstLine : 0)).clamp(0.0, 112.0).toDouble(),
+            right: compact ? 0 : format.rightIndent.clamp(0.0, 96.0).toDouble(),
+          ),
+          child: Transform.translate(
+            offset: Offset(firstLine > 0 ? firstLine : 0, 0),
+            child: Text.rich(
+              text,
+              style: style,
+              textAlign: _officeTextAlign(format.align),
+              softWrap: true,
             ),
-            textAlign: TextAlign.start,
           ),
         );
     }
   }
 }
 
-InlineSpan _docxInlineSpan(_Fb2Inline inline) {
+InlineSpan _docxInlineSpan(_Fb2Inline inline, _OfficeParagraphFormat format, {bool compact = false}) {
+  final size = inline.fontSize ?? format.fontSize;
   return TextSpan(
     text: inline.text,
     style: TextStyle(
-      color: const Color(0xFF2F261F),
-      fontWeight: inline.bold ? FontWeight.w700 : FontWeight.w400,
-      fontStyle: inline.italic ? FontStyle.italic : FontStyle.normal,
+      color: compact ? const Color(0xFF777777) : (inline.color ?? const Color(0xFF111111)),
+      fontSize: compact ? (size * 0.82).clamp(10.5, 14.0).toDouble() : size,
+      fontFamily: inline.fontFamily ?? 'Times New Roman',
+      fontWeight: inline.bold || format.bold ? FontWeight.w700 : FontWeight.w400,
+      fontStyle: inline.italic || format.italic ? FontStyle.italic : FontStyle.normal,
       decoration: inline.underline ? TextDecoration.underline : TextDecoration.none,
     ),
   );
 }
 
+TextAlign _officeTextAlign(_OfficeTextAlign align) => switch (align) {
+      _OfficeTextAlign.center => TextAlign.center,
+      _OfficeTextAlign.right => TextAlign.right,
+      _OfficeTextAlign.justify => TextAlign.justify,
+      _OfficeTextAlign.left => TextAlign.left,
+    };
+
 class _DocxDocumentTableView extends StatelessWidget {
-  const _DocxDocumentTableView({required this.rows});
+  const _DocxDocumentTableView({required this.rows, this.format, this.compact = false});
 
   final List<List<String>> rows;
+  final _OfficeTableFormat? format;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
     if (rows.isEmpty) return const SizedBox.shrink();
     final columnCount = rows.fold<int>(0, (max, row) => row.length > max ? row.length : max).clamp(1, 24).toInt();
+    final widths = _docxColumnWidths(rows, columnCount, format);
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 14),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: const Color(0xFFFFF8EA),
-          border: Border.all(color: const Color(0xFFC9AA78).withOpacity(0.65)),
-          borderRadius: BorderRadius.circular(12),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.08),
-              blurRadius: 12,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: ConstrainedBox(
-              constraints: BoxConstraints(minWidth: MediaQuery.of(context).size.width - 44),
-              child: Table(
-                defaultColumnWidth: const IntrinsicColumnWidth(),
-                border: TableBorder.all(color: const Color(0xFFC9AA78).withOpacity(0.35), width: 0.8),
-                children: [
-                  for (var rowIndex = 0; rowIndex < rows.length; rowIndex++)
-                    TableRow(
-                      decoration: BoxDecoration(
-                        color: rowIndex == 0 ? const Color(0xFFF0DBAE).withOpacity(0.50) : Colors.transparent,
+      padding: EdgeInsets.symmetric(vertical: compact ? 4 : 8),
+      child: Table(
+        columnWidths: {
+          for (var column = 0; column < columnCount; column++) column: FlexColumnWidth(widths[column]),
+        },
+        defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+        border: TableBorder.all(color: compact ? const Color(0xFF999999) : Colors.black, width: compact ? 0.45 : 0.85),
+        children: [
+          for (var rowIndex = 0; rowIndex < rows.length; rowIndex++)
+            TableRow(
+              children: [
+                for (var column = 0; column < columnCount; column++)
+                  Padding(
+                    padding: EdgeInsets.symmetric(horizontal: compact ? 3.0 : 5.5, vertical: compact ? 2.5 : 4.5),
+                    child: Text(
+                      column < rows[rowIndex].length ? rows[rowIndex][column] : '',
+                      style: TextStyle(
+                        color: compact ? const Color(0xFF777777) : Colors.black,
+                        fontSize: compact ? 10.5 : 12.6,
+                        height: 1.18,
+                        fontFamily: 'Times New Roman',
+                        fontWeight: rowIndex == 0 ? FontWeight.w700 : FontWeight.w400,
                       ),
-                      children: [
-                        for (var column = 0; column < columnCount; column++)
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                            child: Text(
-                              column < rows[rowIndex].length ? rows[rowIndex][column] : '',
-                              style: TextStyle(
-                                color: const Color(0xFF2A2F4A),
-                                fontSize: 15.5,
-                                height: 1.35,
-                                fontWeight: rowIndex == 0 ? FontWeight.w600 : FontWeight.w400,
-                              ),
-                            ),
-                          ),
-                      ],
+                      softWrap: true,
                     ),
-                ],
-              ),
+                  ),
+              ],
             ),
-          ),
-        ),
+        ],
       ),
     );
   }
+}
+
+List<double> _docxColumnWidths(List<List<String>> rows, int columnCount, _OfficeTableFormat? format) {
+  final grid = format?.columnTwips ?? const <int>[];
+  if (grid.length >= columnCount && grid.take(columnCount).any((value) => value > 0)) {
+    return [
+      for (var index = 0; index < columnCount; index++) grid[index].clamp(240, 12000).toDouble(),
+    ];
+  }
+  final weights = List<double>.filled(columnCount, 1.0);
+  for (final row in rows) {
+    for (var i = 0; i < columnCount; i++) {
+      final cell = i < row.length ? row[i] : '';
+      final longestWord = RegExp(r'\S+').allMatches(cell).fold<int>(0, (value, match) => match.group(0)!.length > value ? match.group(0)!.length : value);
+      final textWeight = (cell.length / 18.0).clamp(1.0, 4.5).toDouble();
+      weights[i] = weights[i] < textWeight ? textWeight : weights[i];
+      if (longestWord > 16) weights[i] = weights[i] < 2.4 ? 2.4 : weights[i];
+    }
+  }
+  return weights;
 }
 
 enum _RichSourceKind { fb2, epub, docx, doc, chm, djvu }
@@ -2668,6 +2745,99 @@ List<double> _buildFb2UnitOffsets(List<_Fb2RenderUnit> units) {
   return offsets;
 }
 
+enum _OfficeTextAlign { left, center, right, justify }
+
+class _OfficePageFormat {
+  const _OfficePageFormat({
+    this.widthTwips = 11906,
+    this.heightTwips = 16838,
+    this.marginLeftTwips = 1440,
+    this.marginRightTwips = 1440,
+    this.marginTopTwips = 1440,
+    this.marginBottomTwips = 1440,
+  });
+
+  final int widthTwips;
+  final int heightTwips;
+  final int marginLeftTwips;
+  final int marginRightTwips;
+  final int marginTopTwips;
+  final int marginBottomTwips;
+
+  double get logicalPageWidth => (widthTwips / 15.0).clamp(560.0, 980.0).toDouble();
+  double get logicalPageHeight => (heightTwips / 15.0).clamp(720.0, 1400.0).toDouble();
+  double get aspectRatio => logicalPageWidth / logicalPageHeight;
+  double get logicalLeftMargin => (marginLeftTwips / 15.0).clamp(24.0, 112.0).toDouble();
+  double get logicalRightMargin => (marginRightTwips / 15.0).clamp(24.0, 112.0).toDouble();
+  double get logicalTopMargin => (marginTopTwips / 15.0).clamp(24.0, 112.0).toDouble();
+  double get logicalBottomMargin => (marginBottomTwips / 15.0).clamp(24.0, 112.0).toDouble();
+}
+
+class _OfficeParagraphFormat {
+  const _OfficeParagraphFormat({
+    this.align = _OfficeTextAlign.left,
+    this.fontSize = 16.0,
+    this.lineHeight = 1.30,
+    this.spaceBefore = 0.0,
+    this.spaceAfter = 7.0,
+    this.leftIndent = 0.0,
+    this.rightIndent = 0.0,
+    this.firstLineIndent = 0.0,
+    this.headingLevel = 0,
+    this.isList = false,
+    this.bold = false,
+    this.italic = false,
+  });
+
+  final _OfficeTextAlign align;
+  final double fontSize;
+  final double lineHeight;
+  final double spaceBefore;
+  final double spaceAfter;
+  final double leftIndent;
+  final double rightIndent;
+  final double firstLineIndent;
+  final int headingLevel;
+  final bool isList;
+  final bool bold;
+  final bool italic;
+
+  _OfficeParagraphFormat copyWith({
+    _OfficeTextAlign? align,
+    double? fontSize,
+    double? lineHeight,
+    double? spaceBefore,
+    double? spaceAfter,
+    double? leftIndent,
+    double? rightIndent,
+    double? firstLineIndent,
+    int? headingLevel,
+    bool? isList,
+    bool? bold,
+    bool? italic,
+  }) {
+    return _OfficeParagraphFormat(
+      align: align ?? this.align,
+      fontSize: fontSize ?? this.fontSize,
+      lineHeight: lineHeight ?? this.lineHeight,
+      spaceBefore: spaceBefore ?? this.spaceBefore,
+      spaceAfter: spaceAfter ?? this.spaceAfter,
+      leftIndent: leftIndent ?? this.leftIndent,
+      rightIndent: rightIndent ?? this.rightIndent,
+      firstLineIndent: firstLineIndent ?? this.firstLineIndent,
+      headingLevel: headingLevel ?? this.headingLevel,
+      isList: isList ?? this.isList,
+      bold: bold ?? this.bold,
+      italic: italic ?? this.italic,
+    );
+  }
+}
+
+class _OfficeTableFormat {
+  const _OfficeTableFormat({this.columnTwips = const []});
+  final List<int> columnTwips;
+}
+
 enum _Fb2BlockKind { paragraph, title, image, table }
 
 class _Fb2Inline {
@@ -2677,6 +2847,9 @@ class _Fb2Inline {
     this.bold = false,
     this.italic = false,
     this.underline = false,
+    this.fontSize,
+    this.fontFamily,
+    this.color,
   });
 
   final String text;
@@ -2684,29 +2857,46 @@ class _Fb2Inline {
   final bool bold;
   final bool italic;
   final bool underline;
+  final double? fontSize;
+  final String? fontFamily;
+  final Color? color;
 }
 
 class _Fb2Block {
-  const _Fb2Block.paragraph(this.inlines, {this.anchors = const []})
-      : kind = _Fb2BlockKind.paragraph,
+  const _Fb2Block.paragraph(
+    this.inlines, {
+    this.anchors = const [],
+    this.officeFormat = const _OfficeParagraphFormat(),
+  })  : kind = _Fb2BlockKind.paragraph,
         imageBytes = null,
         tableRows = const [],
+        officeTableFormat = null,
         _titleText = '';
-  const _Fb2Block.title(String text, {this.anchors = const []})
-      : kind = _Fb2BlockKind.title,
+  const _Fb2Block.title(
+    String text, {
+    this.anchors = const [],
+    this.officeFormat = const _OfficeParagraphFormat(headingLevel: 1, fontSize: 22.0, bold: true, spaceBefore: 12.0, spaceAfter: 8.0),
+  })  : kind = _Fb2BlockKind.title,
         inlines = const [],
         imageBytes = null,
         tableRows = const [],
+        officeTableFormat = null,
         _titleText = text;
   const _Fb2Block.image(this.imageBytes, {this.anchors = const []})
       : kind = _Fb2BlockKind.image,
         inlines = const [],
         tableRows = const [],
+        officeTableFormat = null,
+        officeFormat = const _OfficeParagraphFormat(align: _OfficeTextAlign.center),
         _titleText = '';
-  const _Fb2Block.table(this.tableRows, {this.anchors = const []})
-      : kind = _Fb2BlockKind.table,
+  const _Fb2Block.table(
+    this.tableRows, {
+    this.anchors = const [],
+    this.officeTableFormat,
+  })  : kind = _Fb2BlockKind.table,
         inlines = const [],
         imageBytes = null,
+        officeFormat = const _OfficeParagraphFormat(spaceBefore: 5.0, spaceAfter: 8.0),
         _titleText = '';
 
   final _Fb2BlockKind kind;
@@ -2715,6 +2905,8 @@ class _Fb2Block {
   final List<List<String>> tableRows;
   final String _titleText;
   final List<String> anchors;
+  final _OfficeParagraphFormat officeFormat;
+  final _OfficeTableFormat? officeTableFormat;
 
   String get plainText => switch (kind) {
         _Fb2BlockKind.title => _titleText,
@@ -2729,12 +2921,18 @@ class _Fb2Document {
     this.linkTargets = const {},
     this.blockStartChars = const [],
     this.totalTextChars = 0,
+    this.officePageFormat = const _OfficePageFormat(),
+    this.officeHeaderBlocks = const [],
+    this.officeFooterBlocks = const [],
   });
 
   final List<_Fb2Block> blocks;
   final Map<String, int> linkTargets;
   final List<int> blockStartChars;
   final int totalTextChars;
+  final _OfficePageFormat officePageFormat;
+  final List<_Fb2Block> officeHeaderBlocks;
+  final List<_Fb2Block> officeFooterBlocks;
 
   int startCharForBlock(int blockIndex) {
     if (blockStartChars.isEmpty) return 0;
@@ -2748,7 +2946,13 @@ class _Fb2Document {
   }
 }
 
-_Fb2Document _makeFb2Document(List<_Fb2Block> blocks, {Map<String, int> linkTargets = const {}}) {
+_Fb2Document _makeFb2Document(
+  List<_Fb2Block> blocks, {
+  Map<String, int> linkTargets = const {},
+  _OfficePageFormat officePageFormat = const _OfficePageFormat(),
+  List<_Fb2Block> officeHeaderBlocks = const [],
+  List<_Fb2Block> officeFooterBlocks = const [],
+}) {
   final starts = <int>[];
   var cursor = 0;
   for (final block in blocks) {
@@ -2757,7 +2961,15 @@ _Fb2Document _makeFb2Document(List<_Fb2Block> blocks, {Map<String, int> linkTarg
     cursor += length <= 0 ? 1 : length;
     cursor += 1; // Stable separator between blocks; keeps progress based on top logical line.
   }
-  return _Fb2Document(blocks, linkTargets: linkTargets, blockStartChars: List.unmodifiable(starts), totalTextChars: cursor.clamp(0, 1 << 62).toInt());
+  return _Fb2Document(
+    blocks,
+    linkTargets: linkTargets,
+    blockStartChars: List.unmodifiable(starts),
+    totalTextChars: cursor.clamp(0, 1 << 62).toInt(),
+    officePageFormat: officePageFormat,
+    officeHeaderBlocks: List.unmodifiable(officeHeaderBlocks),
+    officeFooterBlocks: List.unmodifiable(officeFooterBlocks),
+  );
 }
 
 class _Fb2Locator {
@@ -3272,6 +3484,21 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     return null;
   }
 
+  String? wordAttr(String tag, String localName) =>
+      _xmlAttr(tag, 'w:$localName') ?? _xmlAttr(tag, 'r:$localName') ?? _xmlAttr(tag, localName);
+  String? wordVal(String tag) => wordAttr(tag, 'val');
+  int? intAttr(String tag, String localName) => int.tryParse(wordAttr(tag, localName) ?? '');
+  double twipsToLogical(int? twips) => twips == null ? 0.0 : twips / 15.0;
+
+  String? firstTag(String xml, String name) {
+    final selfClosing = RegExp('<w:$name\\b[^>]*/>', caseSensitive: false, dotAll: true).firstMatch(xml);
+    if (selfClosing != null) return selfClosing.group(0);
+    return RegExp('<w:$name\\b[^>]*>.*?</w:$name>', caseSensitive: false, dotAll: true).firstMatch(xml)?.group(0);
+  }
+
+  String innerTagBody(String xml, String name) =>
+      RegExp('<w:$name\\b[^>]*>(.*?)</w:$name>', caseSensitive: false, dotAll: true).firstMatch(xml)?.group(1) ?? '';
+
   Map<String, String> relationshipsFor(String partPath) {
     final normalizedPart = partPath.replaceAll('\\', '/');
     final dir = _zipDirName(normalizedPart);
@@ -3292,52 +3519,214 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     return result;
   }
 
-  String textFromXml(String xml) {
+  _OfficeTextAlign alignFromValue(String? value) {
+    switch ((value ?? '').toLowerCase()) {
+      case 'center':
+        return _OfficeTextAlign.center;
+      case 'right':
+      case 'end':
+        return _OfficeTextAlign.right;
+      case 'both':
+      case 'distribute':
+      case 'thaidistribute':
+        return _OfficeTextAlign.justify;
+      default:
+        return _OfficeTextAlign.left;
+    }
+  }
+
+  bool onTag(String xml, String tag) {
+    final match = RegExp('<w:$tag\\b[^>]*/?>', caseSensitive: false).firstMatch(xml);
+    if (match == null) return false;
+    final raw = match.group(0) ?? '';
+    return !RegExp(r'''(?:w:)?val\s*=\s*["'](?:0|false|off|none)["']''', caseSensitive: false).hasMatch(raw);
+  }
+
+  double? fontSizeFromRPr(String rPr) {
+    final tag = firstTag(rPr, 'sz') ?? firstTag(rPr, 'szCs');
+    final value = tag == null ? null : intAttr(tag, 'val');
+    if (value == null || value <= 0) return null;
+    return (value / 1.5).clamp(8.0, 48.0).toDouble();
+  }
+
+  Color? colorFromRPr(String rPr) {
+    final tag = firstTag(rPr, 'color');
+    final raw = tag == null ? null : wordAttr(tag, 'val');
+    if (raw == null || raw.isEmpty || raw.toLowerCase() == 'auto') return null;
+    final normalized = raw.replaceAll('#', '');
+    if (!RegExp(r'^[0-9A-Fa-f]{6}$').hasMatch(normalized)) return null;
+    return Color(0xFF000000 | int.parse(normalized, radix: 16));
+  }
+
+  String? fontFamilyFromRPr(String rPr) {
+    final tag = firstTag(rPr, 'rFonts');
+    if (tag == null) return null;
+    return wordAttr(tag, 'ascii') ?? wordAttr(tag, 'hAnsi') ?? wordAttr(tag, 'cs') ?? wordAttr(tag, 'eastAsia');
+  }
+
+  _OfficePageFormat pageFormatFromXml(String xml) {
+    var sectPr = '';
+    for (final match in RegExp(r'<w:sectPr\b[^>]*>.*?</w:sectPr>', caseSensitive: false, dotAll: true).allMatches(xml)) {
+      sectPr = match.group(0) ?? sectPr;
+    }
+    final pgSz = firstTag(sectPr, 'pgSz') ?? '';
+    final pgMar = firstTag(sectPr, 'pgMar') ?? '';
+    return _OfficePageFormat(
+      widthTwips: intAttr(pgSz, 'w') ?? 11906,
+      heightTwips: intAttr(pgSz, 'h') ?? 16838,
+      marginLeftTwips: intAttr(pgMar, 'left') ?? 1440,
+      marginRightTwips: intAttr(pgMar, 'right') ?? 1440,
+      marginTopTwips: intAttr(pgMar, 'top') ?? 1440,
+      marginBottomTwips: intAttr(pgMar, 'bottom') ?? 1440,
+    );
+  }
+
+  _OfficeParagraphFormat formatFromPr(
+    String pPr,
+    String rPr, {
+    _OfficeParagraphFormat base = const _OfficeParagraphFormat(),
+    String? styleId,
+    String? styleName,
+  }) {
+    var result = base;
+    final styleToken = '${styleId ?? ''} ${styleName ?? ''}'.toLowerCase();
+    final headingMatch = RegExp(r'heading\s*([1-6])|heading([1-6])|заголовок\s*([1-6])', caseSensitive: false).firstMatch(styleToken);
+    if (headingMatch != null) {
+      final level = int.tryParse(headingMatch.group(1) ?? headingMatch.group(2) ?? headingMatch.group(3) ?? '1') ?? 1;
+      result = result.copyWith(
+        headingLevel: level,
+        bold: true,
+        fontSize: (22.0 - ((level - 1) * 1.6)).clamp(16.5, 22.0).toDouble(),
+        lineHeight: 1.18,
+        spaceBefore: level == 1 ? 12.0 : 8.0,
+        spaceAfter: 6.0,
+      );
+    } else if (styleToken.contains('title') || styleToken.contains('название')) {
+      result = result.copyWith(
+        headingLevel: 1,
+        bold: true,
+        fontSize: 22.0,
+        align: _OfficeTextAlign.center,
+        lineHeight: 1.18,
+        spaceBefore: 10.0,
+        spaceAfter: 8.0,
+      );
+    }
+
+    final jc = firstTag(pPr, 'jc');
+    if (jc != null) result = result.copyWith(align: alignFromValue(wordVal(jc)));
+
+    final spacing = firstTag(pPr, 'spacing');
+    if (spacing != null) {
+      final before = intAttr(spacing, 'before');
+      final after = intAttr(spacing, 'after');
+      final line = intAttr(spacing, 'line');
+      result = result.copyWith(
+        spaceBefore: before == null ? null : twipsToLogical(before).clamp(0.0, 32.0).toDouble(),
+        spaceAfter: after == null ? null : twipsToLogical(after).clamp(0.0, 32.0).toDouble(),
+        lineHeight: line == null || line <= 0 ? null : (line / 240.0).clamp(1.0, 2.0).toDouble(),
+      );
+    }
+
+    final ind = firstTag(pPr, 'ind');
+    if (ind != null) {
+      final left = intAttr(ind, 'left') ?? intAttr(ind, 'start');
+      final right = intAttr(ind, 'right') ?? intAttr(ind, 'end');
+      final firstLine = intAttr(ind, 'firstLine');
+      final hanging = intAttr(ind, 'hanging');
+      result = result.copyWith(
+        leftIndent: left == null ? null : twipsToLogical(left).clamp(0.0, 120.0).toDouble(),
+        rightIndent: right == null ? null : twipsToLogical(right).clamp(0.0, 120.0).toDouble(),
+        firstLineIndent: firstLine == null && hanging == null ? null : twipsToLogical(firstLine ?? -hanging!).clamp(-64.0, 96.0).toDouble(),
+      );
+    }
+
+    final size = fontSizeFromRPr(rPr);
+    if (size != null) result = result.copyWith(fontSize: size);
+    if (onTag(rPr, 'b')) result = result.copyWith(bold: true);
+    if (onTag(rPr, 'i')) result = result.copyWith(italic: true);
+    if (RegExp(r'<w:numPr\b', caseSensitive: false).hasMatch(pPr)) {
+      result = result.copyWith(
+        isList: true,
+        leftIndent: result.leftIndent == 0 ? 26.0 : result.leftIndent,
+        firstLineIndent: result.firstLineIndent == 0 ? -14.0 : result.firstLineIndent,
+      );
+    }
+    return result;
+  }
+
+  Map<String, _OfficeParagraphFormat> parseStyles() {
+    final file = findFile('word/styles.xml');
+    if (file == null) return const {};
+    final xml = _decodeTextFile(_archiveFileBytes(file));
+    final result = <String, _OfficeParagraphFormat>{};
+    for (final match in RegExp(r'<w:style\b([^>]*)>(.*?)</w:style>', caseSensitive: false, dotAll: true).allMatches(xml)) {
+      final attrs = match.group(1) ?? '';
+      final body = match.group(2) ?? '';
+      final type = wordAttr(attrs, 'type') ?? '';
+      if (type.toLowerCase() != 'paragraph') continue;
+      final id = wordAttr(attrs, 'styleId');
+      if (id == null || id.isEmpty) continue;
+      final nameTag = firstTag(body, 'name') ?? '';
+      final name = wordVal(nameTag);
+      final pPr = innerTagBody(body, 'pPr');
+      final rPr = innerTagBody(body, 'rPr');
+      result[id] = formatFromPr(pPr, rPr, styleId: id, styleName: name);
+    }
+    return result;
+  }
+
+  final styles = parseStyles();
+
+  String textFromXml(String xml, {bool trim = true}) {
     final buffer = StringBuffer();
     final tokens = RegExp(
-      r'<w:tab\b[^>]*/>|<w:br\b[^>]*/>|<w:t\b[^>]*>(.*?)</w:t>',
+      r'<w:tab\b[^>]*/>|<w:br\b[^>]*/>|<w:cr\b[^>]*/>|<w:t\b([^>]*)>(.*?)</w:t>',
       caseSensitive: false,
       dotAll: true,
     );
     for (final token in tokens.allMatches(xml)) {
       final raw = token.group(0) ?? '';
       if (raw.startsWith(RegExp(r'<w:tab', caseSensitive: false))) {
-        buffer.write('\t');
-      } else if (raw.startsWith(RegExp(r'<w:br', caseSensitive: false))) {
+        buffer.write('    ');
+      } else if (raw.startsWith(RegExp(r'<w:br|<w:cr', caseSensitive: false))) {
         buffer.write('\n');
       } else {
-        buffer.write(_decodeXmlEntities(token.group(1) ?? ''));
+        final attrs = token.group(1) ?? '';
+        final value = _decodeXmlEntities(token.group(2) ?? '');
+        if (RegExp(r'''xml:space\s*=\s*["']preserve["']''', caseSensitive: false).hasMatch(attrs)) {
+          buffer.write(value.replaceAll('\u00A0', ' '));
+        } else {
+          buffer.write(value.replaceAll(RegExp(r'[ \t\u00A0]+'), ' '));
+        }
       }
     }
-    return buffer.toString().replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trim();
+    final text = buffer.toString().replaceAll(RegExp(r'\n{3,}'), '\n\n');
+    return trim ? text.trim() : text;
   }
 
-  bool hasOnFormatting(String xml, String tag) {
-    final re = RegExp('<w:$tag\\b[^>]*/?>', caseSensitive: false);
-    final match = re.firstMatch(xml);
-    if (match == null) return false;
-    final raw = match.group(0) ?? '';
-    return !RegExp(r'''w:val\s*=\s*["'](?:0|false|off)["']''', caseSensitive: false).hasMatch(raw);
-  }
-
-  List<_Fb2Inline> inlinesFromParagraphXml(String xml) {
+  List<_Fb2Inline> inlinesFromParagraphXml(String xml, _OfficeParagraphFormat paragraphFormat) {
     final inlines = <_Fb2Inline>[];
     final runRe = RegExp(r'<w:r\b[^>]*>.*?</w:r>', caseSensitive: false, dotAll: true);
     for (final runMatch in runRe.allMatches(xml)) {
       final run = runMatch.group(0) ?? '';
-      final text = textFromXml(run);
+      final text = textFromXml(run, trim: false);
       if (text.isEmpty) continue;
-      final rPr = RegExp(r'<w:rPr\b[^>]*>(.*?)</w:rPr>', caseSensitive: false, dotAll: true).firstMatch(run)?.group(1) ?? run;
+      final rPr = innerTagBody(run, 'rPr');
       inlines.add(_Fb2Inline(
         text,
-        bold: hasOnFormatting(rPr, 'b'),
-        italic: hasOnFormatting(rPr, 'i'),
-        underline: RegExp(r'<w:u\b', caseSensitive: false).hasMatch(rPr),
+        bold: onTag(rPr, 'b'),
+        italic: onTag(rPr, 'i'),
+        underline: RegExp(r'<w:u\b', caseSensitive: false).hasMatch(rPr) &&
+            !RegExp(r'''<w:u\b[^>]*(?:w:)?val\s*=\s*["']none["']''', caseSensitive: false).hasMatch(rPr),
+        fontSize: fontSizeFromRPr(rPr),
+        fontFamily: fontFamilyFromRPr(rPr),
+        color: colorFromRPr(rPr),
       ));
     }
     if (inlines.isEmpty) {
       final text = textFromXml(xml);
-      if (text.isNotEmpty) inlines.add(_Fb2Inline(text));
+      if (text.isNotEmpty) inlines.add(_Fb2Inline(text, fontSize: paragraphFormat.fontSize));
     }
     return inlines;
   }
@@ -3358,13 +3747,26 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     return images;
   }
 
+  _OfficeTableFormat tableFormatFromXml(String tblXml) {
+    final widths = <int>[];
+    final grid = innerTagBody(tblXml, 'tblGrid');
+    for (final col in RegExp(r'<w:gridCol\b[^>]*>', caseSensitive: false).allMatches(grid)) {
+      final width = intAttr(col.group(0) ?? '', 'w');
+      if (width != null && width > 0) widths.add(width);
+    }
+    return _OfficeTableFormat(columnTwips: List.unmodifiable(widths));
+  }
+
   List<List<String>> tableRowsFromXml(String tblXml) {
     final rows = <List<String>>[];
     for (final row in RegExp(r'<w:tr\b[^>]*>(.*?)</w:tr>', caseSensitive: false, dotAll: true).allMatches(tblXml)) {
       final cells = <String>[];
       final rowBody = row.group(1) ?? '';
       for (final cell in RegExp(r'<w:tc\b[^>]*>(.*?)</w:tc>', caseSensitive: false, dotAll: true).allMatches(rowBody)) {
-        final cellText = textFromXml(cell.group(1) ?? '').replaceAll(RegExp(r'\s*\n\s*'), ' ').trim();
+        final cellText = textFromXml(cell.group(1) ?? '')
+            .replaceAll(RegExp(r'[ \t\u00A0]*\n[ \t\u00A0]*'), '\n')
+            .replaceAll(RegExp(r'[ \t\u00A0]+'), ' ')
+            .trim();
         cells.add(cellText.isEmpty ? ' ' : cellText);
       }
       if (cells.any((cell) => cell.trim().isNotEmpty)) rows.add(List.unmodifiable(cells));
@@ -3372,69 +3774,91 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     return rows;
   }
 
-  final blocks = <_Fb2Block>[];
-  void parsePart(String path, {String? title}) {
+  List<_Fb2Block> parsePart(String path, {String? title}) {
+    final partBlocks = <_Fb2Block>[];
     final file = findFile(path);
-    if (file == null) return;
-    if (title != null && title.isNotEmpty) blocks.add(_Fb2Block.title(title));
+    if (file == null) return partBlocks;
+    if (title != null && title.isNotEmpty) partBlocks.add(_Fb2Block.title(title));
     var xml = _decodeTextFile(_archiveFileBytes(file));
     xml = xml.replaceAll(RegExp(r'<w:tab\b[^>]*/>', caseSensitive: false), '<w:tab/>');
     xml = xml.replaceAll(RegExp(r'<w:br\b[^>]*/>', caseSensitive: false), '<w:br/>');
+    xml = xml.replaceAll(RegExp(r'<w:cr\b[^>]*/>', caseSensitive: false), '<w:cr/>');
     final rels = relationshipsFor(path);
 
     final blockRe = RegExp(r'<w:tbl\b[^>]*>.*?</w:tbl>|<w:p\b[^>]*>.*?</w:p>', caseSensitive: false, dotAll: true);
     for (final blockMatch in blockRe.allMatches(xml)) {
       final raw = blockMatch.group(0) ?? '';
       for (final image in imagesFromXml(raw, rels)) {
-        blocks.add(_Fb2Block.image(image));
+        partBlocks.add(_Fb2Block.image(image));
       }
 
       if (raw.startsWith(RegExp(r'<w:tbl', caseSensitive: false))) {
         final rows = tableRowsFromXml(raw);
-        if (rows.isNotEmpty) blocks.add(_Fb2Block.table(rows));
+        if (rows.isNotEmpty) partBlocks.add(_Fb2Block.table(rows, officeTableFormat: tableFormatFromXml(raw)));
         continue;
       }
 
-      final isHeading = RegExp(r'''<w:pStyle\b[^>]*w:val\s*=\s*["'](?:Heading[1-6]|heading[1-6]|Title|Subtitle)["']''', caseSensitive: false).hasMatch(raw) ||
-          RegExp(r'<w:outlineLvl\b', caseSensitive: false).hasMatch(raw);
-      final isList = RegExp(r'<w:numPr\b', caseSensitive: false).hasMatch(raw);
-      final inlines = inlinesFromParagraphXml(raw);
+      final pPr = innerTagBody(raw, 'pPr');
+      final rPr = innerTagBody(raw, 'rPr');
+      final styleTag = firstTag(pPr, 'pStyle') ?? '';
+      final styleId = wordVal(styleTag);
+      final styleFormat = styleId == null ? const _OfficeParagraphFormat() : (styles[styleId] ?? const _OfficeParagraphFormat());
+      final paragraphFormat = formatFromPr(pPr, rPr, base: styleFormat, styleId: styleId);
+      final inlines = inlinesFromParagraphXml(raw, paragraphFormat);
       if (inlines.isEmpty) continue;
-      final text = inlines.map((inline) => inline.text).join();
-      if (text.trim().isEmpty) continue;
-      if (isHeading) {
-        blocks.add(_Fb2Block.title(text.trim()));
-      } else if (isList) {
-        blocks.add(_Fb2Block.paragraph([const _Fb2Inline('• '), ...inlines]));
+      final text = inlines.map((inline) => inline.text).join().replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trim();
+      if (text.isEmpty) continue;
+      if (paragraphFormat.headingLevel > 0) {
+        partBlocks.add(_Fb2Block.title(text, officeFormat: paragraphFormat));
+      } else if (paragraphFormat.isList && !text.startsWith('•') && !RegExp(r'^\d+[.)]').hasMatch(text)) {
+        partBlocks.add(_Fb2Block.paragraph([const _Fb2Inline('• '), ...inlines], officeFormat: paragraphFormat));
       } else {
-        blocks.add(_Fb2Block.paragraph(inlines));
+        partBlocks.add(_Fb2Block.paragraph(inlines, officeFormat: paragraphFormat));
       }
+    }
+    return partBlocks;
+  }
+
+  final documentFile = findFile('word/document.xml');
+  final documentXml = documentFile == null ? '' : _decodeTextFile(_archiveFileBytes(documentFile));
+  final pageFormat = documentXml.isEmpty ? const _OfficePageFormat() : pageFormatFromXml(documentXml);
+  final documentRelationships = relationshipsFor('word/document.xml');
+  final headerBlocks = <_Fb2Block>[];
+  final footerBlocks = <_Fb2Block>[];
+  final seenHeaderFooter = <String>{};
+  for (final ref in RegExp(r'<w:(headerReference|footerReference)\b[^>]*>', caseSensitive: false).allMatches(documentXml)) {
+    final tag = ref.group(0) ?? '';
+    final kind = (ref.group(1) ?? '').toLowerCase();
+    final id = _xmlAttr(tag, 'r:id') ?? wordAttr(tag, 'id');
+    final path = id == null ? null : documentRelationships[id];
+    if (path == null || !seenHeaderFooter.add('$kind:$path')) continue;
+    final parsed = parsePart(path);
+    if (kind == 'headerreference') {
+      headerBlocks.addAll(parsed);
+    } else {
+      footerBlocks.addAll(parsed);
     }
   }
 
-  parsePart('word/document.xml');
-
-  final extraParts = archive.files
-      .where((file) => file.isFile)
-      .map((file) => file.name.replaceAll('\\', '/'))
-      .where((name) =>
-          RegExp(r'^word/header\d+\.xml$', caseSensitive: false).hasMatch(name) ||
-          RegExp(r'^word/footer\d+\.xml$', caseSensitive: false).hasMatch(name))
-      .toList()
-    ..sort();
-  for (final part in extraParts) {
-    parsePart(part, title: part.contains('/header') ? 'Верхний колонтитул' : 'Нижний колонтитул');
-  }
-
-  parsePart('word/footnotes.xml', title: 'Сноски');
-  parsePart('word/endnotes.xml', title: 'Примечания');
-  parsePart('word/comments.xml', title: 'Комментарии');
+  final blocks = <_Fb2Block>[];
+  blocks.addAll(parsePart('word/document.xml'));
+  blocks.addAll(parsePart('word/footnotes.xml', title: 'Сноски'));
+  blocks.addAll(parsePart('word/endnotes.xml', title: 'Примечания'));
+  blocks.addAll(parsePart('word/comments.xml', title: 'Комментарии'));
   if (blocks.isEmpty) {
-    return _makeFb2Document(const [
-      _Fb2Block.paragraph([_Fb2Inline('DOCX не содержит извлекаемого текста.')]),
-    ]);
+    return _makeFb2Document(
+      const [_Fb2Block.paragraph([_Fb2Inline('DOCX не содержит извлекаемого текста.')])],
+      officePageFormat: pageFormat,
+      officeHeaderBlocks: headerBlocks,
+      officeFooterBlocks: footerBlocks,
+    );
   }
-  return _makeFb2Document(blocks);
+  return _makeFb2Document(
+    blocks,
+    officePageFormat: pageFormat,
+    officeHeaderBlocks: headerBlocks,
+    officeFooterBlocks: footerBlocks,
+  );
 }
 
 bool _looksLikeZip(Uint8List bytes) => bytes.length >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4B;
