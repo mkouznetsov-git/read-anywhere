@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-class ReadAnywhereTheme {
+class ReadArcTheme {
   static ThemeData light() {
     const deepIndigo = Color(0xFF211B36);
     const indigoSurface = Color(0xFF2A2340);

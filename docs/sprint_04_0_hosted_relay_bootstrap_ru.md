@@ -17,13 +17,13 @@ ReadArc relay
 Пока официальный relay задаётся на этапе сборки через:
 
 ```bash
---dart-define=READANYWHERE_DEFAULT_RELAY_URL=https://your-service.koyeb.app
+--dart-define=READARC_DEFAULT_RELAY_URL=https://your-service.koyeb.app
 ```
 
 Или через env-переменную в наших скриптах:
 
 ```bash
-READANYWHERE_DEFAULT_RELAY_URL=https://your-service.koyeb.app ./scripts/package_android.sh
+READARC_DEFAULT_RELAY_URL=https://your-service.koyeb.app ./scripts/package_android.sh
 ```
 
 ### 2. Custom relay остался
@@ -96,7 +96,7 @@ docker compose up --build relay
 3. Build-time default:
 
 ```bash
-READANYWHERE_DEFAULT_RELAY_URL=https://your-service.koyeb.app ./scripts/package_android.sh
+READARC_DEFAULT_RELAY_URL=https://your-service.koyeb.app ./scripts/package_android.sh
 ```
 
 В приложении выбрать:

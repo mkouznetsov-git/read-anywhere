@@ -12,7 +12,7 @@
   - Android launcher PNG в `assets/app_icon/android/`
   - macOS icon PNG в `assets/app_icon/macos/`
   - Flutter UI asset в `apps/flutter_client/assets/brand/`
-- Старый каталог локальных данных `ReadAnywhere` намеренно сохранён, чтобы обновление не потеряло библиотеку пользователя.
+- Старый каталог локальных данных `ReadArc` намеренно сохранён, чтобы обновление не потеряло библиотеку пользователя.
 
 ### 2. CHM без бинарных “кракозябр”
 

@@ -211,7 +211,7 @@ class LibraryManifest {
         if (includeLocalPaths) 'accountEncryptionKey': accountEncryptionKey,
         'deviceSigningPublicKey': deviceSigningPublicKey,
         if (includeLocalPaths) 'deviceSigningPrivateKey': deviceSigningPrivateKey,
-        'crypto': {'payload': 'readarc-e2e-v2', 'legacyPayload': 'readanywhere-e2e-v2'},
+        'crypto': {'payload': 'readarc-e2e-v2'},
         'updatedAt': updatedAt.toIso8601String(),
         'trustedDevices': trustedDevices.map((d) => d.toJson()).toList(),
         'books': books

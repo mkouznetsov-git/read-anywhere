@@ -41,7 +41,7 @@
 В `StorageService` добавлена основа для будущих подготовленных представлений:
 
 ```text
-ReadAnywhere/
+ReadArc/
   books/
   processed_artifacts/
     <bookId>/

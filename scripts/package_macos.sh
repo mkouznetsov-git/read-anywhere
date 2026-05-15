@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="$ROOT_DIR/apps/flutter_client"
 DIST_DIR="$ROOT_DIR/dist/macos"
 APP_NAME="ReadArc"
-BASE_VERSION="${READARC_BASE_VERSION:-${READ_ANYWHERE_BASE_VERSION:-0.1.0}}"
+BASE_VERSION="${READARC_BASE_VERSION:-0.1.0}"
 BUILD_NUMBER="${READARC_BUILD_NUMBER:-${GITHUB_RUN_NUMBER:-}}"
 if [[ -z "$BUILD_NUMBER" ]]; then
   BUILD_NUMBER="$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || echo 23)"
@@ -33,11 +33,10 @@ if ! "$ROOT_DIR/scripts/build_native_engines.sh" macos; then
 fi
 
 build_with_optional_define() {
-  local relay_define="${READARC_DEFAULT_RELAY_URL:-${READANYWHERE_DEFAULT_RELAY_URL:-https://relay.readarc.ru}}"
+  local relay_define="${READARC_DEFAULT_RELAY_URL:-https://relay.readarc.ru}"
   local args=("$@")
   if [[ -n "$relay_define" ]]; then
     args+=(--dart-define="READARC_DEFAULT_RELAY_URL=$relay_define")
-    args+=(--dart-define="READANYWHERE_DEFAULT_RELAY_URL=$relay_define")
   fi
   flutter "${args[@]}"
 }

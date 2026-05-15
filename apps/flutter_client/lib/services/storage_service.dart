@@ -19,13 +19,10 @@ class StorageService {
   final _uuid = const Uuid();
 
   Future<Directory> appDir() async {
-    // Keep the on-device library in a stable application data directory.  Early
-    // ReadArc builds used the historical folder name `ReadAnywhere`; retaining
-    // it avoids losing the library during ordinary app updates.  If a future or
-    // older build created `ReadArc` in another path, copy it into the stable
-    // folder instead of starting with an empty library.
+    // Canonical ReadArc data directory. Keep it stable so app updates do not
+    // erase an existing development/test library.
     final documents = await getApplicationDocumentsDirectory();
-    final appDirectory = Directory(p.join(documents.path, 'ReadAnywhere'));
+    final appDirectory = Directory(p.join(documents.path, 'ReadArc'));
     await _restoreAppDataIfPrimaryIsEmpty(appDirectory, documents.path);
     if (!await appDirectory.exists()) {
       await appDirectory.create(recursive: true);
@@ -40,13 +37,11 @@ class StorageService {
 
       final candidates = <Directory>[
         Directory(p.join(documentsPath, 'ReadArc')),
-        Directory(p.join(documentsPath, 'ReadAnywhere')),
       ];
       try {
         final support = await getApplicationSupportDirectory();
         candidates.addAll([
           Directory(p.join(support.path, 'ReadArc')),
-          Directory(p.join(support.path, 'ReadAnywhere')),
         ]);
       } catch (_) {
         // Some platforms may not expose an application support directory.

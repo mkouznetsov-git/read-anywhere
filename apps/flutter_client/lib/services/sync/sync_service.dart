@@ -753,7 +753,7 @@ class SyncService {
     if (raw.isEmpty) {
       throw ArgumentError('Введите pairing-код или приглашение');
     }
-    if (raw.startsWith('readarc://') || raw.startsWith('readanywhere://')) {
+    if (raw.startsWith('readarc://')) {
       final uri = Uri.parse(raw);
       final code = _normalizePairingCode(uri.queryParameters['code'] ?? '');
       final relay = uri.queryParameters['relay']?.trim();
@@ -1013,7 +1013,7 @@ class SyncService {
       return;
     }
 
-    final decryptedPayload = await ReadAnywhereE2eCrypto.decryptPayload(
+    final decryptedPayload = await ReadArcE2eCrypto.decryptPayload(
       encryptedPayload: envelope.payload,
       accountEncryptionKey: local.accountEncryptionKey,
       eventType: envelope.type,
@@ -1067,12 +1067,12 @@ class SyncService {
   }
 
   bool _acceptSecureEnvelope(SyncEnvelope envelope) {
-    final eventId = ReadAnywhereE2eCrypto.encryptedEventId(envelope.payload);
+    final eventId = ReadArcE2eCrypto.encryptedEventId(envelope.payload);
     if (eventId == null || eventId.isEmpty) {
       // Legacy encrypted payload from older test builds. Accept during rollout.
       return true;
     }
-    final issuedAt = ReadAnywhereE2eCrypto.encryptedIssuedAt(envelope.payload);
+    final issuedAt = ReadArcE2eCrypto.encryptedIssuedAt(envelope.payload);
     final now = DateTime.now().toUtc();
     if (issuedAt == null) {
       _appendLog('Отклонено событие без issuedAt: ${envelope.type}');
@@ -1622,11 +1622,11 @@ class SyncService {
     final client = _client;
     if (client == null || !state.value.connected) return false;
     try {
-      final encrypted = await ReadAnywhereE2eCrypto.encryptBinaryFrame(
+      final encrypted = await ReadArcE2eCrypto.encryptBinaryFrame(
         accountEncryptionKey: local.accountEncryptionKey,
         clearBytes: data,
         headerFields: {
-          'frame': 'readanywhere-binary-v1',
+          'frame': 'readarc-binary-v1',
           'type': 'book_file_binary_chunk',
           'accountId': local.accountId,
           'deviceId': local.deviceId,
@@ -1663,7 +1663,7 @@ class SyncService {
         _appendLog('Отклонён binary chunk от недоверенного/отозванного устройства: $sourceDeviceId');
         return;
       }
-      final clearBytes = await ReadAnywhereE2eCrypto.decryptBinaryFrame(
+      final clearBytes = await ReadArcE2eCrypto.decryptBinaryFrame(
         header: header,
         cipherBytes: message.body,
         accountEncryptionKey: local.accountEncryptionKey,
@@ -2055,9 +2055,9 @@ class SyncService {
       request.response.headers
         ..set(HttpHeaders.acceptRangesHeader, 'bytes')
         ..set(HttpHeaders.contentTypeHeader, 'application/octet-stream')
-        ..set('X-ReadAnywhere-Book-Id', share.bookId)
-        ..set('X-ReadAnywhere-Sha256', share.sha256)
-        ..set('X-ReadAnywhere-File-Name', Uri.encodeComponent(share.fileName));
+        ..set('X-ReadArc-Book-Id', share.bookId)
+        ..set('X-ReadArc-Sha256', share.sha256)
+        ..set('X-ReadArc-File-Name', Uri.encodeComponent(share.fileName));
       if (start > 0) {
         request.response.statusCode = HttpStatus.partialContent;
         request.response.headers.set(HttpHeaders.contentRangeHeader, 'bytes $start-${size - 1}/$size');
@@ -2296,7 +2296,7 @@ class SyncService {
         ));
         return false;
       }
-      final encryptedPayload = await ReadAnywhereE2eCrypto.encryptPayload(
+      final encryptedPayload = await ReadArcE2eCrypto.encryptPayload(
         payload: envelope.payload,
         accountEncryptionKey: local.accountEncryptionKey,
         eventType: envelope.type,

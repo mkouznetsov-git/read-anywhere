@@ -1,24 +1,42 @@
 # ReadArc relay deployment
 
-Production relay работает на `https://relay.readarc.ru` за nginx/Let's Encrypt. Приложение всегда использует официальный relay, без выбора Personal Hub/Tailscale в пользовательском интерфейсе.
+Production relay работает на `https://relay.readarc.ru` за nginx/Let's Encrypt. Приложение использует официальный relay без выбора альтернативных transport-режимов в пользовательском интерфейсе.
 
 ## Обновление через GitHub Actions
 
-1. Убедитесь, что в `Settings → Secrets and variables → Actions → Repository secrets` есть:
+1. Убедиться, что в `Settings → Secrets and variables → Actions → Repository secrets` есть:
    - `RELAY_HOST=relay.readarc.ru`
    - `RELAY_USER=root`
    - `RELAY_SSH_KEY=<private deploy key>`
-2. Откройте `Actions → Deploy relay`.
-3. Нажмите `Run workflow`.
-4. После завершения проверьте:
+2. Открыть `Actions → Deploy relay`.
+3. Нажать `Run workflow`.
+4. После завершения проверить:
 
 ```bash
 curl https://relay.readarc.ru/health
 ```
 
-## Локальное обновление ZIP-архивом
+Ожидаемый ответ:
 
-На сервере должен быть установлен `/usr/local/bin/readarc-update-relay`.
+```text
+ok
+```
+
+## Что изменилось в update-команде
+
+Workflow больше не полагается на заранее установленную старую версию `/usr/local/bin/readarc-update-relay`. Перед deploy он загружает свежий `scripts/readarc_update_relay.sh`, устанавливает его как `/usr/local/bin/readarc-update-relay` и только после этого запускает обновление.
+
+Обновляющий скрипт:
+
+- использует стабильный compose project name `readarc`;
+- перед стартом новой версии выполняет `docker compose down --remove-orphans`;
+- принудительно удаляет застрявшие контейнеры `readarc-relay-1` / `readarc_relay_1`;
+- принудительно удаляет застрявшую сеть `readarc_default`;
+- хранит relay-data вне папки приложения: `/opt/readarc/server_data/relay`;
+- выполняет локальный health-check `http://127.0.0.1:8787/health`;
+- при неуспехе откатывает папку приложения на предыдущий backup.
+
+## Локальное обновление ZIP-архивом
 
 С Mac:
 
@@ -26,11 +44,7 @@ curl https://relay.readarc.ru/health
 scripts/deploy_relay_zip.sh readarc_sprintXX.zip
 ```
 
-Скрипт загрузит архив на сервер и выполнит:
-
-```bash
-readarc-update-relay /tmp/readarc-update.zip
-```
+Локальный скрипт тоже загружает свежий updater и устанавливает его на сервер, поэтому отдельная ручная установка `/usr/local/bin/readarc-update-relay` больше не нужна.
 
 ## Что проверять после deploy
 
@@ -39,4 +53,4 @@ curl http://127.0.0.1:8787/health
 curl https://relay.readarc.ru/health
 ```
 
-Для Sprint 27+ в `/health` должны отображаться поля offline queue: `offline_queue_events` и `offline_queue_next_seq`.
+В обоих случаях ожидается короткий ответ `ok` без диагностического JSON.

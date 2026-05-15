@@ -11,7 +11,7 @@ String _key() {
 
 void main() {
   test('encrypts, signs and decrypts payload', () async {
-    final encrypted = await ReadAnywhereE2eCrypto.encryptPayload(
+    final encrypted = await ReadArcE2eCrypto.encryptPayload(
       payload: {'hello': 'world'},
       accountEncryptionKey: _key(),
       eventType: 'library_snapshot',
@@ -20,8 +20,8 @@ void main() {
       createdAt: DateTime.utc(2030),
     );
 
-    expect(ReadAnywhereE2eCrypto.encryptedEventId(encrypted), isNotEmpty);
-    final decrypted = await ReadAnywhereE2eCrypto.decryptPayload(
+    expect(ReadArcE2eCrypto.encryptedEventId(encrypted), isNotEmpty);
+    final decrypted = await ReadArcE2eCrypto.decryptPayload(
       encryptedPayload: encrypted,
       accountEncryptionKey: _key(),
       eventType: 'library_snapshot',
@@ -33,7 +33,7 @@ void main() {
   });
 
   test('rejects tampered signed payload', () async {
-    final encrypted = await ReadAnywhereE2eCrypto.encryptPayload(
+    final encrypted = await ReadArcE2eCrypto.encryptPayload(
       payload: {'hello': 'world'},
       accountEncryptionKey: _key(),
       eventType: 'library_snapshot',
@@ -45,7 +45,7 @@ void main() {
     final tampered = {'e2ee': e2ee};
 
     await expectLater(
-      ReadAnywhereE2eCrypto.decryptPayload(
+      ReadArcE2eCrypto.decryptPayload(
         encryptedPayload: tampered,
         accountEncryptionKey: _key(),
         eventType: 'library_snapshot',

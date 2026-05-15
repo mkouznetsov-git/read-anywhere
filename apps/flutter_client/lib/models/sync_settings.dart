@@ -21,10 +21,7 @@ class ReadArcRelayConfig {
   /// public server instead of an example placeholder.
   static const officialRelayUrl = String.fromEnvironment(
     'READARC_DEFAULT_RELAY_URL',
-    defaultValue: String.fromEnvironment(
-      'READANYWHERE_DEFAULT_RELAY_URL',
-      defaultValue: 'https://relay.readarc.ru',
-    ),
+    defaultValue: 'https://relay.readarc.ru',
   );
 
   static const localDevelopmentRelayUrl = 'http://127.0.0.1:8787';
@@ -32,19 +29,6 @@ class ReadArcRelayConfig {
 
   static bool get officialRelayLooksConfigured =>
       officialRelayUrl.trim().isNotEmpty && !officialRelayUrl.contains('example.com');
-}
-
-/// Backwards-compatible alias for old code/docs/tests that still reference the
-/// pre-rename config type. Do not use in new code.
-@Deprecated('Use ReadArcRelayConfig')
-class ReadAnywhereRelayConfig {
-  const ReadAnywhereRelayConfig._();
-
-  static const officialRelayUrl = ReadArcRelayConfig.officialRelayUrl;
-  static const localDevelopmentRelayUrl = ReadArcRelayConfig.localDevelopmentRelayUrl;
-  static const personalHubPlaceholderUrl = ReadArcRelayConfig.personalHubPlaceholderUrl;
-
-  static bool get officialRelayLooksConfigured => ReadArcRelayConfig.officialRelayLooksConfigured;
 }
 
 class SyncSettings {

@@ -27,7 +27,7 @@ Relay по-прежнему видит технический envelope:
 ```json
 {
   "e2ee": {
-    "v": "readanywhere-e2e-v1",
+    "v": "readarc-e2e-v1",
     "alg": "AES-256-GCM",
     "nonce": "...",
     "ciphertext": "...",

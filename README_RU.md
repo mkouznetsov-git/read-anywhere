@@ -116,7 +116,7 @@ TXT-reader больше не рендерит весь файл одним бо�
 
 Добавлена подготовка к zero-config sync endpoint:
 
-- режим **ReadArc relay** — endpoint компилируется в приложение через `READANYWHERE_DEFAULT_RELAY_URL`;
+- режим **ReadArc relay** — endpoint компилируется в приложение через `READARC_DEFAULT_RELAY_URL`;
 - режим **Свой relay** — для Koyeb/VPS/Cloudflare Tunnel/self-hosted;
 - после успешного подключения включается автоподключение при следующем запуске;
 - relay теперь можно запускать через Docker/Docker Compose.
@@ -137,10 +137,10 @@ docker compose up --build relay
 Сборка клиента с endpoint по умолчанию:
 
 ```bash
-READANYWHERE_DEFAULT_RELAY_URL=https://your-service.koyeb.app ./scripts/package_android.sh
+READARC_DEFAULT_RELAY_URL=https://your-service.koyeb.app ./scripts/package_android.sh
 ```
 
-В GitHub Actions можно передать `default_relay_url` при ручном запуске workflow или создать repository variable `READANYWHERE_DEFAULT_RELAY_URL`.
+В GitHub Actions можно передать `default_relay_url` при ручном запуске workflow или создать repository variable `READARC_DEFAULT_RELAY_URL`.
 
 ## Sprint 4.0 hotfix 01 — macOS CI packaging
 

@@ -126,14 +126,14 @@ Google Play обычно принимает `.aab`; `.apk` удобен для �
 Если relay уже развёрнут, например на Koyeb, можно встроить его URL в приложение:
 
 ```bash
-READANYWHERE_DEFAULT_RELAY_URL=https://your-service.koyeb.app ./scripts/package_android.sh
-READANYWHERE_DEFAULT_RELAY_URL=https://your-service.koyeb.app ./scripts/package_macos.sh
+READARC_DEFAULT_RELAY_URL=https://your-service.koyeb.app ./scripts/package_android.sh
+READARC_DEFAULT_RELAY_URL=https://your-service.koyeb.app ./scripts/package_macos.sh
 ```
 
 В GitHub Actions есть два варианта:
 
 1. При ручном запуске workflow заполнить input `default_relay_url`.
-2. Создать repository variable `READANYWHERE_DEFAULT_RELAY_URL`.
+2. Создать repository variable `READARC_DEFAULT_RELAY_URL`.
 
 После этого в приложении можно выбрать режим **ReadArc relay** вместо ручного ввода URL.
 

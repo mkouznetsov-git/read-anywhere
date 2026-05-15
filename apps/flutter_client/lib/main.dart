@@ -50,20 +50,20 @@ void main() {
       debugPrint('ReadArc uncaught platform error: $error\n$stack');
       return true;
     };
-    runApp(const ReadAnywhereApp());
+    runApp(const ReadArcApp());
   }, (error, stack) {
     debugPrint('ReadArc uncaught zone error: $error\n$stack');
   });
 }
 
-class ReadAnywhereApp extends StatefulWidget {
-  const ReadAnywhereApp({super.key});
+class ReadArcApp extends StatefulWidget {
+  const ReadArcApp({super.key});
 
   @override
-  State<ReadAnywhereApp> createState() => _ReadAnywhereAppState();
+  State<ReadArcApp> createState() => _ReadArcAppState();
 }
 
-class _ReadAnywhereAppState extends State<ReadAnywhereApp> {
+class _ReadArcAppState extends State<ReadArcApp> {
   final _storage = StorageService();
   late final _sync = SyncService(_storage);
 
@@ -99,7 +99,7 @@ class _ReadAnywhereAppState extends State<ReadAnywhereApp> {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'ReadArc',
-      theme: ReadAnywhereTheme.light(),
+      theme: ReadArcTheme.light(),
       home: LibraryScreen(storage: _storage, sync: _sync),
     );
   }

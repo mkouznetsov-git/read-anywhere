@@ -12,7 +12,7 @@ https://relay.readarc.ru
 
 - Автоподключение включено всегда.
 - QR-код подключения создаётся с официальным relay и больше не требует выбора `Personal Hub / Tailscale Funnel` на новом устройстве.
-- Старые QR-ссылки `readanywhere://pair?...` и старые сохранённые настройки всё ещё декодируются, но их custom/Tailscale endpoint игнорируется: клиент подключается через `https://relay.readarc.ru`.
+- Старые QR-ссылки `readarc://pair?...` и старые сохранённые настройки всё ещё декодируются, но их custom/Tailscale endpoint игнорируется: клиент подключается через `https://relay.readarc.ru`.
 - Docker compose переименован в `readarc`, образ relay — `readarc-relay:dev`, порт relay по умолчанию публикуется только на `127.0.0.1:8787`, чтобы наружу его отдавал nginx.
 
 ## Что осталось в UI

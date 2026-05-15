@@ -9,7 +9,7 @@
 Для строго локального режима можно запустить так:
 
 ```bash
-READANYWHERE_RELAY_HOST=127.0.0.1 ./scripts/run_local_relay.sh
+READARC_RELAY_HOST=127.0.0.1 ./scripts/run_local_relay.sh
 ```
 
 ## Как проверить локальный relay

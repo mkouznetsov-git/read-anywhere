@@ -91,7 +91,7 @@ Settings → Secrets and variables → Actions → Variables → New repository 
 Создайте переменную:
 
 ```text
-READANYWHERE_DEFAULT_RELAY_URL=https://your-service-name.koyeb.app
+READARC_DEFAULT_RELAY_URL=https://your-service-name.koyeb.app
 ```
 
 После этого обычные сборки будут компилировать этот URL в приложение.

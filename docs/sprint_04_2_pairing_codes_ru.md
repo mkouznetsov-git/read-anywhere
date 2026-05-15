@@ -48,7 +48,7 @@ owner device id/name
 Кроме 6-значного кода приложение формирует ссылку вида:
 
 ```text
-readanywhere://pair?relay=https%3A%2F%2Fyour-device.ts.net&code=123456
+readarc://pair?relay=https%3A%2F%2Fyour-device.ts.net&code=123456
 ```
 
 В текущем MVP её можно скопировать и вставить в поле `Код или приглашение`. Позже этот же payload можно будет показывать как QR-код.

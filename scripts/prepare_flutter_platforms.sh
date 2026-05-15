@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_DIR="$ROOT_DIR/apps/flutter_client"
 ORG="${READARC_ORG:-com.readarc}"
-PLATFORMS="${READARC_PLATFORMS:-${READ_ANYWHERE_PLATFORMS:-android,macos}}"
+PLATFORMS="${READARC_PLATFORMS:-android,macos}"
 
 cd "$APP_DIR"
 

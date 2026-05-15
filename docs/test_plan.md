@@ -103,7 +103,7 @@ docker compose up --build relay
 
 2. In app select **Local development** on desktop and connect.
 3. In app select **Custom relay**, set a reachable URL, and connect.
-4. Build with `READANYWHERE_DEFAULT_RELAY_URL=https://your-service.koyeb.app` and select **ReadArc relay**.
+4. Build with `READARC_DEFAULT_RELAY_URL=https://your-service.koyeb.app` and select **ReadArc relay**.
 5. Restart app and verify auto-connect is attempted after a successful connection.
 6. Press **Disconnect** and verify auto-connect is disabled.
 
@@ -122,7 +122,7 @@ macOS DMG/PKG build
 
 ## Sprint 4.2: подключение по коду
 
-Добавлен MVP-pairing: первое устройство создаёт 6-значный код подключения, новое устройство вводит код или вставляет `readanywhere://pair?...` приглашение и автоматически получает `accountId` и relay endpoint. Ручной ввод `accountId` оставлен только как fallback для разработки. Relay хранит pairing-коды только в памяти и удаляет их после первого использования или истечения срока. Подробности: `docs/sprint_04_2_pairing_codes_ru.md`.
+Добавлен MVP-pairing: первое устройство создаёт 6-значный код подключения, новое устройство вводит код или вставляет `readarc://pair?...` приглашение и автоматически получает `accountId` и relay endpoint. Ручной ввод `accountId` оставлен только как fallback для разработки. Relay хранит pairing-коды только в памяти и удаляет их после первого использования или истечения срока. Подробности: `docs/sprint_04_2_pairing_codes_ru.md`.
 
 ## TXT locator cross-device regression
 

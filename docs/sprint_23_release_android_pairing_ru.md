@@ -15,9 +15,9 @@
 
 Android build number также получает `github.run_number`, чтобы APK можно было ставить поверх предыдущей сборки.
 
-### 2. Очистка старых Read Anywhere релизов
+### 2. Очистка старых ReadArc релизов
 
-Workflow при публикации релиза удаляет legacy-релизы и assets с именами `Read Anywhere`, `ReadAnywhere`, `read_anywhere`, `read-anywhere`.
+Workflow при публикации релиза удаляет legacy-релизы и assets с именами `ReadArc`, `ReadArc`, `readarc`, `readarc`.
 
 Для rolling-релиза `main-latest` workflow теперь также удаляет старые assets перед загрузкой новых, чтобы страница релиза не превращалась в свалку старых snapshot-файлов.
 

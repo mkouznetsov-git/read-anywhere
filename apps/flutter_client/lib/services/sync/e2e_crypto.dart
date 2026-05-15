@@ -13,9 +13,8 @@ class BinaryEncryptionResult {
   final Uint8List cipherBytes;
 }
 
-class ReadAnywhereE2eCrypto {
-  static const version = 'readanywhere-e2e-v2';
-  static const legacyVersion = 'readanywhere-e2e-v1';
+class ReadArcE2eCrypto {
+  static const version = 'readarc-e2e-v2';
   static final _algorithm = AesGcm.with256bits();
   static final _random = Random.secure();
 
@@ -85,7 +84,7 @@ class ReadAnywhereE2eCrypto {
     if (e2eeRaw is! Map) return encryptedPayload;
     final e2ee = Map<String, dynamic>.from(e2eeRaw);
     final payloadVersion = e2ee['v'];
-    if (payloadVersion != version && payloadVersion != legacyVersion) {
+    if (payloadVersion != version) {
       throw StateError('Неподдерживаемая версия E2E payload: $payloadVersion');
     }
     final keyBytes = _decodeBase64UrlNoPadding(accountEncryptionKey);
@@ -96,40 +95,28 @@ class ReadAnywhereE2eCrypto {
     final cipherText = _decodeBase64UrlNoPadding(e2ee['ciphertext']?.toString() ?? '');
     final mac = _decodeBase64UrlNoPadding(e2ee['mac']?.toString() ?? '');
 
-    if (payloadVersion == version) {
-      final eventId = e2ee['eventId']?.toString() ?? '';
-      final issuedAt = e2ee['issuedAt']?.toString() ?? '';
-      final signerDeviceId = e2ee['signerDeviceId']?.toString() ?? deviceId;
-      final expected = _signEnvelope(
-        keyBytes: keyBytes,
-        accountId: accountId,
-        deviceId: signerDeviceId,
-        eventType: eventType,
-        eventId: eventId,
-        issuedAt: issuedAt,
-        nonce: e2ee['nonce']?.toString() ?? '',
-        ciphertext: e2ee['ciphertext']?.toString() ?? '',
-        mac: e2ee['mac']?.toString() ?? '',
-      );
-      final actual = e2ee['signature']?.toString() ?? '';
-      if (!_constantTimeStringEquals(expected, actual)) {
-        throw StateError('Подпись sync-события не прошла проверку');
-      }
-      final clearText = await _algorithm.decrypt(
-        SecretBox(cipherText, nonce: nonce, mac: Mac(mac)),
-        secretKey: SecretKey(keyBytes),
-        aad: utf8.encode(_aadText(eventType, accountId, signerDeviceId, eventId, issuedAt)),
-      );
-      final decoded = jsonDecode(utf8.decode(clearText));
-      if (decoded is! Map) throw StateError('E2E payload is not a JSON object');
-      return Map<String, dynamic>.from(decoded);
+    final eventId = e2ee['eventId']?.toString() ?? '';
+    final issuedAt = e2ee['issuedAt']?.toString() ?? '';
+    final signerDeviceId = e2ee['signerDeviceId']?.toString() ?? deviceId;
+    final expected = _signEnvelope(
+      keyBytes: keyBytes,
+      accountId: accountId,
+      deviceId: signerDeviceId,
+      eventType: eventType,
+      eventId: eventId,
+      issuedAt: issuedAt,
+      nonce: e2ee['nonce']?.toString() ?? '',
+      ciphertext: e2ee['ciphertext']?.toString() ?? '',
+      mac: e2ee['mac']?.toString() ?? '',
+    );
+    final actual = e2ee['signature']?.toString() ?? '';
+    if (!_constantTimeStringEquals(expected, actual)) {
+      throw StateError('Подпись sync-события не прошла проверку');
     }
-
-    // Backward compatibility with v1 clients during rolling updates.
     final clearText = await _algorithm.decrypt(
       SecretBox(cipherText, nonce: nonce, mac: Mac(mac)),
       secretKey: SecretKey(keyBytes),
-      aad: utf8.encode(eventType),
+      aad: utf8.encode(_aadText(eventType, accountId, signerDeviceId, eventId, issuedAt)),
     );
     final decoded = jsonDecode(utf8.decode(clearText));
     if (decoded is! Map) throw StateError('E2E payload is not a JSON object');
@@ -174,7 +161,7 @@ class ReadAnywhereE2eCrypto {
       aadText: aadText,
     );
     header['e2ee'] = {
-      'v': 'readanywhere-binary-e2e-v1',
+      'v': 'readarc-binary-e2e-v1',
       'alg': 'AES-256-GCM',
       'eventId': eventId,
       'issuedAt': issuedAt,
@@ -198,7 +185,8 @@ class ReadAnywhereE2eCrypto {
     final e2eeRaw = header['e2ee'];
     if (e2eeRaw is! Map) throw StateError('Binary frame is not encrypted');
     final e2ee = Map<String, dynamic>.from(e2eeRaw);
-    if (e2ee['v'] != 'readanywhere-binary-e2e-v1') {
+    final binaryVersion = e2ee['v']?.toString() ?? '';
+    if (binaryVersion != 'readarc-binary-e2e-v1') {
       throw StateError('Неподдерживаемая версия binary E2E: ${e2ee['v']}');
     }
     final keyBytes = _decodeBase64UrlNoPadding(accountEncryptionKey);
@@ -261,8 +249,9 @@ class ReadAnywhereE2eCrypto {
     return e2ee['signerDeviceId']?.toString();
   }
 
-  static String _aadText(String eventType, String accountId, String deviceId, String eventId, String issuedAt) =>
-      'readanywhere|$eventType|$accountId|$deviceId|$eventId|$issuedAt';
+  static String _aadText(String eventType, String accountId, String deviceId, String eventId, String issuedAt) {
+    return 'readarc|$eventType|$accountId|$deviceId|$eventId|$issuedAt';
+  }
 
   static String _signEnvelope({
     required List<int> keyBytes,
@@ -274,9 +263,10 @@ class ReadAnywhereE2eCrypto {
     required String nonce,
     required String ciphertext,
     required String mac,
+    String protocolVersion = version,
   }) {
     final input = [
-      version,
+      protocolVersion,
       accountId,
       deviceId,
       eventType,
@@ -292,7 +282,7 @@ class ReadAnywhereE2eCrypto {
 
   static String _binaryAadText(Map<String, dynamic> header, String eventId, String issuedAt) {
     final sanitized = Map<String, dynamic>.from(header)..remove('e2ee');
-    return 'readanywhere-binary|$eventId|$issuedAt|${_canonicalJson(sanitized)}';
+    return 'readarc-binary|$eventId|$issuedAt|${_canonicalJson(sanitized)}';
   }
 
   static String _signBinaryFrame({
@@ -305,9 +295,10 @@ class ReadAnywhereE2eCrypto {
     required String nonce,
     required String mac,
     required String aadText,
+    String protocolVersion = 'readarc-binary-e2e-v1',
   }) {
     final input = [
-      'readanywhere-binary-e2e-v1',
+      protocolVersion,
       accountId,
       deviceId,
       eventType,

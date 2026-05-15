@@ -30,8 +30,8 @@ Set: Entry, ":CFBundleDisplayName", Does Not Exist
 2. `--dart-define` теперь передаётся условно:
 
 ```bash
-if [[ -n "${READANYWHERE_DEFAULT_RELAY_URL:-}" ]]; then
-  flutter build macos --release --dart-define="READANYWHERE_DEFAULT_RELAY_URL=${READANYWHERE_DEFAULT_RELAY_URL}"
+if [[ -n "${READARC_DEFAULT_RELAY_URL:-}" ]]; then
+  flutter build macos --release --dart-define="READARC_DEFAULT_RELAY_URL=${READARC_DEFAULT_RELAY_URL}"
 else
   flutter build macos --release
 fi

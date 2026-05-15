@@ -41,7 +41,7 @@ TXT-reader снова стал единым плавным вертикальн�
 Добавлено:
 
 - кнопка «Создать QR-код» рядом с «Создать код подключения»;
-- QR содержит обычную pairing-ссылку `readanywhere://pair?...`;
+- QR содержит обычную pairing-ссылку `readarc://pair?...`;
 - на Android/iOS доступна кнопка «Сканировать QR»;
 - AndroidManifest получает `android.permission.CAMERA` при генерации платформы.
 
