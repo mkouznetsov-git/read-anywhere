@@ -1537,7 +1537,7 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
                                   padding: const EdgeInsets.fromLTRB(14, 18, 14, 32),
                                   cacheExtent: 3600,
                                   children: [
-                                    Center(child: _DocxPageView(document: document)),
+                                    _DocxPageView(document: document),
                                   ],
                                 ),
                               );
@@ -1570,47 +1570,50 @@ class _DocxPageView extends StatelessWidget {
 
   final _Fb2Document document;
 
-  List<List<_Fb2Block>> _pages() {
-    final pages = <List<_Fb2Block>>[];
-    var current = <_Fb2Block>[];
-    for (final block in document.blocks) {
-      if (block.plainText == _officePageBreakMarker) {
-        if (current.any((item) => item.plainText.trim().isNotEmpty || item.kind == _Fb2BlockKind.image || item.kind == _Fb2BlockKind.table)) {
-          pages.add(List.unmodifiable(current));
-        }
-        current = <_Fb2Block>[];
-        continue;
-      }
-      current.add(block);
-    }
-    if (current.any((item) => item.plainText.trim().isNotEmpty || item.kind == _Fb2BlockKind.image || item.kind == _Fb2BlockKind.table)) {
-      pages.add(List.unmodifiable(current));
-    }
-    return pages.isEmpty ? <List<_Fb2Block>>[const <_Fb2Block>[]] : List.unmodifiable(pages);
+  List<_Fb2Block> _visibleBlocks() {
+    final result = document.blocks.where((block) => block.plainText != _officePageBreakMarker).toList(growable: false);
+    if (result.isNotEmpty) return result;
+    return const [
+      _Fb2Block.paragraph([
+        _Fb2Inline('DOCX открыт, но в документе не найдено отображаемое содержимое.'),
+      ]),
+    ];
   }
 
   @override
   Widget build(BuildContext context) {
-    final pages = _pages();
     return LayoutBuilder(
       builder: (context, constraints) {
         final viewportWidth = constraints.maxWidth.isFinite && constraints.maxWidth > 0
             ? constraints.maxWidth
             : MediaQuery.of(context).size.width;
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            for (var index = 0; index < pages.length; index++) ...[
-              _DocxFixedPaperPage(
-                document: document,
-                blocks: pages[index],
-                viewportWidth: viewportWidth,
-                pageIndex: index,
-                pageCount: pages.length,
-              ),
-              if (index < pages.length - 1) const SizedBox(height: 22),
-            ],
-          ],
+        final safeViewportWidth = viewportWidth.isFinite && viewportWidth > 0 ? viewportWidth : 360.0;
+        final pageWidth = document.officePageFormat.logicalPageWidth;
+        final paper = SizedBox(
+          width: pageWidth,
+          child: _DocxPaperPage(
+            document: document,
+            blocks: _visibleBlocks(),
+            pageIndex: 0,
+            pageCount: 1,
+            scale: 1.0,
+          ),
+        );
+
+        final page = pageWidth <= safeViewportWidth
+            ? Center(child: paper)
+            : SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                physics: const ClampingScrollPhysics(),
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 14),
+                  child: paper,
+                ),
+              );
+
+        return SizedBox(
+          width: safeViewportWidth,
+          child: page,
         );
       },
     );
