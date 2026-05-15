@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Any, DefaultDict, Dict, List
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.websockets import WebSocketState
 
-app = FastAPI(title="ReadArc Rendezvous Relay", version="0.3.1")
+app = FastAPI(title="ReadArc Rendezvous Relay", version="0.3.2")
 
 # The relay never stores books or decrypted metadata. It keeps online websocket
 # rooms in RAM, caches the latest encrypted metadata snapshot in RAM, and since
@@ -60,7 +60,20 @@ async def root() -> JSONResponse:
 
 
 @app.get("/health")
-async def health() -> JSONResponse:
+async def health() -> PlainTextResponse:
+    # Public liveness probe: intentionally short and data-free.  The previous
+    # endpoint exposed room/account/device counters, which is unnecessary for a
+    # health check and noisy for curl/users.
+    await _cleanup_expired_pairing_codes()
+    return PlainTextResponse("ok\n", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/debug/state")
+async def debug_state(request: Request) -> JSONResponse:
+    token = os.environ.get("READARC_RELAY_DEBUG_TOKEN", "").strip()
+    supplied = request.headers.get("X-ReadArc-Debug-Token", "").strip()
+    if not token or not secrets.compare_digest(token, supplied):
+        return JSONResponse({"ok": False, "message": "not found"}, status_code=404)
     await _cleanup_expired_pairing_codes()
     async with _lock:
         rooms = {

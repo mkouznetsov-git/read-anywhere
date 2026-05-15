@@ -19,12 +19,67 @@ class StorageService {
   final _uuid = const Uuid();
 
   Future<Directory> appDir() async {
-    final dir = await getApplicationDocumentsDirectory();
-    final appDirectory = Directory(p.join(dir.path, 'ReadAnywhere'));
+    // Keep the on-device library in a stable application data directory.  Early
+    // ReadArc builds used the historical folder name `ReadAnywhere`; retaining
+    // it avoids losing the library during ordinary app updates.  If a future or
+    // older build created `ReadArc` in another path, copy it into the stable
+    // folder instead of starting with an empty library.
+    final documents = await getApplicationDocumentsDirectory();
+    final appDirectory = Directory(p.join(documents.path, 'ReadAnywhere'));
+    await _restoreAppDataIfPrimaryIsEmpty(appDirectory, documents.path);
     if (!await appDirectory.exists()) {
       await appDirectory.create(recursive: true);
     }
     return appDirectory;
+  }
+
+  Future<void> _restoreAppDataIfPrimaryIsEmpty(Directory primary, String documentsPath) async {
+    try {
+      final primaryManifest = File(p.join(primary.path, 'manifest.json'));
+      if (await primaryManifest.exists()) return;
+
+      final candidates = <Directory>[
+        Directory(p.join(documentsPath, 'ReadArc')),
+        Directory(p.join(documentsPath, 'ReadAnywhere')),
+      ];
+      try {
+        final support = await getApplicationSupportDirectory();
+        candidates.addAll([
+          Directory(p.join(support.path, 'ReadArc')),
+          Directory(p.join(support.path, 'ReadAnywhere')),
+        ]);
+      } catch (_) {
+        // Some platforms may not expose an application support directory.
+      }
+
+      for (final candidate in candidates) {
+        if (candidate.path == primary.path) continue;
+        final manifest = File(p.join(candidate.path, 'manifest.json'));
+        if (!await manifest.exists()) continue;
+        await primary.create(recursive: true);
+        await _copyDirectoryContents(candidate, primary);
+        return;
+      }
+    } catch (_) {
+      // Never block startup because best-effort migration failed.
+    }
+  }
+
+  Future<void> _copyDirectoryContents(Directory source, Directory target) async {
+    if (!await source.exists()) return;
+    if (!await target.exists()) await target.create(recursive: true);
+    await for (final entity in source.list(recursive: false, followLinks: false)) {
+      final destinationPath = p.join(target.path, p.basename(entity.path));
+      if (entity is Directory) {
+        await _copyDirectoryContents(entity, Directory(destinationPath));
+      } else if (entity is File) {
+        final destination = File(destinationPath);
+        if (!await destination.parent.exists()) await destination.parent.create(recursive: true);
+        if (!await destination.exists()) {
+          await entity.copy(destination.path);
+        }
+      }
+    }
   }
 
   Future<Directory> booksDir() async {

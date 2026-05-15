@@ -84,7 +84,7 @@ class RelayClient {
     // WebSocketChannel.connect() creates the channel synchronously. Waiting for
     // ready is important: otherwise the app may briefly mark sync as connected
     // even when the relay/tunnel is offline.
-    await channel.ready.timeout(const Duration(seconds: 5));
+    await channel.ready.timeout(const Duration(seconds: 12));
     _subscription = channel.stream.listen(
       _handleRawMessage,
       onError: _incoming.addError,

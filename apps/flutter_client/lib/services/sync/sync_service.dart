@@ -229,6 +229,7 @@ class SyncService {
   bool _reconnectInProgress = false;
   bool _relayUnavailableLogged = false;
   int _reconnectAttempt = 0;
+  int _healthMisses = 0;
   String? _lastRelayUrl;
 
   HttpServer? _directFileServer;
@@ -319,6 +320,7 @@ class SyncService {
       rethrow;
     }
     _reconnectAttempt = 0;
+    _healthMisses = 0;
     _relayUnavailableLogged = false;
     _appendLog('Подключено к $relayUrl');
     _setState(
@@ -338,6 +340,7 @@ class SyncService {
     _healthTimer = null;
     _metadataRefreshTimer?.cancel();
     _metadataRefreshTimer = null;
+    if (manual) _healthMisses = 0;
     if (manual) {
       _manualDisconnect = true;
       _reconnectTimer?.cancel();
@@ -406,8 +409,21 @@ class SyncService {
   Future<void> _checkRelayHealth(String relayUrl) async {
     if (_manualDisconnect || !state.value.connected) return;
     try {
-      await _probeRelayHealth(relayUrl, timeout: const Duration(seconds: 4));
+      await _probeRelayHealth(relayUrl, timeout: const Duration(seconds: 5));
+      if (_healthMisses != 0) {
+        _healthMisses = 0;
+        _setState(state.value.copyWith(statusText: 'Подключено'));
+      }
     } catch (error) {
+      _healthMisses += 1;
+      // A single failed HTTP probe does not mean the websocket relay is down:
+      // mobile radios, DNS caches and captive network transitions can drop one
+      // request while the relay itself is healthy. Disconnect only after a few
+      // consecutive misses.
+      if (_healthMisses < 3) {
+        _setState(state.value.copyWith(statusText: 'Подключено. Проверяем relay...'));
+        return;
+      }
       await _handleRelayDisconnected(error);
     }
   }

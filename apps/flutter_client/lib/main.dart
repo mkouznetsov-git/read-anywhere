@@ -1582,40 +1582,49 @@ class _DocxPageView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final viewportWidth = constraints.maxWidth.isFinite && constraints.maxWidth > 0
-            ? constraints.maxWidth
-            : MediaQuery.of(context).size.width;
-        final safeViewportWidth = viewportWidth.isFinite && viewportWidth > 0 ? viewportWidth : 360.0;
-        final pageWidth = document.officePageFormat.logicalPageWidth;
-        final paper = SizedBox(
-          width: pageWidth,
-          child: _DocxPaperPage(
-            document: document,
-            blocks: _visibleBlocks(),
-            pageIndex: 0,
-            pageCount: 1,
-            scale: 1.0,
+    final width = MediaQuery.of(context).size.width;
+    final compact = width < 560;
+    // Safety rollback: render the parsed DOCX in a conventional, visible paper
+    // card. This deliberately avoids page-scaling, horizontal viewports and
+    // runtime measurement until the professional page engine is hardened.
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 860),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            border: Border.all(color: const Color(0xFFE0E0E0), width: 0.8),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.18),
+                blurRadius: 22,
+                offset: const Offset(0, 10),
+              ),
+            ],
           ),
-        );
-
-        final page = pageWidth <= safeViewportWidth
-            ? Center(child: paper)
-            : SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                physics: const ClampingScrollPhysics(),
-                child: Padding(
-                  padding: const EdgeInsets.only(right: 14),
-                  child: paper,
-                ),
-              );
-
-        return SizedBox(
-          width: safeViewportWidth,
-          child: page,
-        );
-      },
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: compact ? 720 : document.officePageFormat.logicalPageHeight),
+            child: Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: compact ? 28 : document.officePageFormat.logicalLeftMargin.clamp(42.0, 88.0).toDouble(),
+                vertical: compact ? 34 : document.officePageFormat.logicalTopMargin.clamp(42.0, 88.0).toDouble(),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (document.officeHeaderBlocks.isNotEmpty)
+                    _DocxHeaderFooterView(blocks: document.officeHeaderBlocks, isHeader: true),
+                  for (final block in _visibleBlocks()) _DocxBlockView(block: block),
+                  if (document.officeFooterBlocks.isNotEmpty) ...[
+                    const SizedBox(height: 28),
+                    _DocxHeaderFooterView(blocks: document.officeFooterBlocks, isHeader: false),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -7772,24 +7781,13 @@ class _SyncScreenState extends State<SyncScreen> {
                       ],
                     ),
                     const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: _pairingBusy ? null : _createPairingInvite,
-                            icon: const Icon(Icons.pin_rounded),
-                            label: const Text('Создать короткий код'),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: _pairingBusy ? null : _claimPairingInvite,
-                            icon: const Icon(Icons.login_rounded),
-                            label: const Text('Подключиться по коду'),
-                          ),
-                        ),
-                      ],
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: OutlinedButton.icon(
+                        onPressed: _pairingBusy ? null : _createPairingInvite,
+                        icon: const Icon(Icons.pin_rounded),
+                        label: const Text('Создать код подключения'),
+                      ),
                     ),
                     if (_pairingInvite != null) ...[
                       const SizedBox(height: 16),
@@ -7829,6 +7827,24 @@ class _SyncScreenState extends State<SyncScreen> {
                       decoration: const InputDecoration(
                         labelText: 'Код или приглашение',
                         helperText: 'Запасной вариант: 483-921 или полное приглашение readarc://pair?...',
+                      ),
+                      onSubmitted: (_) {
+                        if (!_pairingBusy) unawaited(_claimPairingInvite());
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: FilledButton.icon(
+                        onPressed: _pairingBusy ? null : _claimPairingInvite,
+                        icon: _pairingBusy
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.login_rounded),
+                        label: const Text('Подключиться по коду'),
                       ),
                     ),
                   ],
