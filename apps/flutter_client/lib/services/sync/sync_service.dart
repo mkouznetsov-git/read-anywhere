@@ -577,9 +577,8 @@ class SyncService {
       'ownerDeviceId': manifest.deviceId,
       'ownerDeviceName': manifest.deviceName,
       'ownerDevicePublicKey': manifest.deviceSigningPublicKey,
-      // Transitional fallback for the 6-digit code path. QR/invite links carry
-      // this key client-to-client, so a relay only has to see it when the user
-      // chooses manual code entry instead of QR.
+      // The short-code pairing flow stores the one-time invite payload on the
+      // official relay until it is claimed or expires.
       'accountEncryptionKey': manifest.accountEncryptionKey,
       'relayUrl': settings.effectiveRelayUrl,
       'expiresSeconds': ttl.inSeconds,
@@ -598,22 +597,10 @@ class SyncService {
             (expiresAtSeconds * 1000).round(),
             isUtc: true,
           );
-    final inviteLink = Uri(
-      scheme: 'readarc',
-      host: 'pair',
-      queryParameters: {
-        'v': '2',
-        'mode': settings.endpointMode.name,
-        'relay': settings.effectiveRelayUrl,
-        'code': code,
-        'accountId': manifest.accountId,
-        'ownerDeviceId': manifest.deviceId,
-        'deviceName': manifest.deviceName,
-        'ownerDevicePublicKey': manifest.deviceSigningPublicKey,
-        'key': manifest.accountEncryptionKey,
-        'expiresAt': expiresAt.toIso8601String(),
-      },
-    ).toString();
+    // QR and manual entry now carry only the short one-time code. The relay
+    // stores the full invite payload for a few minutes and returns it from
+    // /pairing/claim, so users do not have to scan/type long unreadable links.
+    final inviteLink = code;
     _appendLog('Создан pairing-код $code');
     return PairingInvite(
       code: code,
@@ -661,12 +648,7 @@ class SyncService {
       if (!parsed.hasEmbeddedAccountInvite || parsed.embeddedInviteExpired) {
         rethrow;
       }
-      // QR-v2 carries the full encrypted account invite. This keeps pairing
-      // working when the relay was restarted, a Tailscale/Funnel endpoint was
-      // corrected between creating and scanning the code, or a mobile client
-      // accidentally tries an older relay first. Manual 6-digit codes still use
-      // the relay as a one-time gate.
-      _appendLog('Relay не принял короткий код, используем полное QR-приглашение: $error');
+      _appendLog('Relay не принял короткий код: $error');
     }
 
     final accountId = response?['accountId']?.toString() ?? parsed.accountId ?? '';

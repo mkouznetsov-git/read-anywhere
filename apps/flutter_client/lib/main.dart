@@ -4031,7 +4031,9 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
         final tcPr = innerTagBody(cellXml, 'tcPr');
         final spanTag = firstTag(tcPr, 'gridSpan') ?? '';
         final span = (int.tryParse(wordVal(spanTag) ?? '') ?? 1).clamp(1, 12).toInt();
-        final isVMergeContinuation = RegExp(r'''<w:vMerge\b[^>]*(?:/>|[^>]*(?:w:)?val\s*=\s*["']continue["'][^>]*/?>''', caseSensitive: false).hasMatch(tcPr);
+        final vMergeTag = firstTag(tcPr, 'vMerge');
+        final vMergeValue = vMergeTag == null ? null : wordVal(vMergeTag)?.toLowerCase();
+        final isVMergeContinuation = vMergeTag != null && (vMergeValue == null || vMergeValue.isEmpty || vMergeValue == 'continue');
         final cellText = isVMergeContinuation
             ? ''
             : textFromXml(cellXml)
@@ -7578,18 +7580,16 @@ class _SyncScreenState extends State<SyncScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             QrImageView(
-              data: invite.inviteLink,
+              data: invite.code,
               version: QrVersions.auto,
               size: 260,
               backgroundColor: Colors.white,
             ),
             const SizedBox(height: 12),
-            Text('Устройство: ${invite.ownerDeviceName}'),
-            const SizedBox(height: 4),
             Text('Код: ${invite.displayCode}'),
             const SizedBox(height: 4),
             Text(
-              'Отсканируйте QR-код на новом устройстве в ReadArc.',
+              'Отсканируйте QR на подключаемом устройстве. В поле ввода будет подставлен только 6-значный код.',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodySmall,
             ),
@@ -7605,6 +7605,18 @@ class _SyncScreenState extends State<SyncScreen> {
     );
   }
 
+  String _pairingCodeFromScannedValue(String scanned) {
+    final raw = scanned.trim();
+    if (raw.startsWith('readarc://')) {
+      final uri = Uri.tryParse(raw);
+      final code = uri == null ? '' : (uri.queryParameters['code'] ?? '');
+      final digits = code.replaceAll(RegExp(r'[^0-9]'), '');
+      if (digits.length == 6) return digits;
+    }
+    final digits = raw.replaceAll(RegExp(r'[^0-9]'), '');
+    return digits.length >= 6 ? digits.substring(0, 6) : digits;
+  }
+
   Future<void> _scanPairingQrCode() async {
     if (!(Platform.isAndroid || Platform.isIOS)) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -7616,7 +7628,7 @@ class _SyncScreenState extends State<SyncScreen> {
       MaterialPageRoute(builder: (_) => const _PairingQrScannerScreen()),
     );
     if (scanned == null || scanned.trim().isEmpty || !mounted) return;
-    _pairingInputController.text = scanned.trim();
+    _pairingInputController.text = _pairingCodeFromScannedValue(scanned);
     await _claimPairingInvite();
   }
 
