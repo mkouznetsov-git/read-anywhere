@@ -29,15 +29,23 @@ class BookImportService {
   ];
 
   Future<BookRecord?> pickAndImport() async {
+    // Android document providers often do not advertise niche extensions such as
+    // .fb2 with a useful MIME type. FileType.custom can therefore hide valid FB2
+    // files. On Android we let the picker show all files and validate the
+    // extension ourselves after selection.
     final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: supportedExtensions,
+      type: Platform.isAndroid ? FileType.any : FileType.custom,
+      allowedExtensions: Platform.isAndroid ? null : supportedExtensions,
       allowMultiple: false,
       withData: false,
     );
     if (result == null || result.files.isEmpty) return null;
     final path = result.files.single.path;
     if (path == null) return null;
+    final extension = p.extension(path).replaceFirst('.', '').toLowerCase();
+    if (!supportedExtensions.contains(extension)) {
+      throw UnsupportedError('Формат .$extension пока не поддерживается ReadArc');
+    }
     return importFile(File(path));
   }
 

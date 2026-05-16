@@ -6,10 +6,10 @@
 
 ## ReadArc-only cleanup
 
-- Удалены оставшиеся `ReadAnywhere` / `readanywhere` / `READANYWHERE` / `read-anywhere` / `read_anywhere` строки из кода, workflow, скриптов и документации.
-- Убрана совместимость со старыми `readanywhere://` pairing links.
+- Удалены оставшиеся остатки прежнего имени проекта строки из кода, workflow, скриптов и документации.
+- Убрана совместимость со старыми pairing links прежнего имени проекта.
 - Убрана совместимость со старыми E2E payload версиями.
-- Убрана миграция данных из папки `ReadAnywhere`.
+- Убрана миграция данных из папки прежнего имени проекта.
 - Каноническая локальная папка данных разработки/тестирования: `ReadArc`.
 - Каноническая переменная relay endpoint: `READARC_DEFAULT_RELAY_URL`.
 
@@ -48,7 +48,7 @@ flutter test
 Проверка отсутствия старого имени:
 
 ```bash
-grep -RIn "ReadAnywhere\|readanywhere\|READANYWHERE\|read-anywhere\|read_anywhere" .
+grep -RIn "<legacy-project-name-patterns>" .
 ```
 
 Ожидаемо: ничего не найдено.

@@ -374,18 +374,26 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ),
         title: const Text('ReadArc'),
         actions: [
-          IconButton(
-            tooltip: 'Скачать всю библиотеку на устройство',
-            onPressed: (_bulkDownloadBusy || books.where((book) => !book.isDownloaded && !book.isDeleted).isEmpty)
-                ? null
-                : () => _downloadWholeLibrary(books),
-            icon: _bulkDownloadBusy
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.download_for_offline_outlined),
+          ValueListenableBuilder<SyncStateSnapshot>(
+            valueListenable: widget.sync.state,
+            builder: (context, syncState, _) {
+              final hasRemoteBooks = books.any((book) => !book.isDownloaded && !book.isDeleted);
+              return IconButton(
+                tooltip: syncState.connected
+                    ? 'Скачать всю библиотеку на устройство'
+                    : 'Скачивание недоступно: relay не подключен',
+                onPressed: (!syncState.connected || _bulkDownloadBusy || !hasRemoteBooks)
+                    ? null
+                    : () => _downloadWholeLibrary(books),
+                icon: _bulkDownloadBusy
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.download_for_offline_outlined),
+              );
+            },
           ),
           ValueListenableBuilder<SyncStateSnapshot>(
             valueListenable: widget.sync.state,
@@ -447,7 +455,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         return _BookCard(
                           book: book,
                           transfer: transfer,
-                          onDownload: !book.isDownloaded && transfer?.active != true
+                          onDownload: syncState.connected && !book.isDownloaded && transfer?.active != true
                               ? () => _downloadBook(book)
                               : null,
                           onCancelDownload: transfer?.active == true
@@ -737,9 +745,12 @@ class ReaderScreen extends StatelessWidget {
       case 'epub':
         return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.epub);
       case 'docx':
-        return _DocxReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.docx);
+        // Stabilization path: use the proven rich reader while the professional
+        // fixed-page DOCX engine is being rebuilt. This avoids the blank beige
+        // page regression and keeps DOCX readable on macOS and Android.
+        return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.docx);
       case 'doc':
-        return _DocxReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.doc);
+        return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.doc);
       case 'chm':
         return _ChmSafeReaderScreen(book: book, storage: storage, sync: sync);
       case 'djvu':
@@ -3236,6 +3247,8 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
 
   final orderedPaths = <String>[];
   final imagePaths = <String, Uint8List>{};
+  final epubNavPaths = <String>{};
+  final epubCoverImagePaths = <String>{};
   final linkTargets = <String, int>{};
 
   void addTarget(String path, String? anchor, int blockIndex) {
@@ -3261,9 +3274,12 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
     final anchors = <String>[];
     final id = _attr(attrs, 'id') ?? _attr(attrs, 'xml:id') ?? _attr(attrs, 'name');
     if (id != null && id.isNotEmpty) anchors.add(id);
-    for (final match in RegExp(r'''<a\b([^>]*)>''', caseSensitive: false).allMatches(body)) {
-      final anchorAttrs = match.group(1) ?? '';
-      final anchor = _attr(anchorAttrs, 'id') ?? _attr(anchorAttrs, 'name') ?? _attr(anchorAttrs, 'xml:id');
+    // EPUB anchors are often placed on span/div/section nodes inside the visible
+    // block, not only on <a>. Map all in-block id/name/xml:id attributes to the
+    // enclosing render block so internal links land much closer to the target.
+    for (final match in RegExp(r'''<[^>]+>''', caseSensitive: false).allMatches(body)) {
+      final tag = match.group(0) ?? '';
+      final anchor = _attr(tag, 'id') ?? _attr(tag, 'name') ?? _attr(tag, 'xml:id');
       if (anchor != null && anchor.isNotEmpty) anchors.add(anchor);
     }
     return anchors.toSet().toList(growable: false);
@@ -3274,28 +3290,47 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
     final opfText = fileText(opf);
     final baseDir = _zipDirName(opfPath);
     final manifest = <String, String>{};
+    final coverImageIds = <String>{};
+    for (final meta in RegExp(r'<meta\b[^>]*>', caseSensitive: false).allMatches(opfText)) {
+      final tag = meta.group(0) ?? '';
+      final name = (_xmlAttr(tag, 'name') ?? '').toLowerCase();
+      final content = _xmlAttr(tag, 'content');
+      if (name == 'cover' && content != null && content.isNotEmpty) coverImageIds.add(content);
+    }
     for (final match in RegExp(r'<item\b[^>]*>', caseSensitive: false).allMatches(opfText)) {
       final tag = match.group(0) ?? '';
       final id = _xmlAttr(tag, 'id');
       final href = _xmlAttr(tag, 'href');
       final mediaType = (_xmlAttr(tag, 'media-type') ?? '').toLowerCase();
+      final properties = (_xmlAttr(tag, 'properties') ?? '').toLowerCase();
       if (id == null || href == null) continue;
       final path = _joinZipPath(baseDir, href);
       final lower = href.toLowerCase();
+      final idLower = id.toLowerCase();
       final looksReadable = mediaType.contains('xhtml') || mediaType.contains('html') || lower.endsWith('.xhtml') || lower.endsWith('.html') || lower.endsWith('.htm');
       final looksImage = mediaType.startsWith('image/') || lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.gif') || lower.endsWith('.webp');
-      if (looksReadable) manifest[id] = path;
+      if (looksReadable) {
+        manifest[id] = path;
+        if (properties.split(RegExp(r'\s+')).contains('nav') || idLower == 'toc' || idLower == 'nav' || lower.contains('/toc.') || lower.contains('/nav.')) {
+          epubNavPaths.add(path);
+        }
+      }
       if (looksImage) {
         final image = findFile(path);
-        if (image != null) imagePaths[path] = _archiveFileBytes(image);
+        if (image != null) {
+          imagePaths[path] = _archiveFileBytes(image);
+          if (properties.contains('cover-image') || coverImageIds.contains(id) || idLower == 'cover' || idLower == 'cover-image' || lower.contains('cover')) {
+            epubCoverImagePaths.add(path);
+          }
+        }
       }
     }
     for (final match in RegExp(r'<itemref\b[^>]*>', caseSensitive: false).allMatches(opfText)) {
       final idref = _xmlAttr(match.group(0) ?? '', 'idref');
       final path = idref == null ? null : manifest[idref];
-      if (path != null) orderedPaths.add(path);
+      if (path != null && !epubNavPaths.contains(path)) orderedPaths.add(path);
     }
-    if (orderedPaths.isEmpty) orderedPaths.addAll(manifest.values);
+    if (orderedPaths.isEmpty) orderedPaths.addAll(manifest.values.where((path) => !epubNavPaths.contains(path)));
   }
 
   if (orderedPaths.isEmpty) {
@@ -3310,6 +3345,13 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
   }
 
   final blocks = <_Fb2Block>[];
+  final addedCoverImages = <String>{};
+  for (final coverPath in epubCoverImagePaths) {
+    final image = imagePaths[coverPath] ?? (findFile(coverPath) == null ? null : _archiveFileBytes(findFile(coverPath)!));
+    if (image != null && addedCoverImages.add(coverPath)) {
+      blocks.add(_Fb2Block.image(image));
+    }
+  }
   for (final path in orderedPaths) {
     final normalizedPath = _joinZipPath('', path);
     final file = findFile(normalizedPath);
@@ -3337,14 +3379,21 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
         addTarget(normalizedPath, anchor, targetIndex);
       }
 
-      for (final img in RegExp(r'''<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>''', caseSensitive: false).allMatches(body)) {
-        final src = _normalizeHtmlHref(img.group(1) ?? '', normalizedPath);
+      var blockAddedImage = false;
+      for (final img in RegExp(r'''<(?:img|image)\b[^>]*>''', caseSensitive: false).allMatches(body)) {
+        final tagText = img.group(0) ?? '';
+        final srcRaw = _xmlAttr(tagText, 'src') ?? _xmlAttr(tagText, 'href') ?? _xmlAttr(tagText, 'xlink:href') ?? _xmlAttr(tagText, 'l:href');
+        if (srcRaw == null || srcRaw.isEmpty) continue;
+        final src = _normalizeHtmlHref(srcRaw, normalizedPath);
         final image = imagePaths[src] ?? (findFile(src) == null ? null : _archiveFileBytes(findFile(src)!));
-        if (image != null) blocks.add(_Fb2Block.image(image, anchors: anchors));
+        if (image != null) {
+          blocks.add(_Fb2Block.image(image, anchors: anchors));
+          blockAddedImage = true;
+        }
       }
       final inlines = _parseHtmlInlines(body, normalizedPath);
       final text = inlines.map((item) => item.text).join().replaceAll(RegExp(r'\s+'), ' ').trim();
-      if (text.isEmpty) continue;
+      if (text.isEmpty || (blockAddedImage && RegExp(r'^(?:cover|обложка)$', caseSensitive: false).hasMatch(text))) continue;
       if (tag.startsWith('h') || tag == 'title') {
         blocks.add(_Fb2Block.title(text, anchors: anchors));
       } else {
@@ -7306,6 +7355,13 @@ class _ConversionNeededReaderScreen extends StatelessWidget {
   }
 }
 
+
+String _formatLocalDateTimeSeconds(DateTime value) {
+  final local = value.toLocal();
+  String two(int number) => number.toString().padLeft(2, '0');
+  return '${local.year}-${two(local.month)}-${two(local.day)} ${two(local.hour)}:${two(local.minute)}:${two(local.second)}';
+}
+
 class SyncScreen extends StatefulWidget {
   const SyncScreen({
     super.key,
@@ -7587,15 +7643,6 @@ class _SyncScreenState extends State<SyncScreen> {
     }
   }
 
-  Future<void> _copyPairingInvite() async {
-    final invite = _pairingInvite;
-    if (invite == null) return;
-    await Clipboard.setData(ClipboardData(text: invite.inviteLink));
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Приглашение скопировано')),
-    );
-  }
 
   Future<void> _copyAccountId() async {
     await Clipboard.setData(ClipboardData(text: _accountController.text.trim()));
@@ -7749,10 +7796,6 @@ class _SyncScreenState extends State<SyncScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'Основной сценарий — QR-код. Он содержит всю информацию для подключения к аккаунту через официальный relay ReadArc.',
-                    ),
-                    const SizedBox(height: 14),
                     Row(
                       children: [
                         Expanded(
@@ -7765,7 +7808,7 @@ class _SyncScreenState extends State<SyncScreen> {
                                     child: CircularProgressIndicator(strokeWidth: 2),
                                   )
                                 : const Icon(Icons.qr_code_2_rounded),
-                            label: const Text('Показать QR-код'),
+                            label: const Text('Показать QR'),
                           ),
                         ),
                         if (Platform.isAndroid || Platform.isIOS) ...[
@@ -7801,21 +7844,22 @@ class _SyncScreenState extends State<SyncScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text('Устройство: ${_pairingInvite!.ownerDeviceName}'),
-                            const SizedBox(height: 6),
-                            Text(
-                              _pairingInvite!.displayCode,
-                              style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                                    fontWeight: FontWeight.w700,
-                                  ),
+                            Center(
+                              child: Text(
+                                _pairingInvite!.displayCode,
+                                style: Theme.of(context).textTheme.displaySmall?.copyWith(
+                                      fontWeight: FontWeight.w800,
+                                      letterSpacing: 6,
+                                    ),
+                              ),
                             ),
-                            const SizedBox(height: 8),
-                            Text('Действует до: ${_pairingInvite!.expiresAt.toLocal()}'),
-                            const SizedBox(height: 12),
-                            OutlinedButton.icon(
-                              onPressed: _copyPairingInvite,
-                              icon: const Icon(Icons.copy_rounded),
-                              label: const Text('Скопировать приглашение'),
+                            const SizedBox(height: 10),
+                            Center(
+                              child: Text('Действует до: ${_formatLocalDateTimeSeconds(_pairingInvite!.expiresAt)}'),
+                            ),
+                            const SizedBox(height: 10),
+                            const Center(
+                              child: Text('Введите код на подключаемом устройстве.'),
                             ),
                           ],
                         ),
@@ -7825,9 +7869,9 @@ class _SyncScreenState extends State<SyncScreen> {
                     TextField(
                       controller: _pairingInputController,
                       decoration: const InputDecoration(
-                        labelText: 'Код или приглашение',
-                        helperText: 'Запасной вариант: 483-921 или полное приглашение readarc://pair?...',
+                        labelText: 'Введите код приглашения',
                       ),
+                      keyboardType: TextInputType.number,
                       onSubmitted: (_) {
                         if (!_pairingBusy) unawaited(_claimPairingInvite());
                       },

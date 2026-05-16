@@ -39,7 +39,7 @@ class PairingInvite {
   final String ownerDeviceName;
   final String accountEncryptionKey;
 
-  String get displayCode => '${code.substring(0, 3)}-${code.substring(3)}';
+  String get displayCode => code;
 
   bool get isExpired => DateTime.now().toUtc().isAfter(expiresAt);
 
@@ -614,7 +614,7 @@ class SyncService {
         'expiresAt': expiresAt.toIso8601String(),
       },
     ).toString();
-    _appendLog('Создан pairing-код ${code.substring(0, 3)}-${code.substring(3)}');
+    _appendLog('Создан pairing-код $code');
     return PairingInvite(
       code: code,
       relayUrl: settings.effectiveRelayUrl,
@@ -780,7 +780,7 @@ class SyncService {
     }
     final code = _normalizePairingCode(raw);
     if (code.length != 6) {
-      throw ArgumentError('Pairing-код должен состоять из 6 цифр');
+      throw ArgumentError('Код приглашения должен состоять из 6 цифр');
     }
     return _ParsedPairingInput(code: code);
   }
