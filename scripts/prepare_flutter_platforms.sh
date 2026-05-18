@@ -14,6 +14,34 @@ cd "$APP_DIR"
 echo "Preparing Flutter platforms: $PLATFORMS"
 flutter --version
 flutter create --project-name readarc --org "$ORG" --platforms "$PLATFORMS" .
+
+# Flutter 3.44 / Android Gradle Plugin dependency metadata now requires Android API 36
+# for transitive AndroidX lifecycle artifacts used by picker plugins. The generated
+# platform folder is recreated on CI, so normalize compileSdk immediately after
+# flutter create and make the SDK platform available when sdkmanager exists.
+if [[ "$PLATFORMS" == *android* ]]; then
+  SDKMANAGER=""
+  if [[ -n "${ANDROID_HOME:-}" && -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]]; then
+    SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+  elif [[ -n "${ANDROID_SDK_ROOT:-}" && -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]]; then
+    SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+  fi
+  if [[ -n "$SDKMANAGER" ]]; then
+    yes | "$SDKMANAGER" "platforms;android-36" >/dev/null || true
+  fi
+
+  ANDROID_APP_GRADLE_KTS="android/app/build.gradle.kts"
+  if [[ -f "$ANDROID_APP_GRADLE_KTS" ]]; then
+    python3 - <<'PY_ANDROID_COMPILE_SDK'
+from pathlib import Path
+p = Path('android/app/build.gradle.kts')
+text = p.read_text()
+text = text.replace('compileSdk = flutter.compileSdkVersion', 'compileSdk = 36')
+p.write_text(text)
+PY_ANDROID_COMPILE_SDK
+  fi
+fi
+
 flutter pub get
 
 # Android needs explicit Internet permission for WebSocket sync and camera permission for QR pairing scan.
