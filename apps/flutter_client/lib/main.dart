@@ -745,10 +745,7 @@ class ReaderScreen extends StatelessWidget {
       case 'epub':
         return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.epub);
       case 'docx':
-        // Stabilization path: use the proven rich reader while the professional
-        // fixed-page DOCX engine is being rebuilt. This avoids the blank beige
-        // page regression and keeps DOCX readable on macOS and Android.
-        return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.docx);
+        return _DocxReaderScreen(book: book, storage: storage, sync: sync);
       case 'doc':
         return _Fb2ReaderScreen(book: book, storage: storage, sync: sync, sourceKind: _RichSourceKind.doc);
       case 'chm':
@@ -1591,51 +1588,108 @@ class _DocxPageView extends StatelessWidget {
     ];
   }
 
+  List<List<_Fb2Block>> _buildPages() {
+    final page = document.officePageFormat;
+    final logicalBodyHeight = (page.logicalPageHeight - page.logicalTopMargin - page.logicalBottomMargin)
+        .clamp(360.0, 1600.0)
+        .toDouble();
+    final headerReserve = document.officeHeaderBlocks.isEmpty ? 0.0 : 42.0;
+    final footerReserve = document.officeFooterBlocks.isEmpty ? 0.0 : 34.0;
+    final usableHeight = (logicalBodyHeight - headerReserve - footerReserve).clamp(300.0, logicalBodyHeight).toDouble();
+    final usableWidth = (page.logicalPageWidth - page.logicalLeftMargin - page.logicalRightMargin)
+        .clamp(260.0, 1400.0)
+        .toDouble();
+
+    final pages = <List<_Fb2Block>>[];
+    var current = <_Fb2Block>[];
+    var cursor = 0.0;
+
+    void flush() {
+      if (current.isEmpty) return;
+      pages.add(List.unmodifiable(current));
+      current = <_Fb2Block>[];
+      cursor = 0.0;
+    }
+
+    for (final block in _visibleBlocks()) {
+      if (block.plainText == _officePageBreakMarker) {
+        flush();
+        continue;
+      }
+      final estimate = _estimateDocxBlockHeight(block, usableWidth).clamp(12.0, usableHeight).toDouble();
+      if (current.isNotEmpty && cursor + estimate > usableHeight) {
+        flush();
+      }
+      current.add(block);
+      cursor += estimate;
+    }
+    flush();
+    if (pages.isEmpty) pages.add(_visibleBlocks());
+    return pages;
+  }
+
+  double _estimateDocxBlockHeight(_Fb2Block block, double usableWidth) {
+    switch (block.kind) {
+      case _Fb2BlockKind.image:
+        return 260;
+      case _Fb2BlockKind.table:
+        final rowCount = block.tableRows.length.clamp(1, 200).toInt();
+        final maxCell = block.tableRows
+            .expand((row) => row)
+            .fold<int>(0, (max, cell) => cell.length > max ? cell.length : max);
+        final extraLines = (maxCell / 42).ceil().clamp(0, 4).toInt();
+        return 14.0 + rowCount * (18.0 + extraLines * 7.0);
+      case _Fb2BlockKind.title:
+      case _Fb2BlockKind.paragraph:
+        final text = block.plainText.trim();
+        final format = block.officeFormat;
+        final fontSize = (format.fontSize <= 0 ? 11.0 : format.fontSize).clamp(8.0, 28.0).toDouble();
+        final charsPerLine = (usableWidth / (fontSize * 0.48)).clamp(18.0, 120.0).toDouble();
+        final hardLines = text.split('\n');
+        var lines = 0;
+        for (final line in hardLines) {
+          final len = line.trimRight().isEmpty ? 1 : line.trimRight().length;
+          lines += (len / charsPerLine).ceil().clamp(1, 80).toInt();
+        }
+        final lineHeight = fontSize * format.lineHeight.clamp(1.0, 2.4).toDouble();
+        return format.spaceBefore + format.spaceAfter + lines * lineHeight;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final width = MediaQuery.of(context).size.width;
-    final compact = width < 560;
-    // Safety rollback: render the parsed DOCX in a conventional, visible paper
-    // card. This deliberately avoids page-scaling, horizontal viewports and
-    // runtime measurement until the professional page engine is hardened.
-    return Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 860),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            border: Border.all(color: const Color(0xFFE0E0E0), width: 0.8),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.18),
-                blurRadius: 22,
-                offset: const Offset(0, 10),
+    final pages = _buildPages();
+    final pageFormat = document.officePageFormat;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final viewportWidth = constraints.maxWidth.isFinite && constraints.maxWidth > 0
+            ? constraints.maxWidth
+            : MediaQuery.of(context).size.width;
+        final available = (viewportWidth - 28).clamp(220.0, 2400.0).toDouble();
+        final scale = (available / pageFormat.logicalPageWidth).clamp(0.42, 1.0).toDouble();
+        final pageWidth = pageFormat.logicalPageWidth * scale;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            for (var index = 0; index < pages.length; index++)
+              Padding(
+                padding: EdgeInsets.only(bottom: index == pages.length - 1 ? 0 : 18),
+                child: Center(
+                  child: SizedBox(
+                    width: pageWidth,
+                    child: _DocxPaperPage(
+                      document: document,
+                      blocks: pages[index],
+                      pageIndex: index,
+                      pageCount: pages.length,
+                      scale: scale,
+                    ),
+                  ),
+                ),
               ),
-            ],
-          ),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(minHeight: compact ? 720 : document.officePageFormat.logicalPageHeight),
-            child: Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: compact ? 28 : document.officePageFormat.logicalLeftMargin.clamp(42.0, 88.0).toDouble(),
-                vertical: compact ? 34 : document.officePageFormat.logicalTopMargin.clamp(42.0, 88.0).toDouble(),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (document.officeHeaderBlocks.isNotEmpty)
-                    _DocxHeaderFooterView(blocks: document.officeHeaderBlocks, isHeader: true),
-                  for (final block in _visibleBlocks()) _DocxBlockView(block: block),
-                  if (document.officeFooterBlocks.isNotEmpty) ...[
-                    const SizedBox(height: 28),
-                    _DocxHeaderFooterView(blocks: document.officeFooterBlocks, isHeader: false),
-                  ],
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
+          ],
+        );
+      },
     );
   }
 }
@@ -3230,6 +3284,31 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
   }
 
   String fileText(ArchiveFile file) => _decodeTextFile(_archiveFileBytes(file));
+
+  bool isLikelyNavigationHtml(String html, String path) {
+    final lowerPath = path.toLowerCase();
+    if (lowerPath.endsWith('/nav.xhtml') ||
+        lowerPath.endsWith('/nav.html') ||
+        lowerPath.endsWith('/toc.xhtml') ||
+        lowerPath.endsWith('/toc.html')) {
+      return true;
+    }
+    final bodyMatch = RegExp(r'<body\b[^>]*>(.*?)</body>', caseSensitive: false, dotAll: true).firstMatch(html);
+    final body = bodyMatch?.group(1) ?? html;
+    final linkCount = RegExp(r'<a\b[^>]*\bhref\s*=', caseSensitive: false).allMatches(body).length;
+    if (linkCount < 12) return false;
+    final headings = RegExp(r'<h[1-6]\b[^>]*>(.*?)</h[1-6]>', caseSensitive: false, dotAll: true)
+        .allMatches(body)
+        .map((m) => _htmlToPlainText(m.group(1) ?? '').trim().toLowerCase())
+        .join(' ');
+    final text = _htmlToPlainText(body).replaceAll(RegExp(r'\s+'), ' ').trim();
+    final linkDensity = text.isEmpty ? linkCount.toDouble() : linkCount / text.length;
+    final paragraphCount = RegExp(r'<(?:p|div|blockquote)\b', caseSensitive: false).allMatches(body).length;
+    final tocHeading = RegExp(r'(?:оглавление|содержание|contents|table of contents|toc)').hasMatch(headings);
+    final firstSpineGeneratedToc = lowerPath.contains('index_split_000') && linkCount >= 20;
+    return tocHeading || firstSpineGeneratedToc || (linkCount >= 25 && paragraphCount <= 4) || (linkCount >= 40 && linkDensity > 0.004);
+  }
+
   final container = findFile('META-INF/container.xml');
   var opfPath = '';
   if (container != null) {
@@ -3359,6 +3438,14 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
     var html = fileText(file);
     html = html.replaceAll(RegExp(r'<script\b[^>]*>.*?</script>', caseSensitive: false, dotAll: true), '');
     html = html.replaceAll(RegExp(r'<style\b[^>]*>.*?</style>', caseSensitive: false, dotAll: true), '');
+
+    if (isLikelyNavigationHtml(html, normalizedPath)) {
+      // Calibre often places a generated HTML table of contents into the spine.
+      // It should not appear as continuous reader text; the actual target pages
+      // are still indexed below when their XHTML files are parsed.
+      addTarget(normalizedPath, null, blocks.length);
+      continue;
+    }
 
     addTarget(normalizedPath, null, blocks.length);
     final bodyTag = RegExp(r'''<body\b([^>]*)>''', caseSensitive: false).firstMatch(html);
@@ -4197,7 +4284,10 @@ List<String> _internalHrefLookupCandidates(String href) {
   if (uri != null) {
     final path = uri.path;
     final fragment = uri.fragment;
-    if (path.isNotEmpty) add(fragment.isEmpty ? path : '$path#$fragment');
+    if (path.isNotEmpty) {
+      add(path);
+      add(fragment.isEmpty ? path : '$path#$fragment');
+    }
     if (fragment.isNotEmpty) {
       add('#$fragment');
       add(fragment);
@@ -4207,7 +4297,10 @@ List<String> _internalHrefLookupCandidates(String href) {
   if (hash >= 0 && hash < href.length - 1) {
     final path = href.substring(0, hash);
     final fragment = href.substring(hash + 1);
-    if (path.isNotEmpty) add('$path#$fragment');
+    if (path.isNotEmpty) {
+      add(path);
+      add('$path#$fragment');
+    }
     add('#$fragment');
     add(fragment);
   }
@@ -6636,6 +6729,31 @@ String _extractEpubText(Uint8List bytes) {
   }
 
   String fileText(ArchiveFile file) => _decodeTextFile(_archiveFileBytes(file));
+
+  bool isLikelyNavigationHtml(String html, String path) {
+    final lowerPath = path.toLowerCase();
+    if (lowerPath.endsWith('/nav.xhtml') ||
+        lowerPath.endsWith('/nav.html') ||
+        lowerPath.endsWith('/toc.xhtml') ||
+        lowerPath.endsWith('/toc.html')) {
+      return true;
+    }
+    final bodyMatch = RegExp(r'<body\b[^>]*>(.*?)</body>', caseSensitive: false, dotAll: true).firstMatch(html);
+    final body = bodyMatch?.group(1) ?? html;
+    final linkCount = RegExp(r'<a\b[^>]*\bhref\s*=', caseSensitive: false).allMatches(body).length;
+    if (linkCount < 12) return false;
+    final headings = RegExp(r'<h[1-6]\b[^>]*>(.*?)</h[1-6]>', caseSensitive: false, dotAll: true)
+        .allMatches(body)
+        .map((m) => _htmlToPlainText(m.group(1) ?? '').trim().toLowerCase())
+        .join(' ');
+    final text = _htmlToPlainText(body).replaceAll(RegExp(r'\s+'), ' ').trim();
+    final linkDensity = text.isEmpty ? linkCount.toDouble() : linkCount / text.length;
+    final paragraphCount = RegExp(r'<(?:p|div|blockquote)\b', caseSensitive: false).allMatches(body).length;
+    final tocHeading = RegExp(r'(?:оглавление|содержание|contents|table of contents|toc)').hasMatch(headings);
+    final firstSpineGeneratedToc = lowerPath.contains('index_split_000') && linkCount >= 20;
+    return tocHeading || firstSpineGeneratedToc || (linkCount >= 25 && paragraphCount <= 4) || (linkCount >= 40 && linkDensity > 0.004);
+  }
+
   final container = findFile('META-INF/container.xml');
   var opfPath = '';
   if (container != null) {

@@ -1145,6 +1145,28 @@ class SyncService {
     await broadcastLibrarySnapshot(reason: 'requested_by_peer');
   }
 
+  bool _looksLikeAccidentalEmptyLibrarySnapshot({
+    required LibraryManifest local,
+    required LibraryManifest remote,
+    required LibraryManifest merged,
+  }) {
+    final localVisible = local.visibleBooks.length;
+    if (localVisible == 0) return false;
+    if (merged.visibleBooks.isNotEmpty) return false;
+
+    final remoteVisible = remote.visibleBooks.length;
+    final remoteDeleted = remote.books.where((book) => book.isDeleted).length;
+    final localDownloaded = local.books.where((book) => book.isDownloaded).length;
+
+    // Data-safety guard: an online/offline queued snapshot, a just-paired empty
+    // device, or stale tombstones must never wipe the whole visible library on a
+    // device that still has books. A deliberate "delete every book" operation can
+    // be revisited later with an explicit generation/confirmation field; until
+    // then preserving the user's library is more important than applying a mass
+    // destructive snapshot silently.
+    return remoteVisible == 0 || remoteDeleted >= localVisible || localDownloaded > 0;
+  }
+
   Future<void> _handleLibrarySnapshot(
     SyncEnvelope envelope,
     LibraryManifest local,
@@ -1157,6 +1179,11 @@ class SyncService {
 
     final remote = LibraryManifest.fromJson(Map<String, dynamic>.from(payloadManifest));
     final merged = mergeManifests(local, remote);
+    if (_looksLikeAccidentalEmptyLibrarySnapshot(local: local, remote: remote, merged: merged)) {
+      _appendLog('Отклонён snapshot, который скрывал всю локальную библиотеку. Запрошена повторная синхронизация.');
+      await requestLibrarySnapshot(reason: 'destructive_snapshot_guard');
+      return;
+    }
     await _storage.saveManifest(merged);
     _manifestChanges.add(merged);
     if (merged.isCurrentDeviceRevoked) {
