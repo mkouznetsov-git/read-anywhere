@@ -1,7 +1,6 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
-use std::io::Write;
 
 use djvu_rs::Document;
 

@@ -44,6 +44,66 @@ fi
 
 flutter pub get
 
+# Flutter/Android plugins can pin their own compileSdk in Gradle files.
+# Flutter 3.44 currently resolves flutter_plugin_android_lifecycle that requires
+# Android API 36. Patching only android/app/build.gradle.kts is not enough:
+# Gradle still checks plugin modules such as file_picker against their own
+# compileSdk. Normalize Android plugin Gradle files from package_config after
+# pub get, while keeping targetSdk/minSdk unchanged.
+if [[ "$PLATFORMS" == *android* ]]; then
+  python3 - <<'PY_ANDROID_PLUGIN_COMPILE_SDK'
+import json
+import re
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+
+project_dir = Path.cwd()
+config_path = project_dir / '.dart_tool' / 'package_config.json'
+if not config_path.exists():
+    raise SystemExit(0)
+
+config = json.loads(config_path.read_text())
+patched = []
+
+def package_root(root_uri: str) -> Path | None:
+    if not root_uri:
+        return None
+    if root_uri.startswith('file://'):
+        parsed = urlparse(root_uri)
+        return Path(unquote(parsed.path))
+    return (config_path.parent / root_uri).resolve()
+
+patterns = [
+    (re.compile(r'compileSdkVersion\s+(?:flutter\.compileSdkVersion|\d+)'), 'compileSdkVersion 36'),
+    (re.compile(r'compileSdk\s*=\s*(?:flutter\.compileSdkVersion|\d+)'), 'compileSdk = 36'),
+    (re.compile(r'compileSdk\s+(?:flutter\.compileSdkVersion|\d+)'), 'compileSdk 36'),
+]
+
+for package in config.get('packages', []):
+    root = package_root(package.get('rootUri', ''))
+    if root is None:
+        continue
+    android_dir = root / 'android'
+    if not android_dir.exists():
+        continue
+    for gradle_file in (android_dir / 'build.gradle', android_dir / 'build.gradle.kts'):
+        if not gradle_file.exists():
+            continue
+        text = gradle_file.read_text()
+        updated = text
+        for pattern, replacement in patterns:
+            updated = pattern.sub(replacement, updated)
+        if updated != text:
+            gradle_file.write_text(updated)
+            patched.append(f"{package.get('name', root.name)}:{gradle_file}")
+
+if patched:
+    print('ReadArc normalized Android plugin compileSdk to 36:')
+    for item in patched:
+        print(f'  - {item}')
+PY_ANDROID_PLUGIN_COMPILE_SDK
+fi
+
 # Android needs explicit Internet permission for WebSocket sync and camera permission for QR pairing scan.
 ANDROID_MANIFEST="android/app/src/main/AndroidManifest.xml"
 if [[ -f "$ANDROID_MANIFEST" ]] && ! grep -q "android.permission.INTERNET" "$ANDROID_MANIFEST"; then
