@@ -1949,20 +1949,23 @@ class _DocxBlockView extends StatelessWidget {
                 if (listPrefix != null && listPrefix.isNotEmpty)
                   TextSpan(
                     text: '$listPrefix ',
-                    style: TextStyle(fontWeight: FontWeight.w400, fontSize: size),
+                    style: style.copyWith(fontSize: isTitle && !compact ? size.clamp(12.5, 17.5).toDouble() : size),
                   ),
                 ...block.inlines.map((inline) => _docxInlineSpan(inline, format, compact: compact, scale: scale)),
               ]);
         final isNumbered = listPrefix != null && listPrefix.isNotEmpty;
-        // Flutter's Text widget does not support Word's true first-line indent.
-        // Applying it as a whole-paragraph transform made the left edge "stair-step"
-        // between neighbouring legal paragraphs. Keep normal paragraphs aligned to
-        // the document left indent and only apply hanging indentation to numbered
-        // paragraphs where the prefix must sit in the gutter.
-        final leftIndent = compact ? 0.0 : format.leftIndent.clamp(0.0, 104.0).toDouble();
-        final firstLine = compact ? 0.0 : format.firstLineIndent.clamp(-48.0, 78.0).toDouble();
-        final hangingPad = isNumbered && firstLine < 0 ? -firstLine : 0.0;
-        final firstLineShift = isNumbered && firstLine > 0 ? firstLine : 0.0;
+        final alreadyNumbered = RegExp(r'^\s*(?:\d+(?:\.\d+)*[.)]?|[а-яё]\))\s+', caseSensitive: false).hasMatch(plain);
+        // Avoid the visible "staircase" effect: Word can combine hanging/first-line
+        // indents with tab stops, but Flutter Text cannot. For paragraphs that
+        // already contain their legal number in the text, keep the body left edge
+        // aligned. Only generated numbering receives a small hanging gutter.
+        final rawLeftIndent = compact ? 0.0 : format.leftIndent.clamp(0.0, 104.0).toDouble();
+        final rawFirstLine = compact ? 0.0 : format.firstLineIndent.clamp(-48.0, 78.0).toDouble();
+        final useGeneratedNumberGutter = isNumbered && !alreadyNumbered;
+        final leftIndent = useGeneratedNumberGutter ? rawLeftIndent.clamp(0.0, 34.0).toDouble() : 0.0;
+        final firstLine = useGeneratedNumberGutter ? rawFirstLine : 0.0;
+        final hangingPad = firstLine < 0 ? -firstLine : 0.0;
+        final firstLineShift = firstLine > 0 ? firstLine : 0.0;
         return Padding(
           padding: EdgeInsets.only(
             top: compact ? 0 : format.spaceBefore.clamp(0.0, 32.0).toDouble() * scale,
@@ -2036,13 +2039,13 @@ class _DocxDocumentTableView extends StatelessWidget {
                     padding: EdgeInsets.symmetric(horizontal: (compact ? 2.5 : 3.2) * scale, vertical: (compact ? 1.8 : 2.4) * scale),
                     child: Text(
                       column < rows[rowIndex].length ? rows[rowIndex][column] : '',
-                      textAlign: _docxTableCellAlign(column < rows[rowIndex].length ? rows[rowIndex][column] : '', column, columnCount),
+                      textAlign: _docxTableCellAlign(column < rows[rowIndex].length ? rows[rowIndex][column] : '', rowIndex, column, columnCount),
                       style: TextStyle(
                         color: compact ? const Color(0xFF777777) : Colors.black,
                         fontSize: (compact ? 8.5 : 10.2) * scale,
                         height: 1.08,
                         fontFamily: 'Times New Roman',
-                        fontWeight: rowIndex == 0 ? FontWeight.w700 : FontWeight.w400,
+                        fontWeight: _docxTableCellShouldBeBold(rows, rowIndex, column, columnCount) ? FontWeight.w700 : FontWeight.w400,
                         fontStyle: _docxTableCellShouldItalic(rows, rowIndex, column) ? FontStyle.italic : FontStyle.normal,
                       ),
                       softWrap: true,
@@ -2057,13 +2060,24 @@ class _DocxDocumentTableView extends StatelessWidget {
 }
 
 
-TextAlign _docxTableCellAlign(String text, int column, int columnCount) {
+TextAlign _docxTableCellAlign(String text, int rowIndex, int column, int columnCount) {
   final trimmed = text.trim();
-  if (trimmed.isEmpty) return TextAlign.left;
+  if (trimmed.isEmpty) return TextAlign.center;
+  if (rowIndex == 0) return TextAlign.center;
   if (RegExp(r'^(?:итого|итог|total)\b', caseSensitive: false).hasMatch(trimmed)) return TextAlign.right;
   if (RegExp(r'^[\d\s.,]+$').hasMatch(trimmed)) return TextAlign.center;
+  if (columnCount <= 3 && trimmed.length < 48) return TextAlign.center;
   if (column >= columnCount - 3) return TextAlign.center;
   return TextAlign.left;
+}
+
+bool _docxTableCellShouldBeBold(List<List<String>> rows, int rowIndex, int column, int columnCount) {
+  if (rowIndex == 0) return true;
+  final text = column < rows[rowIndex].length ? rows[rowIndex][column].trim() : '';
+  if (text.isEmpty) return false;
+  if (column == 0 && columnCount <= 3) return true;
+  if (RegExp(r'^(?:покупатель|поставщик|порядок расч|срок постав|грузополучател|существенные условия)\b', caseSensitive: false).hasMatch(text)) return true;
+  return false;
 }
 
 bool _docxTableCellShouldItalic(List<List<String>> rows, int rowIndex, int column) {
@@ -2630,19 +2644,28 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
           // near chapter 16 in the Patton EPUB to show the right percentage while
           // the screen stayed on a stale rendered position; the next tiny scroll
           // then snapped progress back to the actual location.
-          final targetOffset = _offsetForUnit(safe);
-          for (var attempt = 0; attempt < 20; attempt++) {
+          final targetLocator = _locatorForUnit(safe);
+          // In long EPUBs, unit character anchors are often more reliable than
+          // accumulated ListView extents after generated TOC/cover/image blocks.
+          // Jump to the same fraction that the progress bar shows for the resolved
+          // link target; this prevents the UI from showing an old 80.3% viewport
+          // while the locator/progress already says 82.6%.
+          final targetProgress = (targetLocator?.progressPercent ?? 0).clamp(0.0, 100.0).toDouble();
+          for (var attempt = 0; attempt < 24; attempt++) {
             await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 0 : 32));
             if (!mounted || !_scrollController.hasClients) continue;
             final position = _scrollController.position;
             if (!position.hasContentDimensions) continue;
             final max = position.maxScrollExtent;
-            if (targetOffset > max + 4 && attempt < 16) continue;
-            final offset = targetOffset.clamp(0.0, max);
+            final byProgress = (max * (targetProgress / 100.0)).clamp(0.0, max).toDouble();
+            final byUnit = _offsetForUnit(safe).clamp(0.0, max).toDouble();
+            // Prefer progress-based positioning for EPUB TOC links. Keep unit offset
+            // as a fallback for very short documents where progress has no meaning.
+            final offset = max > 0 ? byProgress : byUnit;
             _scrollController.jumpTo(offset);
-            if ((_scrollController.offset - offset).abs() < 2.0 || attempt >= 16) break;
+            if ((_scrollController.offset - offset).abs() < 2.0 || attempt >= 18) break;
           }
-          final locator = _locatorForUnit(safe);
+          final locator = _currentLocator() ?? targetLocator;
           if (locator != null) {
             _lastKnownLocator = locator;
             _progress = locator.progressPercent;
@@ -2818,7 +2841,8 @@ class _Fb2UnitView extends StatelessWidget {
           padding: const EdgeInsets.symmetric(vertical: 8),
           child: Image.memory(
             bytes,
-            fit: BoxFit.contain,
+            fit: unit.blockIndex == 0 ? BoxFit.fitWidth : BoxFit.contain,
+            alignment: Alignment.topCenter,
             width: double.infinity,
             height: _Fb2ReaderScreenState._imageExtent - 16,
             errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined),
@@ -4288,6 +4312,14 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     for (var i = level + 1; i < counters.length; i++) {
       counters[i] = 0;
     }
+    if (level == 0) {
+      currentTopNumber = counters[0];
+      for (final other in numberingCounters.values) {
+        other[0] = currentTopNumber!;
+        for (var i = 1; i < other.length; i++) other[i] = 0;
+      }
+      counters[0] = currentTopNumber!;
+    }
 
     var pattern = info.textPattern;
     if (pattern.trim().isEmpty) pattern = '%${level + 1}.';
@@ -4392,7 +4424,11 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
         final isVMergeContinuation = vMergeTag != null && (vMergeValue == null || vMergeValue.isEmpty || vMergeValue == 'continue');
         final cellText = isVMergeContinuation
             ? ''
-            : textFromXml(cellXml)
+            : RegExp(r'<w:p\b[^>]*>.*?</w:p>', caseSensitive: false, dotAll: true)
+                .allMatches(cellXml)
+                .map((p) => textFromXml(p.group(0) ?? ''))
+                .where((line) => line.trim().isNotEmpty)
+                .join('\n')
                 .replaceAll(RegExp(r'[ \t\u00A0]*\n[ \t\u00A0]*'), '\n')
                 .replaceAll(RegExp(r'[ \t\u00A0]+'), ' ')
                 .trim();
@@ -8481,38 +8517,17 @@ class _PairingQrScannerScreen extends StatefulWidget {
 }
 
 class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
+  // Reverted to the controller-based mobile_scanner path that was stable on Android
+  // before Sprint 43.1/43.2 hardening. The controller is owned by this screen and
+  // disposed with it; using MobileScanner's implicit controller triggered a
+  // platform-side null object reference on some Android builds.
+  final _controller = MobileScannerController();
   bool _handled = false;
 
-  Widget _scannerFallback(BuildContext context, Object error) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.qr_code_scanner_rounded, size: 56, color: _raWarmGold),
-            const SizedBox(height: 16),
-            Text(
-              'Не удалось запустить камеру для сканирования QR.',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '$error',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-            const SizedBox(height: 18),
-            FilledButton.icon(
-              onPressed: () => Navigator.of(context).pop(),
-              icon: const Icon(Icons.keyboard_rounded),
-              label: const Text('Ввести код вручную'),
-            ),
-          ],
-        ),
-      ),
-    );
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
   }
 
   @override
@@ -8523,9 +8538,8 @@ class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
         children: [
           Expanded(
             child: MobileScanner(
-              key: const ValueKey('readarc-pairing-mobile-scanner'),
+              controller: _controller,
               fit: BoxFit.cover,
-              errorBuilder: (context, error, child) => _scannerFallback(context, error),
               onDetect: (capture) {
                 if (_handled) return;
                 final barcodes = capture.barcodes;
