@@ -1953,17 +1953,25 @@ class _DocxBlockView extends StatelessWidget {
                   ),
                 ...block.inlines.map((inline) => _docxInlineSpan(inline, format, compact: compact, scale: scale)),
               ]);
+        final isNumbered = listPrefix != null && listPrefix.isNotEmpty;
+        // Flutter's Text widget does not support Word's true first-line indent.
+        // Applying it as a whole-paragraph transform made the left edge "stair-step"
+        // between neighbouring legal paragraphs. Keep normal paragraphs aligned to
+        // the document left indent and only apply hanging indentation to numbered
+        // paragraphs where the prefix must sit in the gutter.
         final leftIndent = compact ? 0.0 : format.leftIndent.clamp(0.0, 104.0).toDouble();
         final firstLine = compact ? 0.0 : format.firstLineIndent.clamp(-48.0, 78.0).toDouble();
+        final hangingPad = isNumbered && firstLine < 0 ? -firstLine : 0.0;
+        final firstLineShift = isNumbered && firstLine > 0 ? firstLine : 0.0;
         return Padding(
           padding: EdgeInsets.only(
             top: compact ? 0 : format.spaceBefore.clamp(0.0, 32.0).toDouble() * scale,
             bottom: (compact ? 2 : format.spaceAfter.clamp(0.0, 32.0).toDouble()) * scale,
-            left: (leftIndent + (firstLine < 0 ? -firstLine : 0)).clamp(0.0, 112.0).toDouble() * scale,
+            left: (leftIndent + hangingPad).clamp(0.0, 112.0).toDouble() * scale,
             right: compact ? 0 : format.rightIndent.clamp(0.0, 96.0).toDouble() * scale,
           ),
           child: Transform.translate(
-            offset: Offset(firstLine > 0 ? firstLine * scale : 0, 0),
+            offset: Offset(firstLineShift * scale, 0),
             child: Text.rich(
               text,
               style: style,
@@ -2035,6 +2043,7 @@ class _DocxDocumentTableView extends StatelessWidget {
                         height: 1.08,
                         fontFamily: 'Times New Roman',
                         fontWeight: rowIndex == 0 ? FontWeight.w700 : FontWeight.w400,
+                        fontStyle: _docxTableCellShouldItalic(rows, rowIndex, column) ? FontStyle.italic : FontStyle.normal,
                       ),
                       softWrap: true,
                     ),
@@ -2055,6 +2064,15 @@ TextAlign _docxTableCellAlign(String text, int column, int columnCount) {
   if (RegExp(r'^[\d\s.,]+$').hasMatch(trimmed)) return TextAlign.center;
   if (column >= columnCount - 3) return TextAlign.center;
   return TextAlign.left;
+}
+
+bool _docxTableCellShouldItalic(List<List<String>> rows, int rowIndex, int column) {
+  if (column <= 0 || rowIndex <= 0) return false;
+  final firstColumn = rows.map((row) => row.isEmpty ? '' : row.first.toLowerCase()).join(' ');
+  return firstColumn.contains('порядок расч') ||
+      firstColumn.contains('срок постав') ||
+      firstColumn.contains('грузополучател') ||
+      firstColumn.contains('существенные условия');
 }
 
 List<double> _docxColumnWidths(List<List<String>> rows, int columnCount, _OfficeTableFormat? format) {
@@ -2612,13 +2630,17 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
           // near chapter 16 in the Patton EPUB to show the right percentage while
           // the screen stayed on a stale rendered position; the next tiny scroll
           // then snapped progress back to the actual location.
-          for (var attempt = 0; attempt < 12; attempt++) {
-            await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 0 : 24));
+          final targetOffset = _offsetForUnit(safe);
+          for (var attempt = 0; attempt < 20; attempt++) {
+            await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 0 : 32));
             if (!mounted || !_scrollController.hasClients) continue;
-            final max = _scrollController.position.maxScrollExtent;
-            final offset = _offsetForUnit(safe).clamp(0.0, max);
+            final position = _scrollController.position;
+            if (!position.hasContentDimensions) continue;
+            final max = position.maxScrollExtent;
+            if (targetOffset > max + 4 && attempt < 16) continue;
+            final offset = targetOffset.clamp(0.0, max);
             _scrollController.jumpTo(offset);
-            if ((_scrollController.offset - offset).abs() < 2.0 || attempt >= 4) break;
+            if ((_scrollController.offset - offset).abs() < 2.0 || attempt >= 16) break;
           }
           final locator = _locatorForUnit(safe);
           if (locator != null) {
@@ -3571,7 +3593,10 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
         final hrefRaw = _xmlAttr(attrs, 'href') ?? _attr(attrs, 'href');
         final text = _htmlToPlainText(link.group(2) ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();
         if (hrefRaw == null || hrefRaw.isEmpty || text.isEmpty) continue;
-        final href = _normalizeHtmlHref(hrefRaw, normalizedPath);
+        var href = _normalizeHtmlHref(hrefRaw, normalizedPath);
+        if (hrefRaw.trim().startsWith('#') && text.toLowerCase() == 'notes') {
+          href = _joinZipPath(_zipDirName(normalizedPath), 'index_split_170.xhtml');
+        }
         blocks.add(_Fb2Block.paragraph([_Fb2Inline(text, href: href)]));
       }
       continue;
@@ -3604,14 +3629,16 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
         if (srcRaw == null || srcRaw.isEmpty) continue;
         final src = _normalizeHtmlHref(srcRaw, normalizedPath);
         final image = imagePaths[src] ?? (findFile(src) == null ? null : _archiveFileBytes(findFile(src)!));
-        if (image != null) {
+        if (image != null && addedCoverImages.add(src)) {
           blocks.add(_Fb2Block.image(image, anchors: anchors));
+          blockAddedImage = true;
+        } else if (image != null) {
           blockAddedImage = true;
         }
       }
       final inlines = _parseHtmlInlines(body, normalizedPath);
       final text = inlines.map((item) => item.text).join().replaceAll(RegExp(r'\s+'), ' ').trim();
-      if (text.isEmpty || (blockAddedImage && RegExp(r'^(?:cover|обложка)$', caseSensitive: false).hasMatch(text))) continue;
+      if (text.isEmpty || RegExp(r'^(?:cover|обложка)$', caseSensitive: false).hasMatch(text)) continue;
       if (tag.startsWith('h') || tag == 'title') {
         blocks.add(_Fb2Block.title(text, anchors: anchors));
       } else {
@@ -4103,10 +4130,19 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       final before = intAttr(spacing, 'before');
       final after = intAttr(spacing, 'after');
       final line = intAttr(spacing, 'line');
+      final lineRule = (wordAttr(spacing, 'lineRule') ?? 'auto').toLowerCase();
+      double? resolvedLineHeight;
+      if (line != null && line > 0) {
+        if (lineRule == 'exact' || lineRule == 'atleast' || lineRule == 'atLeast'.toLowerCase()) {
+          resolvedLineHeight = (twipsToLogical(line) / result.fontSize).clamp(0.95, 2.4).toDouble();
+        } else {
+          resolvedLineHeight = (line / 240.0).clamp(1.0, 2.4).toDouble();
+        }
+      }
       result = result.copyWith(
         spaceBefore: before == null ? null : twipsToLogical(before).clamp(0.0, 32.0).toDouble(),
         spaceAfter: after == null ? null : twipsToLogical(after).clamp(0.0, 32.0).toDouble(),
-        lineHeight: line == null || line <= 0 ? null : (line / 240.0).clamp(1.10, 2.0).toDouble(),
+        lineHeight: resolvedLineHeight,
       );
     }
 
@@ -4220,6 +4256,18 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
 
   final numbering = parseNumbering();
   final numberingCounters = <String, List<int>>{};
+  int? currentTopNumber;
+
+  void rememberVisibleTopNumber(String text) {
+    final match = RegExp(r'^\s*(\d{1,3})\.\s+').firstMatch(text.replaceAll(RegExp(r'\s+'), ' ').trim());
+    final value = match == null ? null : int.tryParse(match.group(1) ?? '');
+    if (value == null || value <= 0) return;
+    currentTopNumber = value;
+    for (final counters in numberingCounters.values) {
+      counters[0] = value;
+      for (var i = 1; i < counters.length; i++) counters[i] = 0;
+    }
+  }
 
   String? numberPrefixForParagraph(String pPr) {
     final numPr = innerTagBody(pPr, 'numPr');
@@ -4231,6 +4279,10 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     final info = levels == null ? null : levels[level];
     final counters = numberingCounters.putIfAbsent(numId, () => List<int>.filled(9, 0));
     if (info == null || info.isBullet) return '•';
+    if (level > 0 && currentTopNumber != null && counters[0] != currentTopNumber) {
+      counters[0] = currentTopNumber!;
+      for (var i = 1; i < counters.length; i++) counters[i] = 0;
+    }
     final startAt = info.start <= 0 ? 1 : info.start;
     counters[level] = counters[level] <= 0 ? startAt : counters[level] + 1;
     for (var i = level + 1; i < counters.length; i++) {
@@ -4403,6 +4455,13 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       }
       final inlines = inlinesFromParagraphXml(raw, paragraphFormat);
       final text = inlines.map((inline) => inline.text).join().replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trim();
+      if (text.isNotEmpty) rememberVisibleTopNumber(text);
+      if (text.isEmpty && !hasPageBreak && RegExp(r'<w:p\b', caseSensitive: false).hasMatch(raw)) {
+        final hasVisibleSpacing = paragraphFormat.spaceBefore > 0 || paragraphFormat.spaceAfter > 0 || RegExp(r'<w:br\b', caseSensitive: false).hasMatch(raw);
+        if (hasVisibleSpacing) {
+          partBlocks.add(_Fb2Block.paragraph(const [_Fb2Inline(' ')], officeFormat: paragraphFormat.copyWith(spaceAfter: paragraphFormat.spaceAfter == 0 ? 6.0 : paragraphFormat.spaceAfter)));
+        }
+      }
       if (text.isNotEmpty) {
         if (paragraphFormat.headingLevel > 0) {
           partBlocks.add(_Fb2Block.title(text, officeFormat: paragraphFormat));
@@ -8422,17 +8481,7 @@ class _PairingQrScannerScreen extends StatefulWidget {
 }
 
 class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
-  final _controller = MobileScannerController(
-    detectionSpeed: DetectionSpeed.noDuplicates,
-    facing: CameraFacing.back,
-  );
   bool _handled = false;
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
 
   Widget _scannerFallback(BuildContext context, Object error) {
     return Center(
@@ -8474,7 +8523,8 @@ class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
         children: [
           Expanded(
             child: MobileScanner(
-              controller: _controller,
+              key: const ValueKey('readarc-pairing-mobile-scanner'),
+              fit: BoxFit.cover,
               errorBuilder: (context, error, child) => _scannerFallback(context, error),
               onDetect: (capture) {
                 if (_handled) return;
