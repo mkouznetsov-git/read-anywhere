@@ -1784,36 +1784,53 @@ class _DocxPaperPage extends StatelessWidget {
       child: SizedBox(
         width: fixedPageWidth,
         height: minHeight,
-        child: Padding(
-          padding: EdgeInsets.fromLTRB(
-            page.logicalLeftMargin * scale,
-            page.logicalTopMargin * scale,
-            page.logicalRightMargin * scale,
-            page.logicalBottomMargin * scale,
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (document.officeHeaderBlocks.isNotEmpty)
-                _DocxHeaderFooterView(
-                  blocks: document.officeHeaderBlocks,
-                  isHeader: true,
-                  pageIndex: pageIndex,
-                  pageCount: pageCount,
-                  scale: scale,
+        child: Stack(
+          children: [
+            Padding(
+              padding: EdgeInsets.fromLTRB(
+                page.logicalLeftMargin * scale,
+                page.logicalTopMargin * scale,
+                page.logicalRightMargin * scale,
+                page.logicalBottomMargin * scale,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (document.officeHeaderBlocks.isNotEmpty)
+                    _DocxHeaderFooterView(
+                      blocks: document.officeHeaderBlocks,
+                      isHeader: true,
+                      pageIndex: pageIndex,
+                      pageCount: pageCount,
+                      scale: scale,
+                    ),
+                  for (final block in blocks) _DocxBlockView(block: block, scale: scale),
+                  const Spacer(),
+                  if (document.officeFooterBlocks.isNotEmpty)
+                    _DocxHeaderFooterView(
+                      blocks: document.officeFooterBlocks,
+                      isHeader: false,
+                      pageIndex: pageIndex,
+                      pageCount: pageCount,
+                      scale: scale,
+                    ),
+                ],
+              ),
+            ),
+            Positioned(
+              top: (page.logicalTopMargin * 0.42).clamp(10.0, 34.0).toDouble() * scale,
+              right: (page.logicalRightMargin * 0.48).clamp(12.0, 46.0).toDouble() * scale,
+              child: Text(
+                '${pageIndex + 1}',
+                style: TextStyle(
+                  color: const Color(0xFF777777),
+                  fontSize: 8.6 * scale,
+                  height: 1.0,
+                  fontFamily: 'Times New Roman',
                 ),
-              for (final block in blocks) _DocxBlockView(block: block, scale: scale),
-              const Spacer(),
-              if (document.officeFooterBlocks.isNotEmpty)
-                _DocxHeaderFooterView(
-                  blocks: document.officeFooterBlocks,
-                  isHeader: false,
-                  pageIndex: pageIndex,
-                  pageCount: pageCount,
-                  scale: scale,
-                ),
-            ],
-          ),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -1910,6 +1927,22 @@ class _DocxBlockView extends StatelessWidget {
           fontStyle: format.italic ? FontStyle.italic : FontStyle.normal,
         );
         final listPrefix = compact ? null : format.listNumberText;
+        final plain = block.plainText.replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trim();
+        final cityDate = RegExp(r'^(г\.\s*[^0-9]+?)\s+(\d{1,2}\s+[А-Яа-яЁё]+\s+\d{4}\s*г\.?)$').firstMatch(plain);
+        if (!compact && cityDate != null) {
+          return Padding(
+            padding: EdgeInsets.only(
+              top: format.spaceBefore.clamp(0.0, 32.0).toDouble() * scale,
+              bottom: format.spaceAfter.clamp(0.0, 32.0).toDouble() * scale,
+            ),
+            child: Row(
+              children: [
+                Expanded(child: Text(cityDate.group(1)!.trim(), style: style.copyWith(fontWeight: FontWeight.w400), textAlign: TextAlign.left)),
+                Expanded(child: Text(cityDate.group(2)!.trim(), style: style.copyWith(fontWeight: FontWeight.w400), textAlign: TextAlign.right)),
+              ],
+            ),
+          );
+        }
         final text = block.kind == _Fb2BlockKind.title
             ? TextSpan(text: block.plainText)
             : TextSpan(children: [
@@ -1920,8 +1953,8 @@ class _DocxBlockView extends StatelessWidget {
                   ),
                 ...block.inlines.map((inline) => _docxInlineSpan(inline, format, compact: compact, scale: scale)),
               ]);
-        final leftIndent = compact ? 0.0 : format.leftIndent.clamp(0.0, 96.0).toDouble();
-        final firstLine = compact ? 0.0 : format.firstLineIndent.clamp(-48.0, 72.0).toDouble();
+        final leftIndent = compact ? 0.0 : format.leftIndent.clamp(0.0, 104.0).toDouble();
+        final firstLine = compact ? 0.0 : format.firstLineIndent.clamp(-48.0, 78.0).toDouble();
         return Padding(
           padding: EdgeInsets.only(
             top: compact ? 0 : format.spaceBefore.clamp(0.0, 32.0).toDouble() * scale,
@@ -2572,14 +2605,30 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
         final unitIndex = units.indexWhere((unit) => unit.blockIndex >= target);
         final safe = (unitIndex < 0 ? units.length - 1 : unitIndex).clamp(0, units.length - 1).toInt();
         _pendingUnitIndex = safe;
-        final offset = _offsetForUnit(safe).clamp(0.0, _scrollController.position.maxScrollExtent);
-        await _scrollController.animateTo(offset, duration: const Duration(milliseconds: 220), curve: Curves.easeOutCubic);
-        final locator = _locatorForUnit(safe);
-        if (locator != null) {
-          _lastKnownLocator = locator;
-          _progress = locator.progressPercent;
-          unawaited(_saveProgress(locator));
-          if (mounted) setState(() {});
+        _restoringPosition = true;
+        try {
+          // EPUB links must move the real viewport first and only then update the
+          // locator/progress. Updating progress optimistically caused TOC items
+          // near chapter 16 in the Patton EPUB to show the right percentage while
+          // the screen stayed on a stale rendered position; the next tiny scroll
+          // then snapped progress back to the actual location.
+          for (var attempt = 0; attempt < 12; attempt++) {
+            await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 0 : 24));
+            if (!mounted || !_scrollController.hasClients) continue;
+            final max = _scrollController.position.maxScrollExtent;
+            final offset = _offsetForUnit(safe).clamp(0.0, max);
+            _scrollController.jumpTo(offset);
+            if ((_scrollController.offset - offset).abs() < 2.0 || attempt >= 4) break;
+          }
+          final locator = _locatorForUnit(safe);
+          if (locator != null) {
+            _lastKnownLocator = locator;
+            _progress = locator.progressPercent;
+            await _saveProgress(locator);
+            if (mounted) setState(() {});
+          }
+        } finally {
+          _restoringPosition = false;
         }
         return;
       }
@@ -3081,17 +3130,20 @@ class _OfficePageFormat {
   double get logicalPageWidth => (widthTwips / 18.0).clamp(560.0, 860.0).toDouble();
   double get logicalPageHeight => (heightTwips / 18.0).clamp(720.0, 1220.0).toDouble();
   double get aspectRatio => logicalPageWidth / logicalPageHeight;
-  double get logicalLeftMargin => (marginLeftTwips / 18.0).clamp(34.0, 118.0).toDouble();
-  double get logicalRightMargin => (marginRightTwips / 18.0).clamp(34.0, 118.0).toDouble();
-  double get logicalTopMargin => (marginTopTwips / 18.0).clamp(32.0, 118.0).toDouble();
-  double get logicalBottomMargin => (marginBottomTwips / 18.0).clamp(32.0, 118.0).toDouble();
+  // Sprint 43.1: keep margins a little wider than raw twip conversion.
+  // Flutter's Times fallback is more compact than Word/Pages, and wider
+  // body gutters make DOCX pages closer to the macOS reference viewer.
+  double get logicalLeftMargin => ((marginLeftTwips / 18.0) + 7.0).clamp(42.0, 126.0).toDouble();
+  double get logicalRightMargin => ((marginRightTwips / 18.0) + 5.0).clamp(38.0, 122.0).toDouble();
+  double get logicalTopMargin => ((marginTopTwips / 18.0) + 2.0).clamp(34.0, 120.0).toDouble();
+  double get logicalBottomMargin => ((marginBottomTwips / 18.0) + 2.0).clamp(34.0, 120.0).toDouble();
 }
 
 class _OfficeParagraphFormat {
   const _OfficeParagraphFormat({
     this.align = _OfficeTextAlign.left,
-    this.fontSize = 12.8,
-    this.lineHeight = 1.22,
+    this.fontSize = 13.35,
+    this.lineHeight = 1.29,
     this.spaceBefore = 0.0,
     this.spaceAfter = 0.0,
     this.leftIndent = 0.0,
@@ -3162,11 +3214,13 @@ class _OfficeNumberingLevel {
     required this.level,
     required this.textPattern,
     required this.format,
+    this.start = 1,
   });
 
   final int level;
   final String textPattern;
   final String format;
+  final int start;
 
   bool get isBullet => format.toLowerCase().contains('bullet') || textPattern.contains('•');
 }
@@ -3387,9 +3441,18 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
     void put(String key) {
       final normalized = key.trim().replaceAll('\\', '/');
       if (normalized.isEmpty) return;
-      linkTargets.putIfAbsent(normalized, () => blockIndex);
+      // Exact anchors should win over earlier path-level fallbacks. Path-only keys
+      // still keep their first occurrence, but path#fragment is allowed to update
+      // to the closest visible block if the same anchor is later discovered inside
+      // a heading wrapper.
+      if (normalized.contains('#') || !linkTargets.containsKey(normalized)) {
+        linkTargets[normalized] = blockIndex;
+      }
       try {
-        linkTargets.putIfAbsent(Uri.decodeFull(normalized), () => blockIndex);
+        final decoded = Uri.decodeFull(normalized);
+        if (decoded.contains('#') || !linkTargets.containsKey(decoded)) {
+          linkTargets[decoded] = blockIndex;
+        }
       } catch (_) {}
     }
 
@@ -3965,7 +4028,7 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     final tag = firstTag(rPr, 'sz') ?? firstTag(rPr, 'szCs');
     final value = tag == null ? null : intAttr(tag, 'val');
     if (value == null || value <= 0) return null;
-    return (value / 2.0).clamp(7.0, 40.0).toDouble();
+    return ((value / 2.0) * 1.055).clamp(7.0, 40.0).toDouble();
   }
 
   Color? colorFromRPr(String rPr) {
@@ -4043,7 +4106,7 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       result = result.copyWith(
         spaceBefore: before == null ? null : twipsToLogical(before).clamp(0.0, 32.0).toDouble(),
         spaceAfter: after == null ? null : twipsToLogical(after).clamp(0.0, 32.0).toDouble(),
-        lineHeight: line == null || line <= 0 ? null : (line / 240.0).clamp(1.0, 2.0).toDouble(),
+        lineHeight: line == null || line <= 0 ? null : (line / 240.0).clamp(1.10, 2.0).toDouble(),
       );
     }
 
@@ -4097,6 +4160,26 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
 
   final styles = parseStyles();
 
+  Map<String, String> parseStyleParagraphProperties() {
+    final file = findFile('word/styles.xml');
+    if (file == null) return const {};
+    final xml = _decodeTextFile(_archiveFileBytes(file));
+    final result = <String, String>{};
+    for (final match in RegExp(r'<w:style\b([^>]*)>(.*?)</w:style>', caseSensitive: false, dotAll: true).allMatches(xml)) {
+      final attrs = match.group(1) ?? '';
+      final body = match.group(2) ?? '';
+      final type = wordAttr(attrs, 'type') ?? '';
+      if (type.toLowerCase() != 'paragraph') continue;
+      final id = wordAttr(attrs, 'styleId');
+      if (id == null || id.isEmpty) continue;
+      final pPr = innerTagBody(body, 'pPr');
+      if (pPr.isNotEmpty) result[id] = pPr;
+    }
+    return result;
+  }
+
+  final styleParagraphProperties = parseStyleParagraphProperties();
+
 
   Map<String, Map<int, _OfficeNumberingLevel>> parseNumbering() {
     final file = findFile('word/numbering.xml');
@@ -4116,7 +4199,8 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
         final lvlBody = lvlMatch.group(2) ?? '';
         final textPattern = wordVal(firstTag(lvlBody, 'lvlText') ?? '') ?? '%${level + 1}.';
         final format = wordVal(firstTag(lvlBody, 'numFmt') ?? '') ?? 'decimal';
-        levels[level] = _OfficeNumberingLevel(level: level, textPattern: textPattern, format: format);
+        final start = int.tryParse(wordVal(firstTag(lvlBody, 'start') ?? '') ?? '') ?? 1;
+        levels[level] = _OfficeNumberingLevel(level: level, textPattern: textPattern, format: format, start: start);
       }
       abstractLevels[abstractId] = levels;
     }
@@ -4146,12 +4230,13 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     final levels = numbering[numId];
     final info = levels == null ? null : levels[level];
     final counters = numberingCounters.putIfAbsent(numId, () => List<int>.filled(9, 0));
-    counters[level] = counters[level] + 1;
+    if (info == null || info.isBullet) return '•';
+    final startAt = info.start <= 0 ? 1 : info.start;
+    counters[level] = counters[level] <= 0 ? startAt : counters[level] + 1;
     for (var i = level + 1; i < counters.length; i++) {
       counters[i] = 0;
     }
 
-    if (info == null || info.isBullet) return '•';
     var pattern = info.textPattern;
     if (pattern.trim().isEmpty) pattern = '%${level + 1}.';
     for (var i = 0; i <= level; i++) {
@@ -4306,7 +4391,8 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       final styleId = wordVal(styleTag);
       final styleFormat = styleId == null ? const _OfficeParagraphFormat() : (styles[styleId] ?? const _OfficeParagraphFormat());
       var paragraphFormat = formatFromPr(pPr, rPr, base: styleFormat, styleId: styleId);
-      final explicitNumber = numberPrefixForParagraph(pPr);
+      final stylePPr = styleId == null ? '' : (styleParagraphProperties[styleId] ?? '');
+      final explicitNumber = numberPrefixForParagraph(RegExp(r'<w:numPr\b', caseSensitive: false).hasMatch(pPr) ? pPr : stylePPr);
       if (explicitNumber != null && explicitNumber.isNotEmpty) {
         paragraphFormat = paragraphFormat.copyWith(
           isList: true,
@@ -6072,13 +6158,33 @@ class _ContinuousReaderProgressBar extends StatefulWidget {
 
 class _ContinuousReaderProgressBarState extends State<_ContinuousReaderProgressBar> {
   bool _hover = false;
+  bool _dragging = false;
+  double? _previewFraction;
+  double? _previewDx;
 
   bool get _desktopHoverMode => _isDesktopReaderPlatform;
-  bool get _interactive => widget.active || (_desktopHoverMode && _hover);
+  bool get _interactive => widget.active || (_desktopHoverMode && _hover) || _dragging;
+  double get _displayFraction => (_previewFraction ?? widget.progress).clamp(0.0, 1.0).toDouble();
 
   void _handlePosition(Offset localPosition, double width) {
     if (width <= 0) return;
-    widget.onFractionSelected((localPosition.dx / width).clamp(0.0, 1.0).toDouble());
+    final fraction = (localPosition.dx / width).clamp(0.0, 1.0).toDouble();
+    setState(() {
+      _previewFraction = fraction;
+      _previewDx = localPosition.dx.clamp(0.0, width).toDouble();
+    });
+    widget.onFractionSelected(fraction);
+  }
+
+  void _finishPreview() {
+    if (!_dragging && _previewFraction == null) return;
+    setState(() {
+      _dragging = false;
+      if (!_desktopHoverMode || !_hover) {
+        _previewFraction = null;
+        _previewDx = null;
+      }
+    });
   }
 
   @override
@@ -6097,32 +6203,77 @@ class _ContinuousReaderProgressBarState extends State<_ContinuousReaderProgressB
           children: [
             MouseRegion(
               onEnter: (_) { if (_desktopHoverMode) setState(() => _hover = true); },
-              onExit: (_) { if (_desktopHoverMode) setState(() => _hover = false); },
+              onExit: (_) { if (_desktopHoverMode) setState(() { _hover = false; _previewFraction = null; _previewDx = null; }); },
               child: LayoutBuilder(
                 builder: (context, constraints) {
+                  final bubbleVisible = active && (_dragging || widget.active || (_desktopHoverMode && _hover));
+                  final bubbleLeft = ((_previewDx ?? (_displayFraction * constraints.maxWidth)) - 32).clamp(0.0, (constraints.maxWidth - 64).clamp(0.0, constraints.maxWidth)).toDouble();
                   return GestureDetector(
                     behavior: HitTestBehavior.opaque,
                     onTapDown: (details) {
+                      setState(() => _dragging = true);
                       if (_desktopHoverMode) { _handlePosition(details.localPosition, constraints.maxWidth); return; }
-                      if (!widget.active) { widget.onActivate(); return; }
+                      if (!widget.active) { widget.onActivate(); _handlePosition(details.localPosition, constraints.maxWidth); return; }
                       _handlePosition(details.localPosition, constraints.maxWidth);
                     },
-                    onHorizontalDragStart: (_) { if (!_desktopHoverMode && !widget.active) widget.onActivate(); },
-                    onHorizontalDragUpdate: (details) {
-                      if (_desktopHoverMode || widget.active) _handlePosition(details.localPosition, constraints.maxWidth);
+                    onTapUp: (_) => _finishPreview(),
+                    onTapCancel: _finishPreview,
+                    onHorizontalDragStart: (details) {
+                      setState(() => _dragging = true);
+                      if (!_desktopHoverMode && !widget.active) widget.onActivate();
+                      _handlePosition(details.localPosition, constraints.maxWidth);
                     },
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 130),
-                      height: hitAreaHeight,
-                      padding: EdgeInsets.symmetric(vertical: (hitAreaHeight - visualHeight) / 2),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(999),
-                        child: LinearProgressIndicator(
-                          value: widget.progress.clamp(0.0, 1.0).toDouble(),
-                          minHeight: visualHeight,
-                          valueColor: AlwaysStoppedAnimation<Color>(active ? indigo : gold),
-                          backgroundColor: active ? indigo.withOpacity(0.20) : gold.withOpacity(0.20),
-                        ),
+                    onHorizontalDragUpdate: (details) {
+                      if (_desktopHoverMode || widget.active || _dragging) _handlePosition(details.localPosition, constraints.maxWidth);
+                    },
+                    onHorizontalDragEnd: (_) => _finishPreview(),
+                    onHorizontalDragCancel: _finishPreview,
+                    child: SizedBox(
+                      height: hitAreaHeight + (bubbleVisible ? 28 : 0),
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          if (bubbleVisible)
+                            Positioned(
+                              left: bubbleLeft,
+                              top: 0,
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  color: indigo.withOpacity(0.92),
+                                  borderRadius: BorderRadius.circular(999),
+                                  boxShadow: [
+                                    BoxShadow(color: Colors.black.withOpacity(0.16), blurRadius: 8, offset: const Offset(0, 2)),
+                                  ],
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                  child: Text(
+                                    '${(_displayFraction * 100).clamp(0, 100).toStringAsFixed(1)}%',
+                                    style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          Positioned(
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 130),
+                              height: hitAreaHeight,
+                              padding: EdgeInsets.symmetric(vertical: (hitAreaHeight - visualHeight) / 2),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(999),
+                                child: LinearProgressIndicator(
+                                  value: _displayFraction,
+                                  minHeight: visualHeight,
+                                  valueColor: AlwaysStoppedAnimation<Color>(active ? indigo : gold),
+                                  backgroundColor: active ? indigo.withOpacity(0.20) : gold.withOpacity(0.20),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   );
@@ -8271,7 +8422,10 @@ class _PairingQrScannerScreen extends StatefulWidget {
 }
 
 class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
-  final _controller = MobileScannerController();
+  final _controller = MobileScannerController(
+    detectionSpeed: DetectionSpeed.noDuplicates,
+    facing: CameraFacing.back,
+  );
   bool _handled = false;
 
   @override
@@ -8280,15 +8434,48 @@ class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
     super.dispose();
   }
 
+  Widget _scannerFallback(BuildContext context, Object error) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.qr_code_scanner_rounded, size: 56, color: _raWarmGold),
+            const SizedBox(height: 16),
+            Text(
+              'Не удалось запустить камеру для сканирования QR.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '$error',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 18),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(context).pop(),
+              icon: const Icon(Icons.keyboard_rounded),
+              label: const Text('Ввести код вручную'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Сканировать QR-код')),
+      appBar: AppBar(title: const Text('Сканировать QR')),
       body: Column(
         children: [
           Expanded(
             child: MobileScanner(
               controller: _controller,
+              errorBuilder: (context, error, child) => _scannerFallback(context, error),
               onDetect: (capture) {
                 if (_handled) return;
                 final barcodes = capture.barcodes;
@@ -8304,7 +8491,7 @@ class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Text(
-                'Наведите камеру на QR-код ReadArc. Приложение подключится через официальный relay автоматически.',
+                'Наведите камеру на QR-код ReadArc. Можно также вернуться назад и ввести 6-значный код вручную.',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.bodyMedium,
               ),
