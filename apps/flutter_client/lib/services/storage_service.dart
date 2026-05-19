@@ -156,9 +156,13 @@ class StorageService {
 
   Future<void> saveManifest(LibraryManifest manifest) async {
     final file = await manifestFile();
+    final normalized = _normalizeManifest(manifest);
+    if (await _rejectDestructiveManifestOverwrite(file, normalized)) {
+      return;
+    }
     await _backupManifestIfPresent(file);
     const encoder = JsonEncoder.withIndent('  ');
-    final payload = encoder.convert(_normalizeManifest(manifest).toJson());
+    final payload = encoder.convert(normalized.toJson());
     final tmp = File('${file.path}.tmp-${_uuid.v4()}');
     await tmp.writeAsString(payload, flush: true);
     try {
@@ -171,6 +175,31 @@ class StorageService {
       } catch (_) {
         // Best-effort cleanup only.
       }
+    }
+  }
+
+  Future<bool> _rejectDestructiveManifestOverwrite(File file, LibraryManifest candidate) async {
+    if (!await file.exists()) return false;
+    try {
+      final raw = await file.readAsString();
+      final decoded = jsonDecode(raw);
+      final current = LibraryManifest.fromJson(Map<String, dynamic>.from(decoded as Map));
+      if (current.visibleBooks.isEmpty) return false;
+      if (candidate.visibleBooks.isNotEmpty) return false;
+      if (candidate.books.length >= current.books.length && current.books.isNotEmpty) return false;
+
+      final rejectedDir = Directory(p.join((await appDir()).path, 'manifest_rejected'));
+      if (!await rejectedDir.exists()) await rejectedDir.create(recursive: true);
+      final stamp = DateTime.now().toUtc().toIso8601String().replaceAll(RegExp(r'[^0-9A-Za-z]+'), '_');
+      await File(p.join(rejectedDir.path, 'destructive_$stamp.json')).writeAsString(
+        const JsonEncoder.withIndent('  ').convert(candidate.toJson()),
+        flush: true,
+      );
+      return true;
+    } catch (_) {
+      // If the current manifest is unreadable, the recovery path in loadManifest()
+      // must be allowed to repair it by saving a valid replacement.
+      return false;
     }
   }
 

@@ -1652,7 +1652,10 @@ class _DocxPageView extends StatelessWidget {
           lines += (len / charsPerLine).ceil().clamp(1, 80).toInt();
         }
         final lineHeight = fontSize * format.lineHeight.clamp(1.0, 2.4).toDouble();
-        return format.spaceBefore + format.spaceAfter + lines * lineHeight;
+        // Flutter text wrapping is slightly more compact than Word/Pages for
+        // Times-like fonts; keep pagination conservative so pages do not absorb
+        // too much text compared with a real DOCX viewer.
+        return (format.spaceBefore + format.spaceAfter + lines * lineHeight) * 1.18;
     }
   }
 
@@ -1778,8 +1781,9 @@ class _DocxPaperPage extends StatelessWidget {
           ),
         ],
       ),
-      child: ConstrainedBox(
-        constraints: BoxConstraints(minWidth: fixedPageWidth, minHeight: minHeight),
+      child: SizedBox(
+        width: fixedPageWidth,
+        height: minHeight,
         child: Padding(
           padding: EdgeInsets.fromLTRB(
             page.logicalLeftMargin * scale,
@@ -1799,8 +1803,8 @@ class _DocxPaperPage extends StatelessWidget {
                   scale: scale,
                 ),
               for (final block in blocks) _DocxBlockView(block: block, scale: scale),
-              if (document.officeFooterBlocks.isNotEmpty) ...[
-                SizedBox(height: 28 * scale),
+              const Spacer(),
+              if (document.officeFooterBlocks.isNotEmpty)
                 _DocxHeaderFooterView(
                   blocks: document.officeFooterBlocks,
                   isHeader: false,
@@ -1808,7 +1812,6 @@ class _DocxPaperPage extends StatelessWidget {
                   pageCount: pageCount,
                   scale: scale,
                 ),
-              ],
             ],
           ),
         ),
@@ -1834,19 +1837,38 @@ class _DocxHeaderFooterView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final visible = _docxHeaderFooterVisibleBlocks(blocks, isHeader: isHeader);
+    if (visible.isEmpty) return SizedBox(height: isHeader ? 4 * scale : 0);
     return Padding(
-      padding: EdgeInsets.only(bottom: isHeader ? 18 * scale : 0, top: isHeader ? 0 : 8 * scale),
+      padding: EdgeInsets.only(bottom: isHeader ? 14 * scale : 0, top: isHeader ? 0 : 6 * scale),
       child: DefaultTextStyle.merge(
-        style: TextStyle(color: const Color(0xFF777777), fontSize: 9.5 * scale, height: 1.12, fontFamily: 'Times New Roman'),
+        style: TextStyle(color: const Color(0xFF777777), fontSize: 8.8 * scale, height: 1.08, fontFamily: 'Times New Roman'),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            for (final block in blocks) _DocxBlockView(block: block, compact: true, scale: scale),
+            for (final block in visible) _DocxBlockView(block: block, compact: true, scale: scale),
           ],
         ),
       ),
     );
   }
+}
+
+List<_Fb2Block> _docxHeaderFooterVisibleBlocks(List<_Fb2Block> blocks, {required bool isHeader}) {
+  final result = <_Fb2Block>[];
+  final seen = <String>{};
+  for (final block in blocks) {
+    final text = block.plainText.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (text.isEmpty) continue;
+    // Word page-number fields often arrive as cached numeric runs. Rendering all
+    // of them produced duplicated "12 / 1" artifacts in the page header. Until a
+    // full field renderer is introduced, suppress numeric-only cached header runs.
+    if (isHeader && RegExp(r'^\d{1,4}$').hasMatch(text)) continue;
+    final fingerprint = '${block.kind}:$text'.toLowerCase();
+    if (!seen.add(fingerprint)) continue;
+    result.add(block);
+  }
+  return result;
 }
 
 class _DocxBlockView extends StatelessWidget {
@@ -1881,15 +1903,23 @@ class _DocxBlockView extends StatelessWidget {
         final size = (compact ? (format.fontSize * 0.82).clamp(8.0, 12.0).toDouble() : format.fontSize) * scale;
         final style = TextStyle(
           color: compact ? const Color(0xFF777777) : const Color(0xFF111111),
-          fontSize: isTitle && !compact ? size.clamp(12.0, 17.0).toDouble() : size,
+          fontSize: isTitle && !compact ? size.clamp(12.5, 17.5).toDouble() : size,
           height: format.lineHeight,
           fontFamily: 'Times New Roman',
           fontWeight: isTitle || format.bold ? FontWeight.w700 : FontWeight.w400,
           fontStyle: format.italic ? FontStyle.italic : FontStyle.normal,
         );
+        final listPrefix = compact ? null : format.listNumberText;
         final text = block.kind == _Fb2BlockKind.title
             ? TextSpan(text: block.plainText)
-            : TextSpan(children: block.inlines.map((inline) => _docxInlineSpan(inline, format, compact: compact, scale: scale)).toList());
+            : TextSpan(children: [
+                if (listPrefix != null && listPrefix.isNotEmpty)
+                  TextSpan(
+                    text: '$listPrefix ',
+                    style: TextStyle(fontWeight: FontWeight.w400, fontSize: size),
+                  ),
+                ...block.inlines.map((inline) => _docxInlineSpan(inline, format, compact: compact, scale: scale)),
+              ]);
         final leftIndent = compact ? 0.0 : format.leftIndent.clamp(0.0, 96.0).toDouble();
         final firstLine = compact ? 0.0 : format.firstLineIndent.clamp(-48.0, 72.0).toDouble();
         return Padding(
@@ -3044,20 +3074,24 @@ class _OfficePageFormat {
   final int marginTopTwips;
   final int marginBottomTwips;
 
-  double get logicalPageWidth => (widthTwips / 15.0).clamp(560.0, 980.0).toDouble();
-  double get logicalPageHeight => (heightTwips / 15.0).clamp(720.0, 1400.0).toDouble();
+  // Sprint 43: keep DOCX pages in physical Word proportions. The previous /15
+  // conversion made a page too wide for the effective font metrics and fitted
+  // too much text on one page. /18 is closer to Flutter's Times fallback metrics
+  // on macOS/Android and gives page breaks nearer to Pages/Preview.
+  double get logicalPageWidth => (widthTwips / 18.0).clamp(560.0, 860.0).toDouble();
+  double get logicalPageHeight => (heightTwips / 18.0).clamp(720.0, 1220.0).toDouble();
   double get aspectRatio => logicalPageWidth / logicalPageHeight;
-  double get logicalLeftMargin => (marginLeftTwips / 15.0).clamp(24.0, 112.0).toDouble();
-  double get logicalRightMargin => (marginRightTwips / 15.0).clamp(24.0, 112.0).toDouble();
-  double get logicalTopMargin => (marginTopTwips / 15.0).clamp(24.0, 112.0).toDouble();
-  double get logicalBottomMargin => (marginBottomTwips / 15.0).clamp(24.0, 112.0).toDouble();
+  double get logicalLeftMargin => (marginLeftTwips / 18.0).clamp(34.0, 118.0).toDouble();
+  double get logicalRightMargin => (marginRightTwips / 18.0).clamp(34.0, 118.0).toDouble();
+  double get logicalTopMargin => (marginTopTwips / 18.0).clamp(32.0, 118.0).toDouble();
+  double get logicalBottomMargin => (marginBottomTwips / 18.0).clamp(32.0, 118.0).toDouble();
 }
 
 class _OfficeParagraphFormat {
   const _OfficeParagraphFormat({
     this.align = _OfficeTextAlign.left,
-    this.fontSize = 12.0,
-    this.lineHeight = 1.15,
+    this.fontSize = 12.8,
+    this.lineHeight = 1.22,
     this.spaceBefore = 0.0,
     this.spaceAfter = 0.0,
     this.leftIndent = 0.0,
@@ -3065,6 +3099,7 @@ class _OfficeParagraphFormat {
     this.firstLineIndent = 0.0,
     this.headingLevel = 0,
     this.isList = false,
+    this.listNumberText,
     this.bold = false,
     this.italic = false,
   });
@@ -3079,6 +3114,7 @@ class _OfficeParagraphFormat {
   final double firstLineIndent;
   final int headingLevel;
   final bool isList;
+  final String? listNumberText;
   final bool bold;
   final bool italic;
 
@@ -3093,6 +3129,8 @@ class _OfficeParagraphFormat {
     double? firstLineIndent,
     int? headingLevel,
     bool? isList,
+    String? listNumberText,
+    bool clearListNumberText = false,
     bool? bold,
     bool? italic,
   }) {
@@ -3107,6 +3145,7 @@ class _OfficeParagraphFormat {
       firstLineIndent: firstLineIndent ?? this.firstLineIndent,
       headingLevel: headingLevel ?? this.headingLevel,
       isList: isList ?? this.isList,
+      listNumberText: clearListNumberText ? null : (listNumberText ?? this.listNumberText),
       bold: bold ?? this.bold,
       italic: italic ?? this.italic,
     );
@@ -3116,6 +3155,20 @@ class _OfficeParagraphFormat {
 class _OfficeTableFormat {
   const _OfficeTableFormat({this.columnTwips = const []});
   final List<int> columnTwips;
+}
+
+class _OfficeNumberingLevel {
+  const _OfficeNumberingLevel({
+    required this.level,
+    required this.textPattern,
+    required this.format,
+  });
+
+  final int level;
+  final String textPattern;
+  final String format;
+
+  bool get isBullet => format.toLowerCase().contains('bullet') || textPattern.contains('•');
 }
 
 enum _Fb2BlockKind { paragraph, title, image, table }
@@ -3155,7 +3208,7 @@ class _Fb2Block {
   const _Fb2Block.title(
     String text, {
     this.anchors = const [],
-    this.officeFormat = const _OfficeParagraphFormat(headingLevel: 1, fontSize: 15.0, bold: true, spaceBefore: 6.0, spaceAfter: 4.0, align: _OfficeTextAlign.center),
+    this.officeFormat = const _OfficeParagraphFormat(headingLevel: 1, fontSize: 15.5, bold: true, lineHeight: 1.16, spaceBefore: 6.0, spaceAfter: 4.0, align: _OfficeTextAlign.center),
   })  : kind = _Fb2BlockKind.title,
         inlines = const [],
         imageBytes = null,
@@ -3439,15 +3492,28 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
     html = html.replaceAll(RegExp(r'<script\b[^>]*>.*?</script>', caseSensitive: false, dotAll: true), '');
     html = html.replaceAll(RegExp(r'<style\b[^>]*>.*?</style>', caseSensitive: false, dotAll: true), '');
 
-    if (isLikelyNavigationHtml(html, normalizedPath)) {
-      // Calibre often places a generated HTML table of contents into the spine.
-      // It should not appear as continuous reader text; the actual target pages
-      // are still indexed below when their XHTML files are parsed.
-      addTarget(normalizedPath, null, blocks.length);
+    final navigationHtml = isLikelyNavigationHtml(html, normalizedPath);
+    addTarget(normalizedPath, null, blocks.length);
+    if (navigationHtml) {
+      // Sprint 43: keep generated EPUB TOC pages clickable, but render every
+      // anchor as a separate compact paragraph. This restores TOC links without
+      // dumping nested lists as one dense text blob.
+      final anchorMatches = RegExp(
+        r'''<a\b([^>]*)>(.*?)</a>''',
+        caseSensitive: false,
+        dotAll: true,
+      ).allMatches(html);
+      for (final link in anchorMatches) {
+        final attrs = link.group(1) ?? '';
+        final hrefRaw = _xmlAttr(attrs, 'href') ?? _attr(attrs, 'href');
+        final text = _htmlToPlainText(link.group(2) ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();
+        if (hrefRaw == null || hrefRaw.isEmpty || text.isEmpty) continue;
+        final href = _normalizeHtmlHref(hrefRaw, normalizedPath);
+        blocks.add(_Fb2Block.paragraph([_Fb2Inline(text, href: href)]));
+      }
       continue;
     }
 
-    addTarget(normalizedPath, null, blocks.length);
     final bodyTag = RegExp(r'''<body\b([^>]*)>''', caseSensitive: false).firstMatch(html);
     if (bodyTag != null) {
       final bodyAttrs = bodyTag.group(1) ?? '';
@@ -3455,7 +3521,9 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
       addTarget(normalizedPath, bodyAnchor, blocks.length);
     }
 
-    final blockRe = RegExp(r'<(h[1-6]|title|p|div|section|li|blockquote)\b([^>]*)>(.*?)</\1>', caseSensitive: false, dotAll: true);
+    final blockRe = navigationHtml
+        ? RegExp(r'<(h[1-6]|title|li)\b([^>]*)>(.*?)</\1>', caseSensitive: false, dotAll: true)
+        : RegExp(r'<(h[1-6]|title|p|div|section|li|blockquote)\b([^>]*)>(.*?)</\1>', caseSensitive: false, dotAll: true);
     for (final match in blockRe.allMatches(html)) {
       final tag = (match.group(1) ?? '').toLowerCase();
       final attrs = match.group(2) ?? '';
@@ -3839,7 +3907,7 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       _xmlAttr(tag, 'w:$localName') ?? _xmlAttr(tag, 'r:$localName') ?? _xmlAttr(tag, localName);
   String? wordVal(String tag) => wordAttr(tag, 'val');
   int? intAttr(String tag, String localName) => int.tryParse(wordAttr(tag, localName) ?? '');
-  double twipsToLogical(int? twips) => twips == null ? 0.0 : twips / 15.0;
+  double twipsToLogical(int? twips) => twips == null ? 0.0 : twips / 18.0;
 
   String? firstTag(String xml, String name) {
     final selfClosing = RegExp('<w:$name\\b[^>]*/>', caseSensitive: false, dotAll: true).firstMatch(xml);
@@ -3948,7 +4016,7 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
         headingLevel: level,
         bold: true,
         fontSize: (16.0 - ((level - 1) * 0.8)).clamp(12.0, 16.0).toDouble(),
-        lineHeight: 1.12,
+        lineHeight: 1.16,
         spaceBefore: level == 1 ? 6.0 : 4.0,
         spaceAfter: 3.0,
       );
@@ -3956,9 +4024,9 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       result = result.copyWith(
         headingLevel: 1,
         bold: true,
-        fontSize: 15.5,
+        fontSize: 16.0,
         align: _OfficeTextAlign.center,
-        lineHeight: 1.12,
+        lineHeight: 1.16,
         spaceBefore: 6.0,
         spaceAfter: 4.0,
       );
@@ -4028,6 +4096,70 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
   }
 
   final styles = parseStyles();
+
+
+  Map<String, Map<int, _OfficeNumberingLevel>> parseNumbering() {
+    final file = findFile('word/numbering.xml');
+    if (file == null) return const {};
+    final xml = _decodeTextFile(_archiveFileBytes(file));
+
+    final abstractLevels = <String, Map<int, _OfficeNumberingLevel>>{};
+    for (final abstractMatch in RegExp(r'<w:abstractNum\b([^>]*)>(.*?)</w:abstractNum>', caseSensitive: false, dotAll: true).allMatches(xml)) {
+      final abstractAttrs = abstractMatch.group(1) ?? '';
+      final abstractId = wordAttr(abstractAttrs, 'abstractNumId');
+      if (abstractId == null || abstractId.isEmpty) continue;
+      final body = abstractMatch.group(2) ?? '';
+      final levels = <int, _OfficeNumberingLevel>{};
+      for (final lvlMatch in RegExp(r'<w:lvl\b([^>]*)>(.*?)</w:lvl>', caseSensitive: false, dotAll: true).allMatches(body)) {
+        final lvlAttrs = lvlMatch.group(1) ?? '';
+        final level = int.tryParse(wordAttr(lvlAttrs, 'ilvl') ?? '') ?? 0;
+        final lvlBody = lvlMatch.group(2) ?? '';
+        final textPattern = wordVal(firstTag(lvlBody, 'lvlText') ?? '') ?? '%${level + 1}.';
+        final format = wordVal(firstTag(lvlBody, 'numFmt') ?? '') ?? 'decimal';
+        levels[level] = _OfficeNumberingLevel(level: level, textPattern: textPattern, format: format);
+      }
+      abstractLevels[abstractId] = levels;
+    }
+
+    final byNumId = <String, Map<int, _OfficeNumberingLevel>>{};
+    for (final numMatch in RegExp(r'<w:num\b([^>]*)>(.*?)</w:num>', caseSensitive: false, dotAll: true).allMatches(xml)) {
+      final attrs = numMatch.group(1) ?? '';
+      final numId = wordAttr(attrs, 'numId');
+      final body = numMatch.group(2) ?? '';
+      final abstractId = wordVal(firstTag(body, 'abstractNumId') ?? '');
+      if (numId == null || abstractId == null) continue;
+      final levels = abstractLevels[abstractId];
+      if (levels != null) byNumId[numId] = levels;
+    }
+    return byNumId;
+  }
+
+  final numbering = parseNumbering();
+  final numberingCounters = <String, List<int>>{};
+
+  String? numberPrefixForParagraph(String pPr) {
+    final numPr = innerTagBody(pPr, 'numPr');
+    if (numPr.isEmpty) return null;
+    final numId = wordVal(firstTag(numPr, 'numId') ?? '');
+    if (numId == null || numId.isEmpty) return null;
+    final level = (int.tryParse(wordVal(firstTag(numPr, 'ilvl') ?? '') ?? '') ?? 0).clamp(0, 8).toInt();
+    final levels = numbering[numId];
+    final info = levels == null ? null : levels[level];
+    final counters = numberingCounters.putIfAbsent(numId, () => List<int>.filled(9, 0));
+    counters[level] = counters[level] + 1;
+    for (var i = level + 1; i < counters.length; i++) {
+      counters[i] = 0;
+    }
+
+    if (info == null || info.isBullet) return '•';
+    var pattern = info.textPattern;
+    if (pattern.trim().isEmpty) pattern = '%${level + 1}.';
+    for (var i = 0; i <= level; i++) {
+      final value = counters[i] <= 0 ? 1 : counters[i];
+      pattern = pattern.replaceAll('%${i + 1}', value.toString());
+    }
+    return pattern;
+  }
 
   String textFromXml(String xml, {bool trim = true}) {
     final buffer = StringBuffer();
@@ -4173,13 +4305,22 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       final styleTag = firstTag(pPr, 'pStyle') ?? '';
       final styleId = wordVal(styleTag);
       final styleFormat = styleId == null ? const _OfficeParagraphFormat() : (styles[styleId] ?? const _OfficeParagraphFormat());
-      final paragraphFormat = formatFromPr(pPr, rPr, base: styleFormat, styleId: styleId);
+      var paragraphFormat = formatFromPr(pPr, rPr, base: styleFormat, styleId: styleId);
+      final explicitNumber = numberPrefixForParagraph(pPr);
+      if (explicitNumber != null && explicitNumber.isNotEmpty) {
+        paragraphFormat = paragraphFormat.copyWith(
+          isList: true,
+          listNumberText: explicitNumber,
+          leftIndent: paragraphFormat.leftIndent == 0 ? 28.0 : paragraphFormat.leftIndent,
+          firstLineIndent: paragraphFormat.firstLineIndent == 0 ? -18.0 : paragraphFormat.firstLineIndent,
+        );
+      }
       final inlines = inlinesFromParagraphXml(raw, paragraphFormat);
       final text = inlines.map((inline) => inline.text).join().replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trim();
       if (text.isNotEmpty) {
         if (paragraphFormat.headingLevel > 0) {
           partBlocks.add(_Fb2Block.title(text, officeFormat: paragraphFormat));
-        } else if (paragraphFormat.isList && !text.startsWith('•') && !RegExp(r'^\d+[.)]').hasMatch(text)) {
+        } else if (paragraphFormat.isList && paragraphFormat.listNumberText == null && !text.startsWith('•') && !RegExp(r'^\d+(?:\.\d+)*[.)]?').hasMatch(text)) {
           partBlocks.add(_Fb2Block.paragraph([const _Fb2Inline('• '), ...inlines], officeFormat: paragraphFormat));
         } else {
           partBlocks.add(_Fb2Block.paragraph(inlines, officeFormat: paragraphFormat));

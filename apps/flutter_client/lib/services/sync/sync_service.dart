@@ -482,10 +482,14 @@ class SyncService {
 
   void _startMetadataRefreshLoop(RelayClient client) {
     _metadataRefreshTimer?.cancel();
-    _metadataRefreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+    _metadataRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (_client != client || !state.value.connected || _manualDisconnect) return;
+      // Sprint 43 Sync v2: periodic health/queue maintenance must not spam peers
+      // with snapshot requests. Repeated requests can resurrect stale queued
+      // metadata from just-paired or empty devices and make the UI look as if the
+      // library was lost. Snapshot requests remain explicit: on connect, after
+      // pairing, and after a guarded/destructive snapshot is rejected.
       unawaited(pullOfflineQueue(reason: 'periodic'));
-      unawaited(requestLibrarySnapshot(reason: 'periodic_metadata_pull'));
     });
   }
 
@@ -1178,14 +1182,27 @@ class SyncService {
     }
 
     final remote = LibraryManifest.fromJson(Map<String, dynamic>.from(payloadManifest));
+    if (remote.deviceId == local.deviceId) {
+      // Ignore echoes of our own snapshot. Relay offline queues can deliver a
+      // local snapshot back after reconnect; applying it is useless and can mask
+      // more recent local changes.
+      return;
+    }
     final merged = mergeManifests(local, remote);
     if (_looksLikeAccidentalEmptyLibrarySnapshot(local: local, remote: remote, merged: merged)) {
       _appendLog('Отклонён snapshot, который скрывал всю локальную библиотеку. Запрошена повторная синхронизация.');
       await requestLibrarySnapshot(reason: 'destructive_snapshot_guard');
       return;
     }
+    final currentVisible = local.visibleBooks.length;
+    final mergedVisible = merged.visibleBooks.length;
+    if (currentVisible > 0 && mergedVisible == 0) {
+      _appendLog('Отклонён snapshot: локальная библиотека local-first не может быть заменена пустым состоянием.');
+      await requestLibrarySnapshot(reason: 'local_first_empty_merge_guard');
+      return;
+    }
     await _storage.saveManifest(merged);
-    _manifestChanges.add(merged);
+    _manifestChanges.add(await _storage.loadManifest());
     if (merged.isCurrentDeviceRevoked) {
       _appendLog('Доступ этого устройства отозван. Синхронизация остановлена.');
       await disconnect(manual: true);
