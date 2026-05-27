@@ -1579,8 +1579,11 @@ class _DocxPageView extends StatelessWidget {
   final _Fb2Document document;
 
   List<_Fb2Block> _visibleBlocks() {
-    final result = document.blocks.where((block) => block.plainText != _officePageBreakMarker).toList(growable: false);
-    if (result.isNotEmpty) return result;
+    // Keep explicit page-break markers in the flow. Earlier builds filtered them
+    // out here, so the paginator ignored Word-declared page breaks and then
+    // guessed page starts from rough height estimates.
+    final result = document.blocks.toList(growable: false);
+    if (result.any((block) => block.plainText.trim().isNotEmpty && block.plainText != _officePageBreakMarker)) return result;
     return const [
       _Fb2Block.paragraph([
         _Fb2Inline('DOCX открыт, но в документе не найдено отображаемое содержимое.'),
@@ -1655,7 +1658,7 @@ class _DocxPageView extends StatelessWidget {
         // Flutter text wrapping is slightly more compact than Word/Pages for
         // Times-like fonts; keep pagination conservative so pages do not absorb
         // too much text compared with a real DOCX viewer.
-        return (format.spaceBefore + format.spaceAfter + lines * lineHeight) * 1.18;
+        return (format.spaceBefore + format.spaceAfter + lines * lineHeight) * 0.98;
     }
   }
 
@@ -1959,28 +1962,24 @@ class _DocxBlockView extends StatelessWidget {
         // indents with tab stops, but Flutter Text cannot. For paragraphs that
         // already contain their legal number in the text, keep the body left edge
         // aligned. Only generated numbering receives a small hanging gutter.
-        final rawLeftIndent = compact ? 0.0 : format.leftIndent.clamp(0.0, 104.0).toDouble();
-        final rawFirstLine = compact ? 0.0 : format.firstLineIndent.clamp(-48.0, 78.0).toDouble();
         final useGeneratedNumberGutter = isNumbered && !alreadyNumbered;
-        final leftIndent = useGeneratedNumberGutter ? rawLeftIndent.clamp(0.0, 34.0).toDouble() : 0.0;
-        final firstLine = useGeneratedNumberGutter ? rawFirstLine : 0.0;
-        final hangingPad = firstLine < 0 ? -firstLine : 0.0;
-        final firstLineShift = firstLine > 0 ? firstLine : 0.0;
+        // Word can express hanging indents with tab stops. Flutter Text cannot
+        // reproduce that exactly in a single paragraph widget; applying raw
+        // left/first-line indents created the visible DOCX "staircase". Keep the
+        // body edge aligned and reserve only a tiny gutter for generated numbers.
+        final leftIndent = useGeneratedNumberGutter ? 8.0 : 0.0;
         return Padding(
           padding: EdgeInsets.only(
             top: compact ? 0 : format.spaceBefore.clamp(0.0, 32.0).toDouble() * scale,
             bottom: (compact ? 2 : format.spaceAfter.clamp(0.0, 32.0).toDouble()) * scale,
-            left: (leftIndent + hangingPad).clamp(0.0, 112.0).toDouble() * scale,
+            left: leftIndent * scale,
             right: compact ? 0 : format.rightIndent.clamp(0.0, 96.0).toDouble() * scale,
           ),
-          child: Transform.translate(
-            offset: Offset(firstLineShift * scale, 0),
-            child: Text.rich(
-              text,
-              style: style,
-              textAlign: _officeTextAlign(format.align),
-              softWrap: true,
-            ),
+          child: Text.rich(
+            text,
+            style: style,
+            textAlign: _officeTextAlign(format.align),
+            softWrap: true,
           ),
         );
     }
@@ -2215,6 +2214,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
   static const _lineExtent = _fontSize * _heightFactor;
   static const _titleExtent = 38.0;
   static const _imageExtent = 480.0;
+  static const _coverImageExtent = 760.0;
   static const _horizontalReaderPadding = 22.0;
   static const _topPadding = 18.0;
   static const _bottomPadding = 28.0;
@@ -2645,29 +2645,25 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
           // the screen stayed on a stale rendered position; the next tiny scroll
           // then snapped progress back to the actual location.
           final targetLocator = _locatorForUnit(safe);
-          // In long EPUBs, unit character anchors are often more reliable than
-          // accumulated ListView extents after generated TOC/cover/image blocks.
-          // Jump to the same fraction that the progress bar shows for the resolved
-          // link target; this prevents the UI from showing an old 80.3% viewport
-          // while the locator/progress already says 82.6%.
-          final targetProgress = (targetLocator?.progressPercent ?? 0).clamp(0.0, 100.0).toDouble();
-          for (var attempt = 0; attempt < 24; attempt++) {
+          // For EPUB links the only reliable target is the rendered unit offset.
+          // Character-progress and scroll-progress are not proportional: covers,
+          // images, TOC items and tables have very different visual heights. Using
+          // maxScrollExtent * progress caused chapter links to show a correct
+          // percentage while the viewport landed several pages earlier.
+          for (var attempt = 0; attempt < 28; attempt++) {
             await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 0 : 32));
             if (!mounted || !_scrollController.hasClients) continue;
             final position = _scrollController.position;
             if (!position.hasContentDimensions) continue;
             final max = position.maxScrollExtent;
-            final byProgress = (max * (targetProgress / 100.0)).clamp(0.0, max).toDouble();
-            final byUnit = _offsetForUnit(safe).clamp(0.0, max).toDouble();
-            // Prefer progress-based positioning for EPUB TOC links. Keep unit offset
-            // as a fallback for very short documents where progress has no meaning.
-            final offset = max > 0 ? byProgress : byUnit;
+            final offset = _offsetForUnit(safe).clamp(0.0, max).toDouble();
             _scrollController.jumpTo(offset);
-            if ((_scrollController.offset - offset).abs() < 2.0 || attempt >= 18) break;
+            if ((_scrollController.offset - offset).abs() < 1.0 || attempt >= 22) break;
           }
-          final locator = _currentLocator() ?? targetLocator;
+          final locator = targetLocator ?? _currentLocator();
           if (locator != null) {
             _lastKnownLocator = locator;
+            _pendingUnitIndex = locator.unitIndex;
             _progress = locator.progressPercent;
             await _saveProgress(locator);
             if (mounted) setState(() {});
@@ -2841,10 +2837,10 @@ class _Fb2UnitView extends StatelessWidget {
           padding: const EdgeInsets.symmetric(vertical: 8),
           child: Image.memory(
             bytes,
-            fit: unit.blockIndex == 0 ? BoxFit.fitWidth : BoxFit.contain,
-            alignment: Alignment.topCenter,
+            fit: BoxFit.contain,
+            alignment: Alignment.center,
             width: double.infinity,
-            height: _Fb2ReaderScreenState._imageExtent - 16,
+            height: unit.extent - 16,
             errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined),
           ),
         ),
@@ -2979,7 +2975,7 @@ class _Fb2RenderUnit {
       : segments = const [],
         tableRows = const [],
         isTitle = false,
-        extent = _Fb2ReaderScreenState._imageExtent;
+        extent = blockIndex == 0 ? _Fb2ReaderScreenState._coverImageExtent : _Fb2ReaderScreenState._imageExtent;
 
   _Fb2RenderUnit.table(this.tableRows, this.blockIndex, this.unitInBlock, this.anchorChar, this.endChar)
       : segments = const [],
@@ -4493,10 +4489,17 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       final text = inlines.map((inline) => inline.text).join().replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trim();
       if (text.isNotEmpty) rememberVisibleTopNumber(text);
       if (text.isEmpty && !hasPageBreak && RegExp(r'<w:p\b', caseSensitive: false).hasMatch(raw)) {
-        final hasVisibleSpacing = paragraphFormat.spaceBefore > 0 || paragraphFormat.spaceAfter > 0 || RegExp(r'<w:br\b', caseSensitive: false).hasMatch(raw);
-        if (hasVisibleSpacing) {
-          partBlocks.add(_Fb2Block.paragraph(const [_Fb2Inline(' ')], officeFormat: paragraphFormat.copyWith(spaceAfter: paragraphFormat.spaceAfter == 0 ? 6.0 : paragraphFormat.spaceAfter)));
-        }
+        // Preserve intentional blank paragraphs. In contracts and signatures an
+        // empty Word paragraph is often layout, not noise.
+        partBlocks.add(_Fb2Block.paragraph(
+          const [_Fb2Inline(' ')],
+          officeFormat: paragraphFormat.copyWith(
+            fontSize: paragraphFormat.fontSize <= 0 ? 12.0 : paragraphFormat.fontSize,
+            lineHeight: paragraphFormat.lineHeight <= 0 ? 1.18 : paragraphFormat.lineHeight,
+            spaceBefore: paragraphFormat.spaceBefore == 0 ? 2.0 : paragraphFormat.spaceBefore,
+            spaceAfter: paragraphFormat.spaceAfter == 0 ? 6.0 : paragraphFormat.spaceAfter,
+          ),
+        ));
       }
       if (text.isNotEmpty) {
         if (paragraphFormat.headingLevel > 0) {
@@ -8517,10 +8520,6 @@ class _PairingQrScannerScreen extends StatefulWidget {
 }
 
 class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
-  // Reverted to the controller-based mobile_scanner path that was stable on Android
-  // before Sprint 43.1/43.2 hardening. The controller is owned by this screen and
-  // disposed with it; using MobileScanner's implicit controller triggered a
-  // platform-side null object reference on some Android builds.
   final _controller = MobileScannerController();
   bool _handled = false;
 
@@ -8539,7 +8538,6 @@ class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
           Expanded(
             child: MobileScanner(
               controller: _controller,
-              fit: BoxFit.cover,
               onDetect: (capture) {
                 if (_handled) return;
                 final barcodes = capture.barcodes;
