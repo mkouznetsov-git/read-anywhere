@@ -9,7 +9,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:archive/archive.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:qr_code_scanner_plus/qr_code_scanner_plus.dart';
 import 'package:pdfx/pdfx.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -8706,12 +8706,42 @@ class _PairingQrScannerScreen extends StatefulWidget {
 }
 
 class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
-  final _controller = MobileScannerController();
+  final _qrKey = GlobalKey(debugLabel: 'ReadArcQrScanner');
+  QRViewController? _controller;
+  StreamSubscription<Barcode>? _subscription;
   bool _handled = false;
+
+  void _onQRViewCreated(QRViewController controller) {
+    _controller = controller;
+    _subscription = controller.scannedDataStream.listen((scan) {
+      if (_handled) return;
+      final value = scan.code;
+      if (value == null || value.trim().isEmpty) return;
+      _handled = true;
+      unawaited(_subscription?.cancel());
+      _subscription = null;
+      unawaited(controller.pauseCamera());
+      if (mounted) Navigator.of(context).pop(value.trim());
+    }, onError: (Object error, StackTrace stackTrace) {
+      debugPrint('ReadArc QR scanner stream error: $error\n$stackTrace');
+    });
+  }
+
+  @override
+  void reassemble() {
+    super.reassemble();
+    final controller = _controller;
+    if (controller == null) return;
+    if (Platform.isAndroid) {
+      unawaited(controller.pauseCamera());
+    }
+    unawaited(controller.resumeCamera());
+  }
 
   @override
   void dispose() {
-    _controller.dispose();
+    unawaited(_subscription?.cancel());
+    _controller?.dispose();
     super.dispose();
   }
 
@@ -8722,26 +8752,49 @@ class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
       body: Column(
         children: [
           Expanded(
-            child: MobileScanner(
-              controller: _controller,
-              onDetect: (capture) {
-                if (_handled) return;
-                final barcodes = capture.barcodes;
-                if (barcodes.isEmpty) return;
-                final value = barcodes.first.rawValue;
-                if (value == null || value.trim().isEmpty) return;
-                _handled = true;
-                Navigator.of(context).pop(value.trim());
-              },
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                QRView(
+                  key: _qrKey,
+                  onQRViewCreated: _onQRViewCreated,
+                  overlay: QrScannerOverlayShape(
+                    borderColor: _raWarmGold,
+                    borderRadius: 14,
+                    borderLength: 28,
+                    borderWidth: 7,
+                    cutOutSize: MediaQuery.sizeOf(context).shortestSide * 0.68,
+                  ),
+                ),
+                Positioned(
+                  left: 24,
+                  right: 24,
+                  bottom: 24,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(0.48),
+                      borderRadius: BorderRadius.circular(18),
+                    ),
+                    child: const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                      child: Text(
+                        'Наведите камеру на QR-код ReadArc. После сканирования будет использован только 6-значный код подключения.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
           SafeArea(
             child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                'Наведите камеру на QR-код ReadArc. Можно также вернуться назад и ввести 6-значный код вручную.',
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodyMedium,
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+              child: FilledButton.icon(
+                onPressed: () => Navigator.of(context).pop(),
+                icon: const Icon(Icons.keyboard_alt_outlined),
+                label: const Text('Ввести код вручную'),
               ),
             ),
           ),

@@ -79,7 +79,12 @@ patterns = [
     (re.compile(r'compileSdk\s+(?:flutter\.compileSdkVersion|\d+)'), 'compileSdk 36'),
 ]
 
+allowed_plugins = {'file_picker', 'flutter_plugin_android_lifecycle', 'qr_code_scanner_plus'}
+
 for package in config.get('packages', []):
+    package_name = package.get('name', '')
+    if package_name not in allowed_plugins:
+        continue
     root = package_root(package.get('rootUri', ''))
     if root is None:
         continue
@@ -95,7 +100,7 @@ for package in config.get('packages', []):
             updated = pattern.sub(replacement, updated)
         if updated != text:
             gradle_file.write_text(updated)
-            patched.append(f"{package.get('name', root.name)}:{gradle_file}")
+            patched.append(f"{package_name}:{gradle_file}")
 
 if patched:
     print('ReadArc normalized Android plugin compileSdk to 36:')
