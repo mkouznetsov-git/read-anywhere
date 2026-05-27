@@ -1597,8 +1597,11 @@ class _DocxPageView extends StatelessWidget {
         .clamp(360.0, 1600.0)
         .toDouble();
     final headerReserve = document.officeHeaderBlocks.isEmpty ? 0.0 : 42.0;
-    final footerReserve = document.officeFooterBlocks.isEmpty ? 0.0 : 34.0;
-    final usableHeight = (logicalBodyHeight - headerReserve - footerReserve).clamp(300.0, logicalBodyHeight).toDouble();
+    // Reserve a real footer band. A DOCX footer is not part of body flow: if the
+    // paginator lets body blocks consume this band, text visually sticks to the
+    // signature/footer line at the bottom of the page.
+    final footerReserve = document.officeFooterBlocks.isEmpty ? 0.0 : 62.0;
+    final usableHeight = (logicalBodyHeight - headerReserve - footerReserve - 8.0).clamp(300.0, logicalBodyHeight).toDouble();
     final usableWidth = (page.logicalPageWidth - page.logicalLeftMargin - page.logicalRightMargin)
         .clamp(260.0, 1400.0)
         .toDouble();
@@ -1658,7 +1661,7 @@ class _DocxPageView extends StatelessWidget {
         // Flutter text wrapping is slightly more compact than Word/Pages for
         // Times-like fonts; keep pagination conservative so pages do not absorb
         // too much text compared with a real DOCX viewer.
-        return (format.spaceBefore + format.spaceAfter + lines * lineHeight) * 0.98;
+        return (format.spaceBefore + format.spaceAfter + lines * lineHeight) * 1.06;
     }
   }
 
@@ -1809,6 +1812,7 @@ class _DocxPaperPage extends StatelessWidget {
                     ),
                   for (final block in blocks) _DocxBlockView(block: block, scale: scale),
                   const Spacer(),
+                  if (document.officeFooterBlocks.isNotEmpty) SizedBox(height: 16 * scale),
                   if (document.officeFooterBlocks.isNotEmpty)
                     _DocxHeaderFooterView(
                       blocks: document.officeFooterBlocks,
@@ -1946,15 +1950,20 @@ class _DocxBlockView extends StatelessWidget {
             ),
           );
         }
+        final displayInlines = _docxDisplayInlines(block.inlines);
+        final prefixShouldBeBold = isTitle || format.bold || displayInlines.where((inline) => inline.text.trim().isNotEmpty).every((inline) => inline.bold);
         final text = block.kind == _Fb2BlockKind.title
-            ? TextSpan(text: block.plainText)
+            ? TextSpan(text: block.plainText.trimLeft())
             : TextSpan(children: [
                 if (listPrefix != null && listPrefix.isNotEmpty)
                   TextSpan(
                     text: '$listPrefix ',
-                    style: style.copyWith(fontSize: isTitle && !compact ? size.clamp(12.5, 17.5).toDouble() : size),
+                    style: style.copyWith(
+                      fontSize: isTitle && !compact ? size.clamp(12.5, 17.5).toDouble() : size,
+                      fontWeight: prefixShouldBeBold ? FontWeight.w700 : style.fontWeight,
+                    ),
                   ),
-                ...block.inlines.map((inline) => _docxInlineSpan(inline, format, compact: compact, scale: scale)),
+                ...displayInlines.map((inline) => _docxInlineSpan(inline, format, compact: compact, scale: scale)),
               ]);
         final isNumbered = listPrefix != null && listPrefix.isNotEmpty;
         final alreadyNumbered = RegExp(r'^\s*(?:\d+(?:\.\d+)*[.)]?|[а-яё]\))\s+', caseSensitive: false).hasMatch(plain);
@@ -1967,7 +1976,7 @@ class _DocxBlockView extends StatelessWidget {
         // reproduce that exactly in a single paragraph widget; applying raw
         // left/first-line indents created the visible DOCX "staircase". Keep the
         // body edge aligned and reserve only a tiny gutter for generated numbers.
-        final leftIndent = useGeneratedNumberGutter ? 8.0 : 0.0;
+        final leftIndent = useGeneratedNumberGutter ? 6.0 : 0.0;
         return Padding(
           padding: EdgeInsets.only(
             top: compact ? 0 : format.spaceBefore.clamp(0.0, 32.0).toDouble() * scale,
@@ -1984,6 +1993,45 @@ class _DocxBlockView extends StatelessWidget {
         );
     }
   }
+}
+
+
+List<_Fb2Inline> _docxDisplayInlines(List<_Fb2Inline> source) {
+  if (source.isEmpty) return source;
+  final result = <_Fb2Inline>[];
+  var strippedLeading = false;
+  for (final inline in source) {
+    var text = inline.text;
+    if (!strippedLeading) {
+      final trimmed = text.replaceFirst(RegExp(r'^[ \t\u00A0]+'), '');
+      if (trimmed.isEmpty) {
+        result.add(_Fb2Inline(
+          '',
+          href: inline.href,
+          bold: inline.bold,
+          italic: inline.italic,
+          underline: inline.underline,
+          fontSize: inline.fontSize,
+          fontFamily: inline.fontFamily,
+          color: inline.color,
+        ));
+        continue;
+      }
+      text = trimmed;
+      strippedLeading = true;
+    }
+    result.add(_Fb2Inline(
+      text,
+      href: inline.href,
+      bold: inline.bold,
+      italic: inline.italic,
+      underline: inline.underline,
+      fontSize: inline.fontSize,
+      fontFamily: inline.fontFamily,
+      color: inline.color,
+    ));
+  }
+  return result.where((inline) => inline.text.isNotEmpty).toList(growable: false);
 }
 
 InlineSpan _docxInlineSpan(_Fb2Inline inline, _OfficeParagraphFormat format, {bool compact = false, double scale = 1.0}) {
@@ -2038,14 +2086,14 @@ class _DocxDocumentTableView extends StatelessWidget {
                     padding: EdgeInsets.symmetric(horizontal: (compact ? 2.5 : 3.2) * scale, vertical: (compact ? 1.8 : 2.4) * scale),
                     child: Text(
                       column < rows[rowIndex].length ? rows[rowIndex][column] : '',
-                      textAlign: _docxTableCellAlign(column < rows[rowIndex].length ? rows[rowIndex][column] : '', rowIndex, column, columnCount),
+                      textAlign: _docxTableCellAlign(column < rows[rowIndex].length ? rows[rowIndex][column] : '', rowIndex, column, columnCount, format),
                       style: TextStyle(
                         color: compact ? const Color(0xFF777777) : Colors.black,
                         fontSize: (compact ? 8.5 : 10.2) * scale,
                         height: 1.08,
                         fontFamily: 'Times New Roman',
-                        fontWeight: _docxTableCellShouldBeBold(rows, rowIndex, column, columnCount) ? FontWeight.w700 : FontWeight.w400,
-                        fontStyle: _docxTableCellShouldItalic(rows, rowIndex, column) ? FontStyle.italic : FontStyle.normal,
+                        fontWeight: _docxTableCellShouldBeBold(rows, rowIndex, column, columnCount, format) ? FontWeight.w700 : FontWeight.w400,
+                        fontStyle: _docxTableCellShouldItalic(rows, rowIndex, column, format) ? FontStyle.italic : FontStyle.normal,
                       ),
                       softWrap: true,
                     ),
@@ -2059,27 +2107,29 @@ class _DocxDocumentTableView extends StatelessWidget {
 }
 
 
-TextAlign _docxTableCellAlign(String text, int rowIndex, int column, int columnCount) {
+TextAlign _docxTableCellAlign(String text, int rowIndex, int column, int columnCount, _OfficeTableFormat? format) {
+  final explicit = _officeCellAlignAt(format, rowIndex, column);
+  if (explicit != null) return _officeTextAlign(explicit);
   final trimmed = text.trim();
   if (trimmed.isEmpty) return TextAlign.center;
   if (rowIndex == 0) return TextAlign.center;
   if (RegExp(r'^(?:итого|итог|total)\b', caseSensitive: false).hasMatch(trimmed)) return TextAlign.right;
   if (RegExp(r'^[\d\s.,]+$').hasMatch(trimmed)) return TextAlign.center;
-  if (columnCount <= 3 && trimmed.length < 48) return TextAlign.center;
-  if (column >= columnCount - 3) return TextAlign.center;
+  // Fall back to Word-like defaults: text left, explicit numeric cells centered.
   return TextAlign.left;
 }
 
-bool _docxTableCellShouldBeBold(List<List<String>> rows, int rowIndex, int column, int columnCount) {
-  if (rowIndex == 0) return true;
+bool _docxTableCellShouldBeBold(List<List<String>> rows, int rowIndex, int column, int columnCount, _OfficeTableFormat? format) {
+  if (_officeCellFlagAt(format?.cellBold ?? const [], rowIndex, column)) return true;
   final text = column < rows[rowIndex].length ? rows[rowIndex][column].trim() : '';
   if (text.isEmpty) return false;
-  if (column == 0 && columnCount <= 3) return true;
-  if (RegExp(r'^(?:покупатель|поставщик|порядок расч|срок постав|грузополучател|существенные условия)\b', caseSensitive: false).hasMatch(text)) return true;
+  if (rowIndex == 0) return true;
+  if (RegExp(r'^(?:покупатель|поставщик|порядок расч|срок постав|грузополучател|существенные условия|итого)\b', caseSensitive: false).hasMatch(text)) return true;
   return false;
 }
 
-bool _docxTableCellShouldItalic(List<List<String>> rows, int rowIndex, int column) {
+bool _docxTableCellShouldItalic(List<List<String>> rows, int rowIndex, int column, _OfficeTableFormat? format) {
+  if (_officeCellFlagAt(format?.cellItalic ?? const [], rowIndex, column)) return true;
   if (column <= 0 || rowIndex <= 0) return false;
   final firstColumn = rows.map((row) => row.isEmpty ? '' : row.first.toLowerCase()).join(' ');
   return firstColumn.contains('порядок расч') ||
@@ -2645,20 +2695,25 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
           // the screen stayed on a stale rendered position; the next tiny scroll
           // then snapped progress back to the actual location.
           final targetLocator = _locatorForUnit(safe);
-          // For EPUB links the only reliable target is the rendered unit offset.
-          // Character-progress and scroll-progress are not proportional: covers,
-          // images, TOC items and tables have very different visual heights. Using
-          // maxScrollExtent * progress caused chapter links to show a correct
-          // percentage while the viewport landed several pages earlier.
-          for (var attempt = 0; attempt < 28; attempt++) {
-            await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 0 : 32));
+          final targetProgress = targetLocator?.progressPercent;
+          var targetOffset = _offsetForUnit(safe);
+          for (var attempt = 0; attempt < 36; attempt++) {
+            await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 0 : 34));
             if (!mounted || !_scrollController.hasClients) continue;
             final position = _scrollController.position;
             if (!position.hasContentDimensions) continue;
             final max = position.maxScrollExtent;
-            final offset = _offsetForUnit(safe).clamp(0.0, max).toDouble();
+            final offset = targetOffset.clamp(0.0, max).toDouble();
             _scrollController.jumpTo(offset);
-            if ((_scrollController.offset - offset).abs() < 1.0 || attempt >= 22) break;
+            await Future<void>.delayed(const Duration(milliseconds: 8));
+            final actual = _currentLocator();
+            if (targetProgress == null || actual == null || (actual.progressPercent - targetProgress).abs() <= 0.25) break;
+            // Some EPUBs have covers, generated TOCs and large images, so char
+            // progress and visual scroll offset are not linear. If a link lands
+            // earlier than the target progress (for example 80.8% instead of
+            // 82.6%), nudge the physical offset forward and re-check.
+            final delta = ((targetProgress - actual.progressPercent) / 100.0) * max;
+            targetOffset = (offset + delta).clamp(0.0, max).toDouble();
           }
           final locator = targetLocator ?? _currentLocator();
           if (locator != null) {
@@ -3247,8 +3302,33 @@ class _OfficeParagraphFormat {
 }
 
 class _OfficeTableFormat {
-  const _OfficeTableFormat({this.columnTwips = const []});
+  const _OfficeTableFormat({
+    this.columnTwips = const [],
+    this.cellAligns = const [],
+    this.cellBold = const [],
+    this.cellItalic = const [],
+    this.cellSpans = const [],
+  });
+
   final List<int> columnTwips;
+  final List<List<_OfficeTextAlign?>> cellAligns;
+  final List<List<bool>> cellBold;
+  final List<List<bool>> cellItalic;
+  final List<List<int>> cellSpans;
+}
+
+_OfficeTextAlign? _officeCellAlignAt(_OfficeTableFormat? format, int row, int column) {
+  if (format == null || row < 0 || row >= format.cellAligns.length) return null;
+  final line = format.cellAligns[row];
+  if (column < 0 || column >= line.length) return null;
+  return line[column];
+}
+
+bool _officeCellFlagAt(List<List<bool>> matrix, int row, int column) {
+  if (row < 0 || row >= matrix.length) return false;
+  final line = matrix[row];
+  if (column < 0 || column >= line.length) return false;
+  return line[column];
 }
 
 class _OfficeNumberingLevel {
@@ -4402,7 +4482,52 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       final width = intAttr(col.group(0) ?? '', 'w');
       if (width != null && width > 0) widths.add(width);
     }
-    return _OfficeTableFormat(columnTwips: List.unmodifiable(widths));
+
+    final aligns = <List<_OfficeTextAlign?>>[];
+    final bold = <List<bool>>[];
+    final italic = <List<bool>>[];
+    final spans = <List<int>>[];
+    for (final row in RegExp(r'<w:tr\b[^>]*>(.*?)</w:tr>', caseSensitive: false, dotAll: true).allMatches(tblXml)) {
+      final rowBody = row.group(1) ?? '';
+      final rowAligns = <_OfficeTextAlign?>[];
+      final rowBold = <bool>[];
+      final rowItalic = <bool>[];
+      final rowSpans = <int>[];
+      for (final cell in RegExp(r'<w:tc\b[^>]*>(.*?)</w:tc>', caseSensitive: false, dotAll: true).allMatches(rowBody)) {
+        final cellXml = cell.group(1) ?? '';
+        final tcPr = innerTagBody(cellXml, 'tcPr');
+        final spanTag = firstTag(tcPr, 'gridSpan') ?? '';
+        final span = (int.tryParse(wordVal(spanTag) ?? '') ?? 1).clamp(1, 12).toInt();
+        final firstParagraph = RegExp(r'<w:p\b[^>]*>.*?</w:p>', caseSensitive: false, dotAll: true).firstMatch(cellXml)?.group(0) ?? '';
+        final pPr = innerTagBody(firstParagraph, 'pPr');
+        final rPr = innerTagBody(firstParagraph, 'rPr');
+        final jc = firstTag(pPr, 'jc');
+        final cellAlign = jc == null ? null : alignFromValue(wordVal(jc));
+        final cellBold = onTag(rPr, 'b') || RegExp(r'<w:b\b', caseSensitive: false).hasMatch(cellXml);
+        final cellItalic = onTag(rPr, 'i') || RegExp(r'<w:i\b', caseSensitive: false).hasMatch(cellXml);
+        rowAligns.add(cellAlign);
+        rowBold.add(cellBold);
+        rowItalic.add(cellItalic);
+        rowSpans.add(span);
+        for (var extra = 1; extra < span; extra++) {
+          rowAligns.add(cellAlign);
+          rowBold.add(cellBold);
+          rowItalic.add(cellItalic);
+          rowSpans.add(0);
+        }
+      }
+      aligns.add(List.unmodifiable(rowAligns));
+      bold.add(List.unmodifiable(rowBold));
+      italic.add(List.unmodifiable(rowItalic));
+      spans.add(List.unmodifiable(rowSpans));
+    }
+    return _OfficeTableFormat(
+      columnTwips: List.unmodifiable(widths),
+      cellAligns: List.unmodifiable(aligns),
+      cellBold: List.unmodifiable(bold),
+      cellItalic: List.unmodifiable(italic),
+      cellSpans: List.unmodifiable(spans),
+    );
   }
 
   List<List<String>> tableRowsFromXml(String tblXml) {
@@ -4422,7 +4547,7 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
             ? ''
             : RegExp(r'<w:p\b[^>]*>.*?</w:p>', caseSensitive: false, dotAll: true)
                 .allMatches(cellXml)
-                .map((p) => textFromXml(p.group(0) ?? ''))
+                .map((p) => textFromXml(p.group(0) ?? '', trim: false).trimRight())
                 .where((line) => line.trim().isNotEmpty)
                 .join('\n')
                 .replaceAll(RegExp(r'[ \t\u00A0]*\n[ \t\u00A0]*'), '\n')
@@ -4433,7 +4558,10 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
           cells.add('');
         }
       }
-      if (cells.any((cell) => cell.trim().isNotEmpty)) rows.add(List.unmodifiable(cells));
+      // Preserve explicit empty rows: Word tables often use them as layout rows
+      // in specifications and signature blanks. Dropping them collapsed the
+      // template and removed rows before ИТОГО.
+      if (cells.isNotEmpty) rows.add(List.unmodifiable(cells));
     }
     return rows;
   }
@@ -4497,7 +4625,7 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
             fontSize: paragraphFormat.fontSize <= 0 ? 12.0 : paragraphFormat.fontSize,
             lineHeight: paragraphFormat.lineHeight <= 0 ? 1.18 : paragraphFormat.lineHeight,
             spaceBefore: paragraphFormat.spaceBefore == 0 ? 2.0 : paragraphFormat.spaceBefore,
-            spaceAfter: paragraphFormat.spaceAfter == 0 ? 6.0 : paragraphFormat.spaceAfter,
+            spaceAfter: paragraphFormat.spaceAfter == 0 ? 9.0 : paragraphFormat.spaceAfter,
           ),
         ));
       }
