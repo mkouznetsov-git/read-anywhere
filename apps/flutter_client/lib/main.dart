@@ -1600,8 +1600,8 @@ class _DocxPageView extends StatelessWidget {
     // Reserve a real footer band. A DOCX footer is not part of body flow: if the
     // paginator lets body blocks consume this band, text visually sticks to the
     // signature/footer line at the bottom of the page.
-    final footerReserve = document.officeFooterBlocks.isEmpty ? 0.0 : 36.0;
-    final usableHeight = (logicalBodyHeight - headerReserve - footerReserve + 18.0).clamp(300.0, logicalBodyHeight).toDouble();
+    final footerReserve = document.officeFooterBlocks.isEmpty ? 0.0 : 18.0;
+    final usableHeight = (logicalBodyHeight - headerReserve - footerReserve + 44.0).clamp(300.0, logicalBodyHeight).toDouble();
     final usableWidth = (page.logicalPageWidth - page.logicalLeftMargin - page.logicalRightMargin)
         .clamp(260.0, 1400.0)
         .toDouble();
@@ -1651,7 +1651,7 @@ class _DocxPageView extends StatelessWidget {
             .expand((row) => row)
             .fold<int>(0, (max, cell) => cell.length > max ? cell.length : max);
         final extraLines = (maxCell / 42).ceil().clamp(0, 4).toInt();
-        return 14.0 + rowCount * (18.0 + extraLines * 7.0);
+        return 10.0 + rowCount * (16.0 + extraLines * 6.0);
       case _Fb2BlockKind.title:
       case _Fb2BlockKind.paragraph:
         final text = block.plainText.trim();
@@ -1668,7 +1668,7 @@ class _DocxPageView extends StatelessWidget {
         // Flutter text wrapping is slightly more compact than Word/Pages for
         // Times-like fonts; keep pagination conservative so pages do not absorb
         // too much text compared with a real DOCX viewer.
-        return (format.spaceBefore + format.spaceAfter + lines * lineHeight) * 0.98;
+        return (format.spaceBefore + format.spaceAfter + lines * lineHeight) * 0.88;
     }
   }
 
@@ -1794,10 +1794,11 @@ class _DocxPaperPage extends StatelessWidget {
           ),
         ],
       ),
-      child: SizedBox(
-        width: fixedPageWidth,
-        height: minHeight,
-        child: Stack(
+      child: ClipRect(
+        child: SizedBox(
+          width: fixedPageWidth,
+          height: minHeight,
+          child: Stack(
           children: [
             Padding(
               padding: EdgeInsets.fromLTRB(
@@ -1844,7 +1845,8 @@ class _DocxPaperPage extends StatelessWidget {
                 ),
               ),
             ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -2314,7 +2316,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
   static const _lineExtent = _fontSize * _heightFactor;
   static const _titleExtent = 38.0;
   static const _imageExtent = 480.0;
-  static const _coverImageExtent = 760.0;
+  static const _coverImageExtent = 820.0;
   static const _horizontalReaderPadding = 22.0;
   static const _topPadding = 18.0;
   static const _bottomPadding = 28.0;
@@ -2739,34 +2741,22 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
         _pendingUnitIndex = safe;
         _restoringPosition = true;
         try {
-          // EPUB links must move the real viewport first and only then update the
-          // locator/progress. Updating progress optimistically caused TOC items
-          // near chapter 16 in the Patton EPUB to show the right percentage while
-          // the screen stayed on a stale rendered position; the next tiny scroll
-          // then snapped progress back to the actual location.
+          // Internal EPUB links are block/unit anchors, not percentages.
+          // Jump to the exact rendered unit and only then save that exact locator.
+          // Progress is derived from the unit, so it cannot show the right percent
+          // while the viewport remains a few lines above or below the target.
           final targetLocator = _locatorForUnit(safe);
-          final targetProgress = targetLocator?.progressPercent;
-          var targetOffset = _offsetForUnit(safe);
-          for (var attempt = 0; attempt < 36; attempt++) {
-            await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 0 : 34));
+          for (var attempt = 0; attempt < 12; attempt++) {
+            await Future<void>.delayed(Duration(milliseconds: attempt == 0 ? 0 : 24));
             if (!mounted || !_scrollController.hasClients) continue;
             final position = _scrollController.position;
             if (!position.hasContentDimensions) continue;
             final max = position.maxScrollExtent;
-            final offset = targetOffset.clamp(0.0, max).toDouble();
+            final offset = _offsetForUnit(safe).clamp(0.0, max).toDouble();
             _scrollController.jumpTo(offset);
-            await Future<void>.delayed(const Duration(milliseconds: 8));
-            final actual = _currentLocator();
-            if (targetProgress == null || actual == null || (actual.progressPercent - targetProgress).abs() <= 0.25) break;
-            // Some EPUBs have covers, generated TOCs and large images, so char
-            // progress and visual scroll offset are not linear. If a link lands
-            // earlier than the target progress (for example 80.8% instead of
-            // 82.6%), nudge the physical offset forward and re-check.
-            final delta = ((targetProgress - actual.progressPercent) / 100.0) * max;
-            targetOffset = (offset + delta).clamp(0.0, max).toDouble();
+            break;
           }
-          final actualLocator = _currentLocator();
-          final locator = actualLocator ?? targetLocator;
+          final locator = targetLocator ?? _currentLocator();
           if (locator != null) {
             _lastKnownLocator = locator;
             _pendingUnitIndex = locator.unitIndex;
@@ -3764,18 +3754,35 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
     final contentHtml = bodyMatch?.group(1) ?? html;
     final blockRe = navigationHtml
         ? RegExp(r'<(h[1-6]|li)\b([^>]*)>(.*?)</\1>', caseSensitive: false, dotAll: true)
-        : RegExp(r'<(h[1-6]|p|li|blockquote)\b([^>]*)>(.*?)</\1>', caseSensitive: false, dotAll: true);
+        : RegExp(r'<(h[1-6]|p|li|blockquote|div)\b([^>]*)>(.*?)</\1>|<(img|image)\b([^>]*)/?>', caseSensitive: false, dotAll: true);
     for (final match in blockRe.allMatches(contentHtml)) {
-      final tag = (match.group(1) ?? '').toLowerCase();
-      final attrs = match.group(2) ?? '';
+      final tag = ((match.group(1) ?? match.group(4) ?? '')).toLowerCase();
+      final attrs = match.group(2) ?? match.group(5) ?? '';
       final body = match.group(3) ?? '';
+      if (tag == 'img' || tag == 'image') {
+        final srcRaw = _xmlAttr(match.group(0) ?? '', 'src') ?? _xmlAttr(match.group(0) ?? '', 'href') ?? _xmlAttr(match.group(0) ?? '', 'xlink:href') ?? _xmlAttr(match.group(0) ?? '', 'l:href');
+        if (srcRaw != null && srcRaw.isNotEmpty) {
+          final src = _normalizeHtmlHref(srcRaw, normalizedPath);
+          final image = imagePaths[src] ?? (findFile(src) == null ? null : _archiveFileBytes(findFile(src)!));
+          if (image != null && addedCoverImages.add(src)) {
+            blocks.add(_Fb2Block.image(image));
+          }
+        }
+        continue;
+      }
+      if (tag == 'div') {
+        final className = ((_xmlAttr('<x $attrs>', 'class') ?? _attr(attrs, 'class') ?? '').toLowerCase());
+        final containsChildBlocks = RegExp(r'<(?:h[1-6]|p|li|blockquote|div)\b', caseSensitive: false).hasMatch(body);
+        final plainBody = _htmlToPlainText(body).replaceAll(RegExp(r'\s+'), ' ').trim();
+        final keepDiv = className.contains('paragraph') || className.contains('title') || className.contains('subtitle') || className.contains('caption') || (!containsChildBlocks && plainBody.isNotEmpty);
+        if (!keepDiv) continue;
+      }
       final targetIndex = blocks.length;
       final anchors = anchorsFrom(attrs, body);
       for (final anchor in anchors) {
         addTarget(normalizedPath, anchor, targetIndex);
       }
 
-      var blockAddedImage = false;
       for (final img in RegExp(r'''<(?:img|image)\b[^>]*>''', caseSensitive: false).allMatches(body)) {
         final tagText = img.group(0) ?? '';
         final srcRaw = _xmlAttr(tagText, 'src') ?? _xmlAttr(tagText, 'href') ?? _xmlAttr(tagText, 'xlink:href') ?? _xmlAttr(tagText, 'l:href');
@@ -3784,9 +3791,7 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
         final image = imagePaths[src] ?? (findFile(src) == null ? null : _archiveFileBytes(findFile(src)!));
         if (image != null && addedCoverImages.add(src)) {
           blocks.add(_Fb2Block.image(image, anchors: anchors));
-          blockAddedImage = true;
         } else if (image != null) {
-          blockAddedImage = true;
         }
       }
       final inlines = _parseHtmlInlines(body, normalizedPath);
@@ -8700,106 +8705,35 @@ class _PairingQrScannerScreen extends StatefulWidget {
   State<_PairingQrScannerScreen> createState() => _PairingQrScannerScreenState();
 }
 
-class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> with WidgetsBindingObserver {
-  late final MobileScannerController _controller;
+class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
+  final _controller = MobileScannerController();
   bool _handled = false;
-  bool _scannerMounted = false;
-  Object? _startupError;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _controller = MobileScannerController(
-      detectionSpeed: DetectionSpeed.noDuplicates,
-      facing: CameraFacing.back,
-    );
-    // Several Android devices crash mobile_scanner when the camera is attached
-    // during the same frame as the route transition. The older working ReadArc
-    // scanner effectively started after the page was mounted; keep that timing
-    // explicitly and show our own fallback instead of the plugin's black screen.
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await Future<void>.delayed(const Duration(milliseconds: 450));
-      if (!mounted) return;
-      setState(() => _scannerMounted = true);
-    });
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (!_scannerMounted) return;
-    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
-      unawaited(_controller.stop());
-    } else if (state == AppLifecycleState.resumed) {
-      unawaited(_controller.start());
-    }
-  }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    unawaited(_controller.stop());
     _controller.dispose();
     super.dispose();
   }
 
-  Widget _scannerFallback(BuildContext context, Object error) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.qr_code_scanner_rounded, size: 56, color: _raWarmGold),
-            const SizedBox(height: 16),
-            Text(
-              'Не удалось запустить камеру для сканирования QR.',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '$error',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: const Color(0xFFD8D1C0)),
-            ),
-            const SizedBox(height: 18),
-            FilledButton.icon(
-              onPressed: () => Navigator.of(context).pop(),
-              icon: const Icon(Icons.keyboard_rounded),
-              label: const Text('Ввести код вручную'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    final startupError = _startupError;
     return Scaffold(
       appBar: AppBar(title: const Text('Сканировать QR')),
       body: Column(
         children: [
           Expanded(
-            child: startupError != null
-                ? _scannerFallback(context, startupError)
-                : !_scannerMounted
-                    ? const Center(child: CircularProgressIndicator())
-                    : MobileScanner(
-                        controller: _controller,
-                        errorBuilder: (context, error, child) => _scannerFallback(context, error),
-                        onDetect: (capture) {
-                          if (_handled) return;
-                          final barcodes = capture.barcodes;
-                          if (barcodes.isEmpty) return;
-                          final value = barcodes.first.rawValue;
-                          if (value == null || value.trim().isEmpty) return;
-                          _handled = true;
-                          Navigator.of(context).pop(value.trim());
-                        },
-                      ),
+            child: MobileScanner(
+              controller: _controller,
+              onDetect: (capture) {
+                if (_handled) return;
+                final barcodes = capture.barcodes;
+                if (barcodes.isEmpty) return;
+                final value = barcodes.first.rawValue;
+                if (value == null || value.trim().isEmpty) return;
+                _handled = true;
+                Navigator.of(context).pop(value.trim());
+              },
+            ),
           ),
           SafeArea(
             child: Padding(
