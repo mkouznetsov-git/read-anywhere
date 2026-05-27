@@ -8282,7 +8282,13 @@ class _SyncScreenState extends State<SyncScreen> {
             Text('Код: ${invite.displayCode}'),
             const SizedBox(height: 4),
             Text(
-              'Отсканируйте QR на подключаемом устройстве. В поле ввода будет подставлен только 6-значный код.',
+              'Действует до: ${_formatLocalDateTimeSeconds(invite.expiresAt)}',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Отсканируйте QR на подключаемом устройстве.',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodySmall,
             ),
@@ -8435,18 +8441,11 @@ class _SyncScreenState extends State<SyncScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                manifest.deviceName,
-                                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                              ),
-                              const SizedBox(height: 6),
-                              SelectableText('Аккаунт: ${manifest.accountId}'),
-                            ],
+                          child: Text(
+                            manifest.deviceName,
+                            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                ),
                           ),
                         ),
                         const SizedBox(width: 12),
@@ -8458,46 +8457,59 @@ class _SyncScreenState extends State<SyncScreen> {
                       ],
                     ),
                     const SizedBox(height: 12),
-                    Wrap(
-                      spacing: 12,
-                      runSpacing: 8,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [
-                        OutlinedButton.icon(
-                          onPressed: _busy ? null : _editAccountId,
-                          icon: const Icon(Icons.manage_accounts_rounded),
-                          label: const Text('Редактировать аккаунт'),
-                        ),
-                        OutlinedButton.icon(
-                          onPressed: _copyAccountId,
-                          icon: const Icon(Icons.copy_rounded),
-                          label: const Text('Скопировать аккаунт'),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              _SectionCard(
-                title: 'Статус',
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(syncState.statusText),
+                    Text('Статус подключения: ${syncState.statusText}'),
                     if (manifest.isCurrentDeviceRevoked) ...[
                       const SizedBox(height: 10),
                       const Text(
                         'Доступ этого устройства отозван. Локальная библиотека остаётся доступной, но синхронизация остановлена. Для повторного подключения отсканируйте новый QR-код владельца аккаунта.',
                       ),
                     ],
-                    const SizedBox(height: 10),
-                    SelectableText('Идентификатор устройства: ${manifest.deviceId}'),
-                    SelectableText("Ключ устройства: ${manifest.currentDeviceTrust?.effectiveFingerprint ?? 'не создан'}"),
                   ],
                 ),
               ),
               _SectionCard(
-                title: 'Подключение устройства',
+                title: 'Подключение',
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (Platform.isAndroid || Platform.isIOS) ...[
+                      FilledButton.icon(
+                        onPressed: _pairingBusy ? null : _scanPairingQrCode,
+                        icon: const Icon(Icons.qr_code_scanner_rounded),
+                        label: const Text('Сканировать QR'),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    TextField(
+                      controller: _pairingInputController,
+                      decoration: const InputDecoration(
+                        labelText: 'Введите код приглашения',
+                      ),
+                      keyboardType: TextInputType.number,
+                      onSubmitted: (_) {
+                        if (!_pairingBusy) unawaited(_claimPairingInvite());
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: FilledButton.icon(
+                        onPressed: _pairingBusy ? null : _claimPairingInvite,
+                        icon: _pairingBusy
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.login_rounded),
+                        label: const Text('Подключиться по коду'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              _SectionCard(
+                title: 'Другое устройство',
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -8516,26 +8528,15 @@ class _SyncScreenState extends State<SyncScreen> {
                             label: const Text('Показать QR'),
                           ),
                         ),
-                        if (Platform.isAndroid || Platform.isIOS) ...[
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: FilledButton.icon(
-                              onPressed: _pairingBusy ? null : _scanPairingQrCode,
-                              icon: const Icon(Icons.qr_code_scanner_rounded),
-                              label: const Text('Сканировать QR'),
-                            ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: _pairingBusy ? null : _createPairingInvite,
+                            icon: const Icon(Icons.pin_rounded),
+                            label: const Text('Создать код подключения'),
                           ),
-                        ],
+                        ),
                       ],
-                    ),
-                    const SizedBox(height: 12),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: OutlinedButton.icon(
-                        onPressed: _pairingBusy ? null : _createPairingInvite,
-                        icon: const Icon(Icons.pin_rounded),
-                        label: const Text('Создать код подключения'),
-                      ),
                     ),
                     if (_pairingInvite != null) ...[
                       const SizedBox(height: 16),
@@ -8570,32 +8571,6 @@ class _SyncScreenState extends State<SyncScreen> {
                         ),
                       ),
                     ],
-                    const Divider(height: 32),
-                    TextField(
-                      controller: _pairingInputController,
-                      decoration: const InputDecoration(
-                        labelText: 'Введите код приглашения',
-                      ),
-                      keyboardType: TextInputType.number,
-                      onSubmitted: (_) {
-                        if (!_pairingBusy) unawaited(_claimPairingInvite());
-                      },
-                    ),
-                    const SizedBox(height: 12),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: FilledButton.icon(
-                        onPressed: _pairingBusy ? null : _claimPairingInvite,
-                        icon: _pairingBusy
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(strokeWidth: 2),
-                              )
-                            : const Icon(Icons.login_rounded),
-                        label: const Text('Подключиться по коду'),
-                      ),
-                    ),
                   ],
                 ),
               ),
@@ -8607,6 +8582,37 @@ class _SyncScreenState extends State<SyncScreen> {
                       : 'Доверенных: ${manifest.activeTrustedDevices.length}${revokedTrustedDevices > 0 ? ', отозвано: $revokedTrustedDevices' : ''}'),
                   childrenPadding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
                   children: [
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SelectableText('Аккаунт: ${manifest.accountId}'),
+                          const SizedBox(height: 10),
+                          Wrap(
+                            spacing: 12,
+                            runSpacing: 8,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              OutlinedButton.icon(
+                                onPressed: _busy ? null : _editAccountId,
+                                icon: const Icon(Icons.manage_accounts_rounded),
+                                label: const Text('Редактировать аккаунт'),
+                              ),
+                              OutlinedButton.icon(
+                                onPressed: _copyAccountId,
+                                icon: const Icon(Icons.copy_rounded),
+                                label: const Text('Скопировать аккаунт'),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          SelectableText('Идентификатор устройства: ${manifest.deviceId}'),
+                          SelectableText("Ключ устройства: ${manifest.currentDeviceTrust?.effectiveFingerprint ?? 'не создан'}"),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 28),
                     if (manifest.activeTrustedDevices.isEmpty)
                       const Align(
                         alignment: Alignment.centerLeft,

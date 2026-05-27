@@ -843,7 +843,8 @@ class StorageService {
   String _defaultDeviceName() {
     try {
       final host = Platform.localHostname.trim();
-      if (host.isNotEmpty) return host;
+      final normalized = host.replaceFirst(RegExp(r'\.local$', caseSensitive: false), '').trim();
+      if (normalized.isNotEmpty) return normalized;
     } catch (_) {
       // Some platforms may restrict hostname access.
     }
