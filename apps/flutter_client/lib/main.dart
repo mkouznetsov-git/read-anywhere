@@ -1600,8 +1600,8 @@ class _DocxPageView extends StatelessWidget {
     // Reserve a real footer band. A DOCX footer is not part of body flow: if the
     // paginator lets body blocks consume this band, text visually sticks to the
     // signature/footer line at the bottom of the page.
-    final footerReserve = document.officeFooterBlocks.isEmpty ? 0.0 : 62.0;
-    final usableHeight = (logicalBodyHeight - headerReserve - footerReserve - 8.0).clamp(300.0, logicalBodyHeight).toDouble();
+    final footerReserve = document.officeFooterBlocks.isEmpty ? 0.0 : 36.0;
+    final usableHeight = (logicalBodyHeight - headerReserve - footerReserve + 18.0).clamp(300.0, logicalBodyHeight).toDouble();
     final usableWidth = (page.logicalPageWidth - page.logicalLeftMargin - page.logicalRightMargin)
         .clamp(260.0, 1400.0)
         .toDouble();
@@ -1612,7 +1612,14 @@ class _DocxPageView extends StatelessWidget {
 
     void flush() {
       if (current.isEmpty) return;
-      pages.add(List.unmodifiable(current));
+      final hasVisibleContent = current.any((block) {
+        if (block.kind == _Fb2BlockKind.image || block.kind == _Fb2BlockKind.table) return true;
+        final text = block.plainText.replaceAll(_officePageBreakMarker, '').trim();
+        return text.isNotEmpty;
+      });
+      // Keep intentional blank paragraphs inside a real page, but never create a
+      // whole empty DOCX page from a run of section/page-break artifacts.
+      if (hasVisibleContent) pages.add(List.unmodifiable(current));
       current = <_Fb2Block>[];
       cursor = 0.0;
     }
@@ -1661,7 +1668,7 @@ class _DocxPageView extends StatelessWidget {
         // Flutter text wrapping is slightly more compact than Word/Pages for
         // Times-like fonts; keep pagination conservative so pages do not absorb
         // too much text compared with a real DOCX viewer.
-        return (format.spaceBefore + format.spaceAfter + lines * lineHeight) * 1.06;
+        return (format.spaceBefore + format.spaceAfter + lines * lineHeight) * 0.98;
     }
   }
 
@@ -1950,7 +1957,8 @@ class _DocxBlockView extends StatelessWidget {
             ),
           );
         }
-        final displayInlines = _docxDisplayInlines(block.inlines);
+        final preserveLeadingWhitespace = RegExp(r'^\s*М\.?П\.?', caseSensitive: false).hasMatch(block.plainText.replaceAll('\u2003', ' '));
+        final displayInlines = _docxDisplayInlines(block.inlines, preserveLeadingWhitespace: preserveLeadingWhitespace);
         final prefixShouldBeBold = isTitle || format.bold || displayInlines.where((inline) => inline.text.trim().isNotEmpty).every((inline) => inline.bold);
         final text = block.kind == _Fb2BlockKind.title
             ? TextSpan(text: block.plainText.trimLeft())
@@ -1976,7 +1984,7 @@ class _DocxBlockView extends StatelessWidget {
         // reproduce that exactly in a single paragraph widget; applying raw
         // left/first-line indents created the visible DOCX "staircase". Keep the
         // body edge aligned and reserve only a tiny gutter for generated numbers.
-        final leftIndent = useGeneratedNumberGutter ? 6.0 : 0.0;
+        final leftIndent = 0.0;
         return Padding(
           padding: EdgeInsets.only(
             top: compact ? 0 : format.spaceBefore.clamp(0.0, 32.0).toDouble() * scale,
@@ -1996,8 +2004,9 @@ class _DocxBlockView extends StatelessWidget {
 }
 
 
-List<_Fb2Inline> _docxDisplayInlines(List<_Fb2Inline> source) {
+List<_Fb2Inline> _docxDisplayInlines(List<_Fb2Inline> source, {bool preserveLeadingWhitespace = false}) {
   if (source.isEmpty) return source;
+  if (preserveLeadingWhitespace) return source;
   final result = <_Fb2Inline>[];
   var strippedLeading = false;
   for (final inline in source) {
@@ -2069,41 +2078,82 @@ class _DocxDocumentTableView extends StatelessWidget {
     if (rows.isEmpty) return const SizedBox.shrink();
     final columnCount = rows.fold<int>(0, (max, row) => row.length > max ? row.length : max).clamp(1, 24).toInt();
     final widths = _docxColumnWidths(rows, columnCount, format);
+    final borderColor = compact ? const Color(0xFF999999) : Colors.black;
+    final borderWidth = (compact ? 0.45 : 0.75) * scale;
     return Padding(
       padding: EdgeInsets.symmetric(vertical: (compact ? 4 : 8) * scale),
-      child: Table(
-        columnWidths: {
-          for (var column = 0; column < columnCount; column++) column: FlexColumnWidth(widths[column]),
-        },
-        defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-        border: TableBorder.all(color: compact ? const Color(0xFF999999) : Colors.black, width: (compact ? 0.45 : 0.85) * scale),
-        children: [
-          for (var rowIndex = 0; rowIndex < rows.length; rowIndex++)
-            TableRow(
-              children: [
-                for (var column = 0; column < columnCount; column++)
-                  Padding(
-                    padding: EdgeInsets.symmetric(horizontal: (compact ? 2.5 : 3.2) * scale, vertical: (compact ? 1.8 : 2.4) * scale),
-                    child: Text(
-                      column < rows[rowIndex].length ? rows[rowIndex][column] : '',
-                      textAlign: _docxTableCellAlign(column < rows[rowIndex].length ? rows[rowIndex][column] : '', rowIndex, column, columnCount, format),
-                      style: TextStyle(
-                        color: compact ? const Color(0xFF777777) : Colors.black,
-                        fontSize: (compact ? 8.5 : 10.2) * scale,
-                        height: 1.08,
-                        fontFamily: 'Times New Roman',
-                        fontWeight: _docxTableCellShouldBeBold(rows, rowIndex, column, columnCount, format) ? FontWeight.w700 : FontWeight.w400,
-                        fontStyle: _docxTableCellShouldItalic(rows, rowIndex, column, format) ? FontStyle.italic : FontStyle.normal,
-                      ),
-                      softWrap: true,
-                    ),
-                  ),
-              ],
-            ),
-        ],
+      child: DecoratedBox(
+        decoration: BoxDecoration(border: Border.all(color: borderColor, width: borderWidth)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (var rowIndex = 0; rowIndex < rows.length; rowIndex++)
+              IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: _buildRowCells(rowIndex, columnCount, widths, borderColor, borderWidth),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
+
+  List<Widget> _buildRowCells(int rowIndex, int columnCount, List<double> widths, Color borderColor, double borderWidth) {
+    final widgets = <Widget>[];
+    final row = rows[rowIndex];
+    var column = 0;
+    while (column < columnCount) {
+      final span = _officeCellSpanAt(format, rowIndex, column).clamp(0, columnCount - column).toInt();
+      if (span == 0) {
+        column += 1;
+        continue;
+      }
+      final effectiveSpan = span <= 0 ? 1 : span;
+      final text = column < row.length ? row[column] : '';
+      final flex = widths.skip(column).take(effectiveSpan).fold<double>(0, (sum, value) => sum + value).clamp(0.5, 100000.0);
+      widgets.add(
+        Expanded(
+          flex: (flex * 1000).round().clamp(1, 1000000).toInt(),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border(
+                right: column + effectiveSpan >= columnCount ? BorderSide.none : BorderSide(color: borderColor, width: borderWidth),
+                bottom: rowIndex == rows.length - 1 ? BorderSide.none : BorderSide(color: borderColor, width: borderWidth),
+              ),
+            ),
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: (compact ? 2.5 : 3.2) * scale, vertical: (compact ? 1.8 : 2.4) * scale),
+              child: Text(
+                text,
+                textAlign: _docxTableCellAlign(text, rowIndex, column, columnCount, format),
+                style: TextStyle(
+                  color: compact ? const Color(0xFF777777) : Colors.black,
+                  fontSize: (compact ? 8.5 : 10.2) * scale,
+                  height: 1.08,
+                  fontFamily: 'Times New Roman',
+                  fontWeight: _docxTableCellShouldBeBold(rows, rowIndex, column, columnCount, format) ? FontWeight.w700 : FontWeight.w400,
+                  fontStyle: _docxTableCellShouldItalic(rows, rowIndex, column, format) ? FontStyle.italic : FontStyle.normal,
+                ),
+                softWrap: true,
+              ),
+            ),
+          ),
+        ),
+      );
+      column += effectiveSpan;
+    }
+    return widgets;
+  }
+}
+
+int _officeCellSpanAt(_OfficeTableFormat? format, int row, int column) {
+  if (format == null || row < 0 || row >= format.cellSpans.length) return 1;
+  final line = format.cellSpans[row];
+  if (column < 0 || column >= line.length) return 1;
+  final value = line[column];
+  return value <= 0 ? 0 : value;
 }
 
 
@@ -2715,7 +2765,8 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
             final delta = ((targetProgress - actual.progressPercent) / 100.0) * max;
             targetOffset = (offset + delta).clamp(0.0, max).toDouble();
           }
-          final locator = targetLocator ?? _currentLocator();
+          final actualLocator = _currentLocator();
+          final locator = actualLocator ?? targetLocator;
           if (locator != null) {
             _lastKnownLocator = locator;
             _pendingUnitIndex = locator.unitIndex;
@@ -3709,10 +3760,12 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
       addTarget(normalizedPath, bodyAnchor, blocks.length);
     }
 
+    final bodyMatch = RegExp(r'<body\b[^>]*>(.*?)</body>', caseSensitive: false, dotAll: true).firstMatch(html);
+    final contentHtml = bodyMatch?.group(1) ?? html;
     final blockRe = navigationHtml
-        ? RegExp(r'<(h[1-6]|title|li)\b([^>]*)>(.*?)</\1>', caseSensitive: false, dotAll: true)
-        : RegExp(r'<(h[1-6]|title|p|div|section|li|blockquote)\b([^>]*)>(.*?)</\1>', caseSensitive: false, dotAll: true);
-    for (final match in blockRe.allMatches(html)) {
+        ? RegExp(r'<(h[1-6]|li)\b([^>]*)>(.*?)</\1>', caseSensitive: false, dotAll: true)
+        : RegExp(r'<(h[1-6]|p|li|blockquote)\b([^>]*)>(.*?)</\1>', caseSensitive: false, dotAll: true);
+    for (final match in blockRe.allMatches(contentHtml)) {
       final tag = (match.group(1) ?? '').toLowerCase();
       final attrs = match.group(2) ?? '';
       final body = match.group(3) ?? '';
@@ -4416,7 +4469,7 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     for (final token in tokens.allMatches(xml)) {
       final raw = token.group(0) ?? '';
       if (raw.startsWith(RegExp(r'<w:tab', caseSensitive: false))) {
-        buffer.write('    ');
+        buffer.write('\u2003\u2003');
       } else if (raw.startsWith(RegExp(r'<w:br|<w:cr', caseSensitive: false))) {
         buffer.write('\n');
       } else {
@@ -4548,11 +4601,10 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
             : RegExp(r'<w:p\b[^>]*>.*?</w:p>', caseSensitive: false, dotAll: true)
                 .allMatches(cellXml)
                 .map((p) => textFromXml(p.group(0) ?? '', trim: false).trimRight())
-                .where((line) => line.trim().isNotEmpty)
                 .join('\n')
                 .replaceAll(RegExp(r'[ \t\u00A0]*\n[ \t\u00A0]*'), '\n')
                 .replaceAll(RegExp(r'[ \t\u00A0]+'), ' ')
-                .trim();
+                .trimRight();
         cells.add(cellText.isEmpty ? ' ' : cellText);
         for (var extra = 1; extra < span; extra++) {
           cells.add('');
@@ -8640,6 +8692,7 @@ class _SyncScreenState extends State<SyncScreen> {
 }
 
 
+
 class _PairingQrScannerScreen extends StatefulWidget {
   const _PairingQrScannerScreen();
 
@@ -8647,35 +8700,106 @@ class _PairingQrScannerScreen extends StatefulWidget {
   State<_PairingQrScannerScreen> createState() => _PairingQrScannerScreenState();
 }
 
-class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
-  final _controller = MobileScannerController();
+class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> with WidgetsBindingObserver {
+  late final MobileScannerController _controller;
   bool _handled = false;
+  bool _scannerMounted = false;
+  Object? _startupError;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _controller = MobileScannerController(
+      detectionSpeed: DetectionSpeed.noDuplicates,
+      facing: CameraFacing.back,
+    );
+    // Several Android devices crash mobile_scanner when the camera is attached
+    // during the same frame as the route transition. The older working ReadArc
+    // scanner effectively started after the page was mounted; keep that timing
+    // explicitly and show our own fallback instead of the plugin's black screen.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await Future<void>.delayed(const Duration(milliseconds: 450));
+      if (!mounted) return;
+      setState(() => _scannerMounted = true);
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!_scannerMounted) return;
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      unawaited(_controller.stop());
+    } else if (state == AppLifecycleState.resumed) {
+      unawaited(_controller.start());
+    }
+  }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(_controller.stop());
     _controller.dispose();
     super.dispose();
   }
 
+  Widget _scannerFallback(BuildContext context, Object error) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.qr_code_scanner_rounded, size: 56, color: _raWarmGold),
+            const SizedBox(height: 16),
+            Text(
+              'Не удалось запустить камеру для сканирования QR.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '$error',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: const Color(0xFFD8D1C0)),
+            ),
+            const SizedBox(height: 18),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(context).pop(),
+              icon: const Icon(Icons.keyboard_rounded),
+              label: const Text('Ввести код вручную'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final startupError = _startupError;
     return Scaffold(
       appBar: AppBar(title: const Text('Сканировать QR')),
       body: Column(
         children: [
           Expanded(
-            child: MobileScanner(
-              controller: _controller,
-              onDetect: (capture) {
-                if (_handled) return;
-                final barcodes = capture.barcodes;
-                if (barcodes.isEmpty) return;
-                final value = barcodes.first.rawValue;
-                if (value == null || value.trim().isEmpty) return;
-                _handled = true;
-                Navigator.of(context).pop(value.trim());
-              },
-            ),
+            child: startupError != null
+                ? _scannerFallback(context, startupError)
+                : !_scannerMounted
+                    ? const Center(child: CircularProgressIndicator())
+                    : MobileScanner(
+                        controller: _controller,
+                        errorBuilder: (context, error, child) => _scannerFallback(context, error),
+                        onDetect: (capture) {
+                          if (_handled) return;
+                          final barcodes = capture.barcodes;
+                          if (barcodes.isEmpty) return;
+                          final value = barcodes.first.rawValue;
+                          if (value == null || value.trim().isEmpty) return;
+                          _handled = true;
+                          Navigator.of(context).pop(value.trim());
+                        },
+                      ),
           ),
           SafeArea(
             child: Padding(
