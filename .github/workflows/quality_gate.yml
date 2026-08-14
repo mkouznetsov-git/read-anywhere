@@ -74,11 +74,8 @@ jobs:
           arch: x86_64
           profile: pixel_6
           disable-animations: true
-          script: |
-            set -o pipefail
-            mkdir -p test-results
-            cd apps/flutter_client
-            flutter test integration_test/app_smoke_test.dart -d emulator-5554 --reporter expanded 2>&1 | tee ../../test-results/android-smoke.log
+          script: >-
+            bash -lc 'set -o pipefail; mkdir -p test-results; cd apps/flutter_client; flutter test integration_test/app_smoke_test.dart -d emulator-5554 --reporter expanded 2>&1 | tee ../../test-results/android-smoke.log'
 
       - name: Upload Android smoke logs
         if: always()
