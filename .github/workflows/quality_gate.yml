@@ -1,0 +1,125 @@
+name: ReadArc quality gate
+
+on:
+  pull_request:
+    branches: [ main, master ]
+  push:
+    branches: [ main, master, 'sprint/**' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Unit, regression and static checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Run ReadArc quality gate
+        run: bash ./scripts/quality_gate.sh
+
+      - name: Upload quality logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: quality-gate-logs
+          path: test-results/*
+          if-no-files-found: ignore
+          retention-days: 14
+
+  android-smoke:
+    name: Android emulator smoke test
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Prepare Android platform
+        env:
+          READARC_PLATFORMS: android
+        run: bash ./scripts/prepare_flutter_platforms.sh
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run Android application smoke test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            set -o pipefail
+            mkdir -p test-results
+            cd apps/flutter_client
+            flutter test integration_test/app_smoke_test.dart -d emulator-5554 --reporter expanded 2>&1 | tee ../../test-results/android-smoke.log
+
+      - name: Upload Android smoke logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: android-smoke-logs
+          path: test-results/*
+          if-no-files-found: ignore
+          retention-days: 14
+
+  macos-smoke:
+    name: macOS application smoke test
+    runs-on: macos-latest
+    needs: quality
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Prepare macOS platform
+        env:
+          READARC_PLATFORMS: macos
+        run: bash ./scripts/prepare_flutter_platforms.sh
+
+      - name: Run macOS application smoke test
+        run: |
+          set -o pipefail
+          mkdir -p test-results
+          cd apps/flutter_client
+          flutter test integration_test/app_smoke_test.dart -d macos --reporter expanded 2>&1 | tee ../../test-results/macos-smoke.log
+
+      - name: Upload macOS smoke logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos-smoke-logs
+          path: test-results/*
+          if-no-files-found: ignore
+          retention-days: 14
