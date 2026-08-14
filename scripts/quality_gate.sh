@@ -20,9 +20,18 @@ echo "-- Relay syntax"
 python3 -m py_compile server/rendezvous_relay/main.py
 
 echo "-- Legacy naming guard"
+ACTIVE_PATHS=(
+  apps/flutter_client/lib
+  apps/flutter_client/pubspec.yaml
+  scripts/prepare_flutter_platforms.sh
+  scripts/package_android.sh
+  scripts/package_macos.sh
+  scripts/build_native_engines.sh
+  server
+)
 if grep -RInE 'ReadAnywhere|Read Anywhere|readanywhere|read-anywhere|read_anywhere|READANYWHERE' \
-  apps/flutter_client/lib apps/flutter_client/pubspec.yaml scripts server --exclude-dir=.dart_tool; then
-  echo "ERROR: legacy ReadAnywhere naming is forbidden in active product code." >&2
+  "${ACTIVE_PATHS[@]}" --exclude-dir=.dart_tool; then
+  echo "ERROR: legacy product naming is forbidden in active ReadArc code." >&2
   exit 1
 fi
 
