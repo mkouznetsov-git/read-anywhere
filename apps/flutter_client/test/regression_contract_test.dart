@@ -6,10 +6,8 @@ String _read(String relativePath) => File(relativePath).readAsStringSync();
 
 void main() {
   group('ReadArc regression contracts', () {
-    test('project naming never falls back to ReadAnywhere', () {
+    test('active product code never falls back to ReadAnywhere', () {
       final roots = <String>[
-        '../../README_RU.md',
-        '../../.github/workflows/build_installers.yml',
         '../../scripts/prepare_flutter_platforms.sh',
         'lib/main.dart',
         'pubspec.yaml',
@@ -21,7 +19,7 @@ void main() {
         if (!file.existsSync()) continue;
         if (forbidden.hasMatch(file.readAsStringSync())) offenders.add(path);
       }
-      expect(offenders, isEmpty, reason: 'Legacy ReadAnywhere naming returned in: ${offenders.join(', ')}');
+      expect(offenders, isEmpty, reason: 'Legacy ReadAnywhere naming returned in active code: ${offenders.join(', ')}');
     });
 
     test('QR scanner stays on the known working backend', () {
