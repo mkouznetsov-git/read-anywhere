@@ -49,11 +49,7 @@ BookRecord _mergeBook(BookRecord local, BookRecord remote) {
   final deletedWinner = _deletedWinner(local, remote);
   final progressWinner = _progressCompare(local, remote) >= 0 ? local : remote;
   final bookmarks = _mergeBookmarks(local.bookmarks, remote.bookmarks);
-  final availableOn = <String>{
-    ...local.availableOnDeviceIds,
-    ...remote.availableOnDeviceIds,
-  }.toList()
-    ..sort();
+  final availableOn = <String>{...local.availableOnDeviceIds, ...remote.availableOnDeviceIds}.toList()..sort();
 
   // Important: localPath is never accepted from another device. A remote book may
   // be visible in the library but still not downloaded on this device.
@@ -76,16 +72,11 @@ BookRecord _mergeBook(BookRecord local, BookRecord remote) {
   );
 }
 
-
 BookRecord? _deletedWinner(BookRecord local, BookRecord remote) {
-  final deletedCandidates = [local, remote]
-      .where((book) => book.deletedAt != null)
-      .toList();
+  final deletedCandidates = [local, remote].where((book) => book.deletedAt != null).toList();
   if (deletedCandidates.isEmpty) return null;
 
-  final activeCandidates = [local, remote]
-      .where((book) => book.deletedAt == null)
-      .toList();
+  final activeCandidates = [local, remote].where((book) => book.deletedAt == null).toList();
 
   deletedCandidates.sort((a, b) => a.deletedAt!.compareTo(b.deletedAt!));
   final latestDeletion = deletedCandidates.last;
@@ -112,10 +103,7 @@ int _progressCompare(BookRecord a, BookRecord b) {
   return a.updatedByDeviceId.compareTo(b.updatedByDeviceId);
 }
 
-List<BookmarkRecord> _mergeBookmarks(
-  List<BookmarkRecord> local,
-  List<BookmarkRecord> remote,
-) {
+List<BookmarkRecord> _mergeBookmarks(List<BookmarkRecord> local, List<BookmarkRecord> remote) {
   final byId = <String, BookmarkRecord>{};
   for (final item in [...local, ...remote]) {
     final existing = byId[item.id];
@@ -123,15 +111,10 @@ List<BookmarkRecord> _mergeBookmarks(
       byId[item.id] = item;
     }
   }
-  return byId.values.where((b) => !b.isDeleted).toList()
-    ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+  return byId.values.where((b) => !b.isDeleted).toList()..sort((a, b) => a.createdAt.compareTo(b.createdAt));
 }
 
-
-List<TrustedDeviceRecord> _mergeTrustedDevices(
-  List<TrustedDeviceRecord> local,
-  List<TrustedDeviceRecord> remote,
-) {
+List<TrustedDeviceRecord> _mergeTrustedDevices(List<TrustedDeviceRecord> local, List<TrustedDeviceRecord> remote) {
   final byId = <String, TrustedDeviceRecord>{};
   for (final device in [...local, ...remote]) {
     final existing = byId[device.deviceId];
@@ -149,11 +132,10 @@ List<TrustedDeviceRecord> _mergeTrustedDevices(
     final deviceMarker = device.deletedAt ?? device.lastSeenAt;
     if (deviceMarker.isAfter(existingMarker)) byId[device.deviceId] = device;
   }
-  return byId.values.toList()
-    ..sort((a, b) {
-      if (a.isDeleted != b.isDeleted) return a.isDeleted ? 1 : -1;
-      final ownerCompare = (b.role == 'owner' ? 1 : 0).compareTo(a.role == 'owner' ? 1 : 0);
-      if (ownerCompare != 0) return ownerCompare;
-      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-    });
+  return byId.values.toList()..sort((a, b) {
+    if (a.isDeleted != b.isDeleted) return a.isDeleted ? 1 : -1;
+    final ownerCompare = (b.role == 'owner' ? 1 : 0).compareTo(a.role == 'owner' ? 1 : 0);
+    if (ownerCompare != 0) return ownerCompare;
+    return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+  });
 }

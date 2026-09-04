@@ -5,12 +5,7 @@
 /// JSON fields are intentionally kept for migration/backwards compatibility:
 /// older settings files, older QR links and older tests can still be decoded,
 /// but the effective endpoint is always the official relay.
-enum RelayEndpointMode {
-  official,
-  custom,
-  personalHub,
-  localDevelopment,
-}
+enum RelayEndpointMode { official, custom, personalHub, localDevelopment }
 
 class ReadArcRelayConfig {
   const ReadArcRelayConfig._();
@@ -56,35 +51,33 @@ class SyncSettings {
   bool get usesPersonalHubPlaceholder => false;
 
   SyncSettings asOfficial({bool? autoConnect}) => SyncSettings(
-        endpointMode: RelayEndpointMode.official,
-        customRelayUrl: ReadArcRelayConfig.officialRelayUrl,
-        personalHubRelayUrl: ReadArcRelayConfig.officialRelayUrl,
-        autoConnect: autoConnect ?? this.autoConnect,
-      );
+    endpointMode: RelayEndpointMode.official,
+    customRelayUrl: ReadArcRelayConfig.officialRelayUrl,
+    personalHubRelayUrl: ReadArcRelayConfig.officialRelayUrl,
+    autoConnect: autoConnect ?? this.autoConnect,
+  );
 
   SyncSettings copyWith({
     RelayEndpointMode? endpointMode,
     String? customRelayUrl,
     String? personalHubRelayUrl,
     bool? autoConnect,
-  }) =>
-      SyncSettings(
-        endpointMode: RelayEndpointMode.official,
-        customRelayUrl: ReadArcRelayConfig.officialRelayUrl,
-        personalHubRelayUrl: ReadArcRelayConfig.officialRelayUrl,
-        autoConnect: autoConnect ?? this.autoConnect,
-      );
+  }) => SyncSettings(
+    endpointMode: RelayEndpointMode.official,
+    customRelayUrl: ReadArcRelayConfig.officialRelayUrl,
+    personalHubRelayUrl: ReadArcRelayConfig.officialRelayUrl,
+    autoConnect: autoConnect ?? this.autoConnect,
+  );
 
   Map<String, dynamic> toJson() => {
-        'endpointMode': RelayEndpointMode.official.name,
-        'customRelayUrl': ReadArcRelayConfig.officialRelayUrl,
-        'personalHubRelayUrl': ReadArcRelayConfig.officialRelayUrl,
-        'autoConnect': true,
-        'relayUrl': ReadArcRelayConfig.officialRelayUrl,
-      };
+    'endpointMode': RelayEndpointMode.official.name,
+    'customRelayUrl': ReadArcRelayConfig.officialRelayUrl,
+    'personalHubRelayUrl': ReadArcRelayConfig.officialRelayUrl,
+    'autoConnect': true,
+    'relayUrl': ReadArcRelayConfig.officialRelayUrl,
+  };
 
   factory SyncSettings.fromJson(Map<String, dynamic> json) {
-    assert(json is Map<String, dynamic>);
     // Old builds could store custom/local/personal-hub endpoints. From Sprint
     // 25 we migrate them all to the official ReadArc relay and enable
     // autoconnect so users never have to pick connection mode manually.

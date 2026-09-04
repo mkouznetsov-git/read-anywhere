@@ -14,8 +14,8 @@ class TrustedDeviceRecord {
     this.deletedAt,
     this.revokedByDeviceId,
     this.revokedReason,
-  })  : addedAt = addedAt ?? DateTime.now().toUtc(),
-        lastSeenAt = lastSeenAt ?? DateTime.now().toUtc();
+  }) : addedAt = addedAt ?? DateTime.now().toUtc(),
+       lastSeenAt = lastSeenAt ?? DateTime.now().toUtc();
 
   final String deviceId;
   final String name;
@@ -26,6 +26,7 @@ class TrustedDeviceRecord {
   final bool canTransferFiles;
   final DateTime addedAt;
   final DateTime lastSeenAt;
+
   /// Backward compatible tombstone field. In ReadArc Sprint 26 it means that
   /// device access is revoked, not merely hidden in the UI.
   final DateTime? deletedAt;
@@ -82,30 +83,25 @@ class TrustedDeviceRecord {
   }
 
   Map<String, dynamic> toJson() => {
-        'deviceId': deviceId,
-        'name': name,
-        'role': role,
-        'publicKey': publicKey,
-        'keyFingerprint': keyFingerprint,
-        'permissions': {
-          'syncMetadata': canSyncMetadata,
-          'transferFiles': canTransferFiles,
-        },
-        'addedAt': addedAt.toIso8601String(),
-        'lastSeenAt': lastSeenAt.toIso8601String(),
-        'deletedAt': deletedAt?.toIso8601String(),
-        'revokedAt': deletedAt?.toIso8601String(),
-        'revokedByDeviceId': revokedByDeviceId,
-        'revokedReason': revokedReason,
-      };
+    'deviceId': deviceId,
+    'name': name,
+    'role': role,
+    'publicKey': publicKey,
+    'keyFingerprint': keyFingerprint,
+    'permissions': {'syncMetadata': canSyncMetadata, 'transferFiles': canTransferFiles},
+    'addedAt': addedAt.toIso8601String(),
+    'lastSeenAt': lastSeenAt.toIso8601String(),
+    'deletedAt': deletedAt?.toIso8601String(),
+    'revokedAt': deletedAt?.toIso8601String(),
+    'revokedByDeviceId': revokedByDeviceId,
+    'revokedReason': revokedReason,
+  };
 
   factory TrustedDeviceRecord.fromJson(Map<String, dynamic> json) {
     final permissions = json['permissions'] is Map
         ? Map<String, dynamic>.from(json['permissions'] as Map)
         : const <String, dynamic>{};
-    final revokedAt = json['revokedAt'] == null
-        ? null
-        : DateTime.tryParse(json['revokedAt'].toString());
+    final revokedAt = json['revokedAt'] == null ? null : DateTime.tryParse(json['revokedAt'].toString());
     final deletedAt = json['deletedAt'] == null
         ? revokedAt
         : DateTime.tryParse(json['deletedAt'].toString()) ?? revokedAt;
@@ -117,10 +113,8 @@ class TrustedDeviceRecord {
       keyFingerprint: json['keyFingerprint'] as String? ?? '',
       canSyncMetadata: permissions['syncMetadata'] != false,
       canTransferFiles: permissions['transferFiles'] != false,
-      addedAt: DateTime.tryParse(json['addedAt'] as String? ?? '') ??
-          DateTime.now().toUtc(),
-      lastSeenAt: DateTime.tryParse(json['lastSeenAt'] as String? ?? '') ??
-          DateTime.now().toUtc(),
+      addedAt: DateTime.tryParse(json['addedAt'] as String? ?? '') ?? DateTime.now().toUtc(),
+      lastSeenAt: DateTime.tryParse(json['lastSeenAt'] as String? ?? '') ?? DateTime.now().toUtc(),
       deletedAt: deletedAt,
       revokedByDeviceId: json['revokedByDeviceId'] as String?,
       revokedReason: json['revokedReason'] as String?,
@@ -139,9 +133,9 @@ class LibraryManifest {
     DateTime? updatedAt,
     List<BookRecord>? books,
     List<TrustedDeviceRecord>? trustedDevices,
-  })  : updatedAt = updatedAt ?? DateTime.now().toUtc(),
-        books = books ?? [],
-        trustedDevices = trustedDevices ?? [];
+  }) : updatedAt = updatedAt ?? DateTime.now().toUtc(),
+       books = books ?? [],
+       trustedDevices = trustedDevices ?? [];
 
   final String accountId;
   final String deviceId;
@@ -163,16 +157,14 @@ class LibraryManifest {
   }
 
   bool get isCurrentDeviceRevoked => currentDeviceTrust?.isRevoked == true;
-  List<TrustedDeviceRecord> get activeTrustedDevices => trustedDevices
-      .where((device) => !device.isDeleted)
-      .toList()
-    ..sort((a, b) {
-      final ownerCompare = (b.role == 'owner' ? 1 : 0).compareTo(a.role == 'owner' ? 1 : 0);
-      if (ownerCompare != 0) return ownerCompare;
-      final currentCompare = (b.deviceId == deviceId ? 1 : 0).compareTo(a.deviceId == deviceId ? 1 : 0);
-      if (currentCompare != 0) return currentCompare;
-      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-    });
+  List<TrustedDeviceRecord> get activeTrustedDevices =>
+      trustedDevices.where((device) => !device.isDeleted).toList()..sort((a, b) {
+        final ownerCompare = (b.role == 'owner' ? 1 : 0).compareTo(a.role == 'owner' ? 1 : 0);
+        if (ownerCompare != 0) return ownerCompare;
+        final currentCompare = (b.deviceId == deviceId ? 1 : 0).compareTo(a.deviceId == deviceId ? 1 : 0);
+        if (currentCompare != 0) return currentCompare;
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
 
   LibraryManifest copyWith({
     String? accountId,
@@ -205,37 +197,32 @@ class LibraryManifest {
   Map<String, dynamic> toSyncJson() => _toJson(includeLocalPaths: false);
 
   Map<String, dynamic> _toJson({required bool includeLocalPaths}) => {
-        'accountId': accountId,
-        'deviceId': deviceId,
-        'deviceName': deviceName,
-        if (includeLocalPaths) 'accountEncryptionKey': accountEncryptionKey,
-        'deviceSigningPublicKey': deviceSigningPublicKey,
-        if (includeLocalPaths) 'deviceSigningPrivateKey': deviceSigningPrivateKey,
-        'crypto': {'payload': 'readarc-e2e-v2'},
-        'updatedAt': updatedAt.toIso8601String(),
-        'trustedDevices': trustedDevices.map((d) => d.toJson()).toList(),
-        'books': books
-            .map((b) => b.toJson(includeLocalPath: includeLocalPaths))
-            .toList(),
-      };
+    'accountId': accountId,
+    'deviceId': deviceId,
+    'deviceName': deviceName,
+    if (includeLocalPaths) 'accountEncryptionKey': accountEncryptionKey,
+    'deviceSigningPublicKey': deviceSigningPublicKey,
+    if (includeLocalPaths) 'deviceSigningPrivateKey': deviceSigningPrivateKey,
+    'crypto': {'payload': 'readarc-e2e-v2'},
+    'updatedAt': updatedAt.toIso8601String(),
+    'trustedDevices': trustedDevices.map((d) => d.toJson()).toList(),
+    'books': books.map((b) => b.toJson(includeLocalPath: includeLocalPaths)).toList(),
+  };
 
   factory LibraryManifest.fromJson(Map<String, dynamic> json) => LibraryManifest(
-        accountId: json['accountId'] as String? ?? 'local-account',
-        deviceId: json['deviceId'] as String? ?? 'local-device',
-        deviceName: json['deviceName'] as String? ?? 'Моё устройство',
-        accountEncryptionKey: json['accountEncryptionKey'] as String? ?? '',
-        deviceSigningPublicKey: json['deviceSigningPublicKey'] as String? ?? '',
-        deviceSigningPrivateKey: json['deviceSigningPrivateKey'] as String? ?? '',
-        updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
-            DateTime.now().toUtc(),
-        trustedDevices: ((json['trustedDevices'] as List?) ?? [])
-            .whereType<Map>()
-            .map((item) => TrustedDeviceRecord.fromJson(Map<String, dynamic>.from(item)))
-            .toList(),
-        books: ((json['books'] as List?) ?? [])
-            .map((item) => BookRecord.fromJson(item as Map<String, dynamic>))
-            .toList(),
-      );
+    accountId: json['accountId'] as String? ?? 'local-account',
+    deviceId: json['deviceId'] as String? ?? 'local-device',
+    deviceName: json['deviceName'] as String? ?? 'Моё устройство',
+    accountEncryptionKey: json['accountEncryptionKey'] as String? ?? '',
+    deviceSigningPublicKey: json['deviceSigningPublicKey'] as String? ?? '',
+    deviceSigningPrivateKey: json['deviceSigningPrivateKey'] as String? ?? '',
+    updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ?? DateTime.now().toUtc(),
+    trustedDevices: ((json['trustedDevices'] as List?) ?? [])
+        .whereType<Map>()
+        .map((item) => TrustedDeviceRecord.fromJson(Map<String, dynamic>.from(item)))
+        .toList(),
+    books: ((json['books'] as List?) ?? []).map((item) => BookRecord.fromJson(item as Map<String, dynamic>)).toList(),
+  );
 }
 
 class SyncEnvelope {
@@ -256,21 +243,20 @@ class SyncEnvelope {
   final int? relayQueueSeq;
 
   Map<String, dynamic> toJson() => {
-        'type': type,
-        'accountId': accountId,
-        'deviceId': deviceId,
-        'createdAt': createdAt.toIso8601String(),
-        'payload': payload,
-        if (relayQueueSeq != null) 'relayQueueSeq': relayQueueSeq,
-      };
+    'type': type,
+    'accountId': accountId,
+    'deviceId': deviceId,
+    'createdAt': createdAt.toIso8601String(),
+    'payload': payload,
+    if (relayQueueSeq != null) 'relayQueueSeq': relayQueueSeq,
+  };
 
   factory SyncEnvelope.fromJson(Map<String, dynamic> json) => SyncEnvelope(
-        type: json['type'] as String,
-        accountId: json['accountId'] as String,
-        deviceId: json['deviceId'] as String,
-        createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ??
-            DateTime.now().toUtc(),
-        payload: Map<String, dynamic>.from(json['payload'] as Map),
-        relayQueueSeq: (json['relayQueueSeq'] as num?)?.toInt(),
-      );
+    type: json['type'] as String,
+    accountId: json['accountId'] as String,
+    deviceId: json['deviceId'] as String,
+    createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ?? DateTime.now().toUtc(),
+    payload: Map<String, dynamic>.from(json['payload'] as Map),
+    relayQueueSeq: (json['relayQueueSeq'] as num?)?.toInt(),
+  );
 }

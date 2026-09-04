@@ -6,8 +6,19 @@ server_data/
 build/
 .pub-cache/
 .pub/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+native/**/target/
+native/readarc_engines/dist/
+test-results/
 
 # OS/editor
 .DS_Store
 .idea/
 .vscode/
+
+# Signing material is supplied by CI secrets or a local untracked file.
+apps/flutter_client/android/key.properties
+apps/flutter_client/android/app/*.jks
+apps/flutter_client/android/app/*.keystore

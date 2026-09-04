@@ -14,9 +14,9 @@ class BookmarkRecord {
     DateTime? createdAt,
     DateTime? updatedAt,
     this.deletedAt,
-  })  : id = id ?? _uuid.v4(),
-        createdAt = createdAt ?? DateTime.now().toUtc(),
-        updatedAt = updatedAt ?? DateTime.now().toUtc();
+  }) : id = id ?? _uuid.v4(),
+       createdAt = createdAt ?? DateTime.now().toUtc(),
+       updatedAt = updatedAt ?? DateTime.now().toUtc();
 
   final String id;
   final String bookId;
@@ -29,13 +29,7 @@ class BookmarkRecord {
 
   bool get isDeleted => deletedAt != null;
 
-  BookmarkRecord copyWith({
-    String? label,
-    String? locator,
-    String? note,
-    DateTime? updatedAt,
-    DateTime? deletedAt,
-  }) {
+  BookmarkRecord copyWith({String? label, String? locator, String? note, DateTime? updatedAt, DateTime? deletedAt}) {
     return BookmarkRecord(
       id: id,
       bookId: bookId,
@@ -49,30 +43,26 @@ class BookmarkRecord {
   }
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'bookId': bookId,
-        'label': label,
-        'locator': locator,
-        'note': note,
-        'createdAt': createdAt.toIso8601String(),
-        'updatedAt': updatedAt.toIso8601String(),
-        'deletedAt': deletedAt?.toIso8601String(),
-      };
+    'id': id,
+    'bookId': bookId,
+    'label': label,
+    'locator': locator,
+    'note': note,
+    'createdAt': createdAt.toIso8601String(),
+    'updatedAt': updatedAt.toIso8601String(),
+    'deletedAt': deletedAt?.toIso8601String(),
+  };
 
   factory BookmarkRecord.fromJson(Map<String, dynamic> json) => BookmarkRecord(
-        id: json['id'] as String,
-        bookId: json['bookId'] as String,
-        label: json['label'] as String? ?? 'Закладка',
-        locator: json['locator'] as String? ?? '',
-        note: json['note'] as String?,
-        createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ??
-            DateTime.now().toUtc(),
-        updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
-            DateTime.now().toUtc(),
-        deletedAt: json['deletedAt'] == null
-            ? null
-            : DateTime.tryParse(json['deletedAt'] as String),
-      );
+    id: json['id'] as String,
+    bookId: json['bookId'] as String,
+    label: json['label'] as String? ?? 'Закладка',
+    locator: json['locator'] as String? ?? '',
+    note: json['note'] as String?,
+    createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ?? DateTime.now().toUtc(),
+    updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ?? DateTime.now().toUtc(),
+    deletedAt: json['deletedAt'] == null ? null : DateTime.tryParse(json['deletedAt'] as String),
+  );
 }
 
 class BookRecord {
@@ -93,10 +83,10 @@ class BookRecord {
     this.deletedAt,
     List<String>? availableOnDeviceIds,
     List<BookmarkRecord>? bookmarks,
-  })  : addedAt = addedAt ?? DateTime.now().toUtc(),
-        updatedAt = updatedAt ?? DateTime.now().toUtc(),
-        availableOnDeviceIds = _uniqueStrings(availableOnDeviceIds ?? const []),
-        bookmarks = bookmarks ?? [];
+  }) : addedAt = addedAt ?? DateTime.now().toUtc(),
+       updatedAt = updatedAt ?? DateTime.now().toUtc(),
+       availableOnDeviceIds = _uniqueStrings(availableOnDeviceIds ?? const []),
+       bookmarks = bookmarks ?? [];
 
   final String id;
   final String title;
@@ -122,8 +112,7 @@ class BookRecord {
   bool get isDeleted => deletedAt != null;
   bool get isDownloaded => !isDeleted && localPath != null && localPath!.isNotEmpty;
 
-  BookDownloadStatus get downloadStatus =>
-      isDownloaded ? BookDownloadStatus.downloaded : BookDownloadStatus.remoteOnly;
+  BookDownloadStatus get downloadStatus => isDownloaded ? BookDownloadStatus.downloaded : BookDownloadStatus.remoteOnly;
 
   bool isAvailableOnDevice(String deviceId) => availableOnDeviceIds.contains(deviceId);
 
@@ -166,52 +155,45 @@ class BookRecord {
   }
 
   Map<String, dynamic> toJson({bool includeLocalPath = true}) => {
-        'id': id,
-        'title': title,
-        'fileName': fileName,
-        'format': format,
-        'sizeBytes': sizeBytes,
-        'contentSha256': contentSha256,
-        'localPath': includeLocalPath ? localPath : null,
-        'addedAt': addedAt.toIso8601String(),
-        'updatedAt': updatedAt.toIso8601String(),
-        'progressPercent': progressPercent,
-        'currentLocator': currentLocator,
-        'progressVersion': progressVersion,
-        'updatedByDeviceId': updatedByDeviceId,
-        'deletedAt': deletedAt?.toIso8601String(),
-        'availableOnDeviceIds': availableOnDeviceIds,
-        'bookmarks': bookmarks.map((b) => b.toJson()).toList(),
-      };
+    'id': id,
+    'title': title,
+    'fileName': fileName,
+    'format': format,
+    'sizeBytes': sizeBytes,
+    'contentSha256': contentSha256,
+    'localPath': includeLocalPath ? localPath : null,
+    'addedAt': addedAt.toIso8601String(),
+    'updatedAt': updatedAt.toIso8601String(),
+    'progressPercent': progressPercent,
+    'currentLocator': currentLocator,
+    'progressVersion': progressVersion,
+    'updatedByDeviceId': updatedByDeviceId,
+    'deletedAt': deletedAt?.toIso8601String(),
+    'availableOnDeviceIds': availableOnDeviceIds,
+    'bookmarks': bookmarks.map((b) => b.toJson()).toList(),
+  };
 
   factory BookRecord.fromJson(Map<String, dynamic> json) => BookRecord(
-        id: json['id'] as String,
-        title: json['title'] as String? ?? 'Без названия',
-        fileName: json['fileName'] as String? ?? '',
-        format: json['format'] as String? ?? 'unknown',
-        sizeBytes: (json['sizeBytes'] as num?)?.toInt() ?? 0,
-        contentSha256: json['contentSha256'] as String? ?? json['id'] as String,
-        localPath: json['localPath'] as String?,
-        addedAt: DateTime.tryParse(json['addedAt'] as String? ?? '') ??
-            DateTime.now().toUtc(),
-        updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
-            DateTime.now().toUtc(),
-        progressPercent: (json['progressPercent'] as num?)?.toDouble() ?? 0,
-        currentLocator: json['currentLocator'] as String? ?? '',
-        progressVersion: (json['progressVersion'] as num?)?.toInt() ?? 0,
-        updatedByDeviceId: json['updatedByDeviceId'] as String? ?? 'unknown',
-        deletedAt: json['deletedAt'] == null
-            ? null
-            : DateTime.tryParse(json['deletedAt'] as String),
-        availableOnDeviceIds: ((json['availableOnDeviceIds'] as List?) ?? [])
-            .map((item) => item.toString())
-            .toList(),
-        bookmarks: ((json['bookmarks'] as List?) ?? [])
-            .map((item) => BookmarkRecord.fromJson(item as Map<String, dynamic>))
-            .toList(),
-      );
+    id: json['id'] as String,
+    title: json['title'] as String? ?? 'Без названия',
+    fileName: json['fileName'] as String? ?? '',
+    format: json['format'] as String? ?? 'unknown',
+    sizeBytes: (json['sizeBytes'] as num?)?.toInt() ?? 0,
+    contentSha256: json['contentSha256'] as String? ?? json['id'] as String,
+    localPath: json['localPath'] as String?,
+    addedAt: DateTime.tryParse(json['addedAt'] as String? ?? '') ?? DateTime.now().toUtc(),
+    updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ?? DateTime.now().toUtc(),
+    progressPercent: (json['progressPercent'] as num?)?.toDouble() ?? 0,
+    currentLocator: json['currentLocator'] as String? ?? '',
+    progressVersion: (json['progressVersion'] as num?)?.toInt() ?? 0,
+    updatedByDeviceId: json['updatedByDeviceId'] as String? ?? 'unknown',
+    deletedAt: json['deletedAt'] == null ? null : DateTime.tryParse(json['deletedAt'] as String),
+    availableOnDeviceIds: ((json['availableOnDeviceIds'] as List?) ?? []).map((item) => item.toString()).toList(),
+    bookmarks: ((json['bookmarks'] as List?) ?? [])
+        .map((item) => BookmarkRecord.fromJson(item as Map<String, dynamic>))
+        .toList(),
+  );
 }
-
 
 int compareBooksForLibrary(BookRecord a, BookRecord b) {
   final titleCompare = a.title.toLowerCase().compareTo(b.title.toLowerCase());

@@ -105,10 +105,7 @@ void main() {
       LibraryManifest(accountId: 'acc', deviceId: 'b', books: [remoteBook]),
     );
 
-    expect(merged.books.single.bookmarks.map((b) => b.id), [
-      'bookmark-a',
-      'bookmark-b',
-    ]);
+    expect(merged.books.single.bookmarks.map((b) => b.id), ['bookmark-a', 'bookmark-b']);
   });
 
   test('merge trusted devices from both manifests', () {
@@ -127,8 +124,6 @@ void main() {
 
     expect(merged.trustedDevices.map((d) => d.deviceId).toSet(), {'a', 'b'});
   });
-
-
 
   test('merge keeps deterministic alphabetical library order', () {
     final zebra = BookRecord(
@@ -184,7 +179,6 @@ void main() {
     expect(merged.books.single.isDeleted, isTrue);
     expect(merged.visibleBooks, isEmpty);
   });
-
 
   test('newer active local book wins over older remote deletion tombstone', () {
     final localBook = BookRecord(
@@ -244,20 +238,11 @@ void main() {
   });
 
   test('deleted trusted device is hidden from active devices', () {
-    final removed = TrustedDeviceRecord(
-      deviceId: 'old-device',
-      name: 'Old phone',
-      deletedAt: DateTime.utc(2030),
-    );
+    final removed = TrustedDeviceRecord(deviceId: 'old-device', name: 'Old phone', deletedAt: DateTime.utc(2030));
     final current = TrustedDeviceRecord(deviceId: 'a', name: 'Mac', role: 'owner');
 
-    final manifest = LibraryManifest(
-      accountId: 'acc',
-      deviceId: 'a',
-      trustedDevices: [removed, current],
-    );
+    final manifest = LibraryManifest(accountId: 'acc', deviceId: 'a', trustedDevices: [removed, current]);
 
     expect(manifest.activeTrustedDevices.map((d) => d.deviceId), ['a']);
   });
-
 }

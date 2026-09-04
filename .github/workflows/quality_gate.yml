@@ -1,35 +1,77 @@
-name: ReadArc quality gate
+name: ReadArc verified pipeline
 
 on:
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
   push:
-    branches: [ main, master, 'sprint/**' ]
+    branches: [main, master]
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      default_relay_url:
+        description: 'Optional relay URL; defaults to the official ReadArc relay'
+        required: false
+        default: ''
+      build_debug_artifacts:
+        description: 'Also build debug artifacts'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+      publish_release:
+        description: 'Publish a GitHub Release after every verification job passes'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+      release_tag:
+        description: 'Manual release tag; empty means main-latest'
+        required: false
+        default: ''
+      release_prerelease:
+        description: 'Mark a manual release as prerelease'
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
 
 permissions:
   contents: read
 
+concurrency:
+  group: readarc-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  FLUTTER_VERSION: '3.47.0'
+  RUST_VERSION: '1.98.0'
+  CARGO_NDK_VERSION: '4.1.2'
+  READARC_DEFAULT_RELAY_URL: ${{ github.event.inputs.default_relay_url || vars.READARC_DEFAULT_RELAY_URL || 'https://relay.readarc.ru' }}
+  READARC_BASE_VERSION: '0.1.0'
+  READARC_BUILD_NUMBER: ${{ github.run_number }}
+  BUILD_DEBUG_ARTIFACTS: ${{ github.event.inputs.build_debug_artifacts || 'false' }}
+
 jobs:
   quality:
     name: Unit, regression and static checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+      - name: Set up Flutter 3.47.0
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
 
-      - name: Run ReadArc quality gate
+      - name: Run strict quality gate
         run: bash ./scripts/quality_gate.sh
 
       - name: Upload quality logs
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: quality-gate-logs
           path: test-results/*
@@ -38,25 +80,26 @@ jobs:
 
   android-smoke:
     name: Android emulator smoke test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: quality
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Set up Java
-        uses: actions/setup-java@v5
+      - name: Set up Java 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+      - name: Set up Flutter 3.47.0
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
 
-      - name: Prepare Android platform
+      - name: Validate Android project
         env:
           READARC_PLATFORMS: android
         run: bash ./scripts/prepare_flutter_platforms.sh
@@ -68,7 +111,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Run Android application smoke test
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@4c44018e59b437e86cdfc41da381398f93ed8808 # v2
         with:
           api-level: 35
           arch: x86_64
@@ -79,7 +122,7 @@ jobs:
 
       - name: Upload Android smoke logs
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: android-smoke-logs
           path: test-results/*
@@ -88,19 +131,20 @@ jobs:
 
   macos-smoke:
     name: macOS application smoke test
-    runs-on: macos-latest
+    runs-on: macos-15
     needs: quality
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+      - name: Set up Flutter 3.47.0
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
 
-      - name: Prepare macOS platform
+      - name: Validate macOS project
         env:
           READARC_PLATFORMS: macos
         run: bash ./scripts/prepare_flutter_platforms.sh
@@ -114,9 +158,239 @@ jobs:
 
       - name: Upload macOS smoke logs
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: macos-smoke-logs
           path: test-results/*
           if-no-files-found: ignore
           retention-days: 14
+
+  ios-build-smoke:
+    name: iOS unsigned build smoke test
+    runs-on: macos-15
+    needs: quality
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Flutter 3.47.0
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Validate iOS project
+        env:
+          READARC_PLATFORMS: ios
+        run: bash ./scripts/prepare_flutter_platforms.sh
+
+      - name: Build iOS without signing
+        working-directory: apps/flutter_client
+        run: flutter build ios --release --no-codesign --dart-define="READARC_DEFAULT_RELAY_URL=${READARC_DEFAULT_RELAY_URL}"
+
+  android-package:
+    name: Verified Android packages
+    runs-on: ubuntu-24.04
+    needs: [android-smoke, macos-smoke, ios-build-smoke]
+    env:
+      READARC_REQUIRE_RELEASE_SIGNING: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true') }}
+      READARC_REQUIRE_NATIVE_ENGINES: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Java 17
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter 3.47.0
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Set up Rust 1.98.0
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Install pinned Android native build helper
+        run: cargo install cargo-ndk --version "${CARGO_NDK_VERSION}" --locked
+
+      - name: Configure protected Android signing
+        if: env.READARC_REQUIRE_RELEASE_SIGNING == 'true'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "ERROR: required Android release signing secret is missing: $name" >&2
+              exit 1
+            fi
+          done
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > apps/flutter_client/android/app/readarc-release.jks
+          {
+            echo 'storeFile=readarc-release.jks'
+            echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
+            echo "keyAlias=$ANDROID_KEY_ALIAS"
+            echo "keyPassword=$ANDROID_KEY_PASSWORD"
+          } > apps/flutter_client/android/key.properties
+
+      - name: Build Android packages
+        run: bash ./scripts/package_android.sh
+
+      - name: Upload Android packages
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ReadArc-android-release
+          path: dist/android/*
+          if-no-files-found: error
+          retention-days: 7
+
+  macos-package:
+    name: Verified macOS packages
+    runs-on: macos-15
+    needs: [android-smoke, macos-smoke, ios-build-smoke]
+    env:
+      READARC_REQUIRE_NATIVE_ENGINES: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Flutter 3.47.0
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Set up Rust 1.98.0
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Build macOS packages
+        run: bash ./scripts/package_macos.sh
+
+      - name: Upload macOS packages
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ReadArc-macos-release
+          path: dist/macos/*
+          if-no-files-found: error
+          retention-days: 7
+
+  github-release:
+    name: Publish verified GitHub Release
+    runs-on: ubuntu-24.04
+    needs: [android-package, macos-package]
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Download Android packages
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: ReadArc-android-release
+          path: release-assets/android
+
+      - name: Download macOS packages
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: ReadArc-macos-release
+          path: release-assets/macos
+
+      - name: Select release channel
+        id: channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "title=ReadArc $GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "rolling=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && -n "${{ github.event.inputs.release_tag }}" ]]; then
+            echo "tag=${{ github.event.inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+            echo "title=ReadArc ${{ github.event.inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=${{ github.event.inputs.release_prerelease }}" >> "$GITHUB_OUTPUT"
+            echo "rolling=false" >> "$GITHUB_OUTPUT"
+          else
+            echo 'tag=main-latest' >> "$GITHUB_OUTPUT"
+            echo 'title=ReadArc main-latest' >> "$GITHUB_OUTPUT"
+            echo 'prerelease=true' >> "$GITHUB_OUTPUT"
+            echo 'rolling=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare release assets and notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mv release-assets/android/SHA256SUMS release-assets/android/ReadArc-android-SHA256SUMS.txt
+          mv release-assets/macos/SHA256SUMS release-assets/macos/ReadArc-macos-SHA256SUMS.txt
+          cat > RELEASE_NOTES.md <<EOF
+          # ${{ steps.channel.outputs.title }}
+
+          Эта сборка опубликована только после успешных unit/regression/static checks, Android emulator smoke, macOS application smoke и iOS unsigned build smoke.
+
+          - Commit: \`${GITHUB_SHA}\`
+          - Build: \`${GITHUB_RUN_NUMBER}\`
+          - Workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          Android-артефакты подписаны закрытым release key из GitHub Secrets. macOS-пакеты остаются внутренними ad-hoc builds до подключения Developer ID и notarization. iOS проверяется сборкой без подписи и не публикуется как installable IPA.
+          EOF
+          find release-assets -type f -print | sort
+
+      - name: Move rolling release tag
+        if: steps.channel.outputs.rolling == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -f main-latest "$GITHUB_SHA"
+          git push --force origin refs/tags/main-latest
+
+      - name: Publish clean ReadArc release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.channel.outputs.tag }}
+          TITLE: ${{ steps.channel.outputs.title }}
+          PRERELEASE: ${{ steps.channel.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find release-assets -type f -print | sort)
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            echo 'ERROR: no verified release assets were downloaded.' >&2
+            exit 1
+          fi
+          prerelease_flags=()
+          if [[ "$PRERELEASE" == true ]]; then prerelease_flags+=(--prerelease); fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            mapfile -t old_assets < <(gh release view "$TAG" --json assets --jq '.assets[].name')
+            for asset in "${old_assets[@]:-}"; do
+              [[ -n "$asset" ]] && gh release delete-asset "$TAG" "$asset" --yes
+            done
+            gh release edit "$TAG" --title "$TITLE" --notes-file RELEASE_NOTES.md "${prerelease_flags[@]}"
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG" "${assets[@]}" --target "$GITHUB_SHA" --title "$TITLE" --notes-file RELEASE_NOTES.md "${prerelease_flags[@]}"
+          fi

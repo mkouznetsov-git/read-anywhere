@@ -5,12 +5,7 @@ import 'package:readarc/services/format_engines/djvu_embedded_probe.dart';
 
 void main() {
   test('detects single page DJVU container without external tools', () {
-    final bytes = Uint8List.fromList([
-      ...'AT&T'.codeUnits,
-      ...'FORM'.codeUnits,
-      0, 0, 0, 4,
-      ...'DJVU'.codeUnits,
-    ]);
+    final bytes = Uint8List.fromList([...'AT&T'.codeUnits, ...'FORM'.codeUnits, 0, 0, 0, 4, ...'DJVU'.codeUnits]);
     final result = DjvuEmbeddedProbe.inspect(bytes);
     expect(result.isDjvu, isTrue);
     expect(result.pageCount, 1);
@@ -21,13 +16,22 @@ void main() {
     final bytes = Uint8List.fromList([
       ...'AT&T'.codeUnits,
       ...'FORM'.codeUnits,
-      0, 0, 0, 32,
+      0,
+      0,
+      0,
+      32,
       ...'DJVM'.codeUnits,
       ...'FORM'.codeUnits,
-      0, 0, 0, 4,
+      0,
+      0,
+      0,
+      4,
       ...'DJVU'.codeUnits,
       ...'FORM'.codeUnits,
-      0, 0, 0, 4,
+      0,
+      0,
+      0,
+      4,
       ...'DJVI'.codeUnits,
     ]);
     final result = DjvuEmbeddedProbe.inspect(bytes);

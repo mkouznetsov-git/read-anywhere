@@ -13,4 +13,4 @@ crate-type = ["cdylib", "staticlib"]
 # This avoids GPL DjVuLibre and all external command-line tools.
 djvu-rs = "=0.17.0"
 
-png = "0.17"
+png = "=0.17.16"

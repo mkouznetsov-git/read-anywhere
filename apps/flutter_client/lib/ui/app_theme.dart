@@ -18,8 +18,6 @@ class ReadArcTheme {
       onSecondary: inkBlue,
       surface: indigoSurface,
       onSurface: paper,
-      background: deepIndigo,
-      onBackground: paper,
     );
 
     return ThemeData(
@@ -33,12 +31,7 @@ class ReadArcTheme {
         foregroundColor: paper,
         elevation: 0,
         centerTitle: false,
-        titleTextStyle: TextStyle(
-          color: paper,
-          fontSize: 22,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.2,
-        ),
+        titleTextStyle: TextStyle(color: paper, fontSize: 22, fontWeight: FontWeight.w700, letterSpacing: 0.2),
       ),
       cardTheme: CardThemeData(
         color: indigoCard,
@@ -46,22 +39,16 @@ class ReadArcTheme {
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(22),
-          side: BorderSide(color: warmGold.withOpacity(0.20)),
+          side: BorderSide(color: warmGold.withValues(alpha: 0.20)),
         ),
       ),
       floatingActionButtonTheme: const FloatingActionButtonThemeData(
         backgroundColor: warmGold,
         foregroundColor: deepIndigo,
       ),
-      progressIndicatorTheme: const ProgressIndicatorThemeData(
-        color: warmGold,
-        linearTrackColor: Color(0xFF4A405F),
-      ),
+      progressIndicatorTheme: const ProgressIndicatorThemeData(color: warmGold, linearTrackColor: Color(0xFF4A405F)),
       iconTheme: const IconThemeData(color: warmGold),
-      listTileTheme: const ListTileThemeData(
-        iconColor: warmGold,
-        textColor: paper,
-      ),
+      listTileTheme: const ListTileThemeData(iconColor: warmGold, textColor: paper),
       popupMenuTheme: const PopupMenuThemeData(
         color: indigoSurface,
         textStyle: TextStyle(color: paper),
@@ -70,9 +57,7 @@ class ReadArcTheme {
         backgroundColor: indigoCard,
         contentTextStyle: TextStyle(color: paper),
       ),
-      textButtonTheme: TextButtonThemeData(
-        style: TextButton.styleFrom(foregroundColor: warmGold),
-      ),
+      textButtonTheme: TextButtonThemeData(style: TextButton.styleFrom(foregroundColor: warmGold)),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
           backgroundColor: warmGold,
@@ -87,7 +72,7 @@ class ReadArcTheme {
         titleMedium: TextStyle(color: paper, fontWeight: FontWeight.w600),
         titleLarge: TextStyle(color: paper, fontWeight: FontWeight.w700),
       ),
-      dividerTheme: DividerThemeData(color: warmGold.withOpacity(0.18)),
+      dividerTheme: DividerThemeData(color: warmGold.withValues(alpha: 0.18)),
     );
   }
 }
