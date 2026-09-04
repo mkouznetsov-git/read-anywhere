@@ -41,7 +41,7 @@ void main() {
       expect(pubspec, contains('file_picker: 10.3.10'));
       expect(pubspec, isNot(contains('dependency_overrides:')));
       expect(pubspec, contains('qr_code_scanner_plus:'));
-      expect(platformValidator, contains('git -C "$ROOT_DIR" ls-files'));
+      expect(platformValidator, contains('git -C "\$ROOT_DIR" ls-files'));
       expect(platformValidator, isNot(contains('find android/app')));
     });
 
