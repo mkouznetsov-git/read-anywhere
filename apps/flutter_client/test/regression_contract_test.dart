@@ -35,14 +35,8 @@ void main() {
       expect(manifest, contains('android.permission.INTERNET'));
       expect(manifest, contains('android:usesCleartextTraffic="false"'));
       expect(debugManifest, contains('android:usesCleartextTraffic="true"'));
-      expect(
-        debugManifest,
-        contains('xmlns:tools="http://schemas.android.com/tools"'),
-      );
-      expect(
-        debugManifest,
-        contains('tools:replace="android:usesCleartextTraffic"'),
-      );
+      expect(debugManifest, contains('xmlns:tools="http://schemas.android.com/tools"'));
+      expect(debugManifest, contains('tools:replace="android:usesCleartextTraffic"'));
       expect(pubspec, contains('qr_code_scanner_plus:'));
     });
 
