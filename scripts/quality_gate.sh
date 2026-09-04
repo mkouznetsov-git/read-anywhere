@@ -17,7 +17,7 @@ while IFS= read -r script; do
 done < <(find scripts -maxdepth 1 -type f -name '*.sh' -print | sort)
 
 echo "-- Relay syntax"
-python3 -m py_compile server/rendezvous_relay/main.py
+python3 -c 'from pathlib import Path; p = Path("server/rendezvous_relay/main.py"); compile(p.read_text(), str(p), "exec")'
 
 echo "-- Legacy naming guard"
 ACTIVE_PATHS=(
@@ -38,11 +38,15 @@ fi
 echo "-- Flutter dependencies"
 cd "$APP_DIR"
 flutter --version
-flutter pub get
+flutter pub get --enforce-lockfile
+
+echo "-- Committed platform projects"
+READARC_PLATFORMS=android,macos,ios bash "$ROOT_DIR/scripts/prepare_flutter_platforms.sh"
 
 echo "-- Flutter analyzer"
 set -o pipefail
-flutter analyze --no-fatal-warnings --no-fatal-infos 2>&1 | tee "$RESULTS_DIR/flutter-analyze.log"
+dart format --output=none --set-exit-if-changed lib test integration_test 2>&1 | tee "$RESULTS_DIR/dart-format.log"
+flutter analyze --fatal-warnings --fatal-infos 2>&1 | tee "$RESULTS_DIR/flutter-analyze.log"
 
 echo "-- Flutter unit/widget/regression tests"
 flutter test --reporter expanded 2>&1 | tee "$RESULTS_DIR/flutter-test.log"

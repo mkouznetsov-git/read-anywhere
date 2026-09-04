@@ -5,7 +5,6 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:cryptography/cryptography.dart';
 
-
 class BinaryEncryptionResult {
   const BinaryEncryptionResult({required this.header, required this.cipherBytes});
 
@@ -123,7 +122,6 @@ class ReadArcE2eCrypto {
     return Map<String, dynamic>.from(decoded);
   }
 
-
   static Future<BinaryEncryptionResult> encryptBinaryFrame({
     required Map<String, dynamic> headerFields,
     required List<int> clearBytes,
@@ -171,10 +169,7 @@ class ReadArcE2eCrypto {
       'sigAlg': 'HMAC-SHA256/account-key/v1',
       'signature': signature,
     };
-    return BinaryEncryptionResult(
-      header: header,
-      cipherBytes: Uint8List.fromList(secretBox.cipherText),
-    );
+    return BinaryEncryptionResult(header: header, cipherBytes: Uint8List.fromList(secretBox.cipherText));
   }
 
   static Future<Uint8List> decryptBinaryFrame({
@@ -218,11 +213,7 @@ class ReadArcE2eCrypto {
       throw StateError('Подпись binary sync-события не прошла проверку');
     }
     final clear = await _algorithm.decrypt(
-      SecretBox(
-        cipherBytes,
-        nonce: _decodeBase64UrlNoPadding(nonceText),
-        mac: Mac(_decodeBase64UrlNoPadding(macText)),
-      ),
+      SecretBox(cipherBytes, nonce: _decodeBase64UrlNoPadding(nonceText), mac: Mac(_decodeBase64UrlNoPadding(macText))),
       secretKey: SecretKey(keyBytes),
       aad: utf8.encode(aadText),
     );
@@ -279,7 +270,6 @@ class ReadArcE2eCrypto {
     return _base64UrlNoPadding(crypto.Hmac(crypto.sha256, keyBytes).convert(utf8.encode(input)).bytes);
   }
 
-
   static String _binaryAadText(Map<String, dynamic> header, String eventId, String issuedAt) {
     final sanitized = Map<String, dynamic>.from(header)..remove('e2ee');
     return 'readarc-binary|$eventId|$issuedAt|${_canonicalJson(sanitized)}';
@@ -297,30 +287,20 @@ class ReadArcE2eCrypto {
     required String aadText,
     String protocolVersion = 'readarc-binary-e2e-v1',
   }) {
-    final input = [
-      protocolVersion,
-      accountId,
-      deviceId,
-      eventType,
-      eventId,
-      issuedAt,
-      nonce,
-      mac,
-      aadText,
-    ].join('\n');
+    final input = [protocolVersion, accountId, deviceId, eventType, eventId, issuedAt, nonce, mac, aadText].join('\n');
     return _base64UrlNoPadding(crypto.Hmac(crypto.sha256, keyBytes).convert(utf8.encode(input)).bytes);
   }
 
   static String _canonicalJson(Object? value) {
     Object? normalize(Object? item) {
       if (item is Map) {
-        final entries = item.entries.toList()
-          ..sort((a, b) => a.key.toString().compareTo(b.key.toString()));
+        final entries = item.entries.toList()..sort((a, b) => a.key.toString().compareTo(b.key.toString()));
         return {for (final entry in entries) entry.key.toString(): normalize(entry.value)};
       }
       if (item is Iterable) return item.map(normalize).toList();
       return item;
     }
+
     return jsonEncode(normalize(value));
   }
 

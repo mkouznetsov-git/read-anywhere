@@ -1,6 +1,5 @@
 import 'dart:ffi';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
@@ -90,14 +89,11 @@ class DjvuEmbeddedEngine {
     });
   }
 
-  static Future<List<DjvuPageInfo>> readPageInfos({
-    required String sourcePath,
-    required int pageCount,
-  }) async {
-    final raw = await compute<Map<String, Object>, List<Map<String, int>>>(_readDjvuPageInfosInIsolate, <String, Object>{
-      'sourcePath': sourcePath,
-      'pageCount': pageCount,
-    });
+  static Future<List<DjvuPageInfo>> readPageInfos({required String sourcePath, required int pageCount}) async {
+    final raw = await compute<Map<String, Object>, List<Map<String, int>>>(
+      _readDjvuPageInfosInIsolate,
+      <String, Object>{'sourcePath': sourcePath, 'pageCount': pageCount},
+    );
     return raw
         .map((item) => DjvuPageInfo(width: item['width'] ?? 0, height: item['height'] ?? 0, dpi: item['dpi'] ?? 0))
         .toList(growable: false);
@@ -138,12 +134,7 @@ Uint8List? _renderDjvuPagePngInIsolate(Map<String, Object> args) {
     final rc = render(document, pageNumber - 1, pixelWidth, pixelHeight, outPtr, outLen);
     if (rc != 0) return null;
     final rgba = Uint8List.fromList(outPtr.asTypedList(outLen));
-    final image = img.Image.fromBytes(
-      width: pixelWidth,
-      height: pixelHeight,
-      bytes: rgba.buffer,
-      numChannels: 4,
-    );
+    final image = img.Image.fromBytes(width: pixelWidth, height: pixelHeight, bytes: rgba.buffer, numChannels: 4);
     return Uint8List.fromList(img.encodePng(image, level: 0));
   } catch (error) {
     debugPrint('ReadArc embedded DJVU render failed: $error');
@@ -229,7 +220,9 @@ DynamicLibrary? _tryOpenDjvuLibrary() {
     final executable = File(Platform.resolvedExecutable);
     final macosDir = executable.parent;
     final contentsDir = macosDir.parent;
-    candidates.add('${contentsDir.path}${Platform.pathSeparator}Frameworks${Platform.pathSeparator}libreadarc_djvu_engine.dylib');
+    candidates.add(
+      '${contentsDir.path}${Platform.pathSeparator}Frameworks${Platform.pathSeparator}libreadarc_djvu_engine.dylib',
+    );
     candidates.add('libreadarc_djvu_engine.dylib');
   } else if (Platform.isWindows) {
     candidates.add('readarc_djvu_engine.dll');

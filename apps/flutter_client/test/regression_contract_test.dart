@@ -7,11 +7,7 @@ String _read(String relativePath) => File(relativePath).readAsStringSync();
 void main() {
   group('ReadArc regression contracts', () {
     test('active product code never falls back to ReadAnywhere', () {
-      final roots = <String>[
-        '../../scripts/prepare_flutter_platforms.sh',
-        'lib/main.dart',
-        'pubspec.yaml',
-      ];
+      final roots = <String>['../../scripts/prepare_flutter_platforms.sh', 'lib/main.dart', 'pubspec.yaml'];
       final forbidden = RegExp(r'ReadAnywhere|Read Anywhere|readanywhere|read-anywhere|read_anywhere|READANYWHERE');
       final offenders = <String>[];
       for (final path in roots) {
@@ -31,11 +27,15 @@ void main() {
       expect(main, isNot(contains("package:mobile_scanner/mobile_scanner.dart")));
     });
 
-    test('Android platform preparation preserves camera and internet permissions', () {
-      final script = _read('../../scripts/prepare_flutter_platforms.sh');
-      expect(script, contains('android.permission.CAMERA'));
-      expect(script, contains('android.permission.INTERNET'));
-      expect(script, contains('qr_code_scanner_plus'));
+    test('committed Android project preserves QR permissions and cleartext boundary', () {
+      final manifest = _read('android/app/src/main/AndroidManifest.xml');
+      final debugManifest = _read('android/app/src/debug/AndroidManifest.xml');
+      final pubspec = _read('pubspec.yaml');
+      expect(manifest, contains('android.permission.CAMERA'));
+      expect(manifest, contains('android.permission.INTERNET'));
+      expect(manifest, contains('android:usesCleartextTraffic="false"'));
+      expect(debugManifest, contains('android:usesCleartextTraffic="true"'));
+      expect(pubspec, contains('qr_code_scanner_plus:'));
     });
 
     test('pairing UI remains six-digit-code based', () {

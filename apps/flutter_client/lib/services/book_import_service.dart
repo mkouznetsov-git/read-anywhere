@@ -73,11 +73,7 @@ class BookImportService {
       }
     }
 
-    final availableOn = <String>{
-      ...?existing?.availableOnDeviceIds,
-      manifest.deviceId,
-    }.toList()
-      ..sort();
+    final availableOn = <String>{...?existing?.availableOnDeviceIds, manifest.deviceId}.toList()..sort();
 
     final book = existing == null
         ? BookRecord(

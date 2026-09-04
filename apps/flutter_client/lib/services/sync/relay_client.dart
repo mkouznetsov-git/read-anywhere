@@ -6,7 +6,6 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../models/manifest.dart';
 
-
 class RelayBinaryMessage {
   const RelayBinaryMessage({required this.header, required this.body});
 
@@ -41,11 +40,7 @@ class RelayBinaryMessage {
 }
 
 class RelayClient {
-  RelayClient({
-    required this.relayUri,
-    required this.accountId,
-    required this.deviceId,
-  });
+  RelayClient({required this.relayUri, required this.accountId, required this.deviceId});
 
   final Uri relayUri;
   final String accountId;
@@ -74,11 +69,7 @@ class RelayClient {
         ? '/ws/$accountId/$deviceId'
         : '$normalizedBase/ws/$accountId/$deviceId';
 
-    final wsUri = relayUri.replace(
-      scheme: scheme,
-      path: wsPath,
-      query: '',
-    );
+    final wsUri = relayUri.replace(scheme: scheme, path: wsPath, query: '');
     final channel = WebSocketChannel.connect(wsUri);
     _channel = channel;
     // WebSocketChannel.connect() creates the channel synchronously. Waiting for
@@ -115,7 +106,11 @@ class RelayClient {
       }
       final decoded = Map<String, dynamic>.from(decodedRaw);
       final type = decoded['type'] as String?;
-      if (type == 'peer_joined' || type == 'peer_left' || type == 'peer_list' || type == 'pairing_claimed' || type == 'error') {
+      if (type == 'peer_joined' ||
+          type == 'peer_left' ||
+          type == 'peer_list' ||
+          type == 'pairing_claimed' ||
+          type == 'error') {
         _incoming.add(
           SyncEnvelope(
             type: type ?? 'relay_system',
@@ -136,12 +131,8 @@ class RelayClient {
     }
   }
 
-  SyncEnvelope _systemError(String message) => SyncEnvelope(
-        type: 'error',
-        accountId: accountId,
-        deviceId: 'relay-client',
-        payload: {'message': message},
-      );
+  SyncEnvelope _systemError(String message) =>
+      SyncEnvelope(type: 'error', accountId: accountId, deviceId: 'relay-client', payload: {'message': message});
 
   void send(SyncEnvelope envelope) {
     sendControl(envelope.toJson());
@@ -154,7 +145,6 @@ class RelayClient {
     }
     channel.sink.add(jsonEncode(payload));
   }
-
 
   void sendBinary(RelayBinaryMessage message) {
     final channel = _channel;

@@ -13,18 +13,15 @@ class DjvuEmbeddedProbe {
   static DjvuProbeResult inspect(Uint8List bytes) {
     if (bytes.length < 16) return const DjvuProbeResult(isDjvu: false, pageCount: 0, kind: 'unknown');
     final ascii = latin1.decode(bytes, allowInvalid: true);
-    final hasDjvuMagic = ascii.startsWith('AT&TFORM') || ascii.contains('FORM') && (ascii.contains('DJVU') || ascii.contains('DJVM'));
+    final hasDjvuMagic =
+        ascii.startsWith('AT&TFORM') || ascii.contains('FORM') && (ascii.contains('DJVU') || ascii.contains('DJVM'));
     if (!hasDjvuMagic) return const DjvuProbeResult(isDjvu: false, pageCount: 0, kind: 'unknown');
 
     final isBundled = ascii.contains('DJVM');
     var pages = _countFormPages(bytes);
     if (pages <= 0) pages = _countDirectoryCandidates(ascii);
     if (pages <= 0 && ascii.contains('DJVU')) pages = 1;
-    return DjvuProbeResult(
-      isDjvu: true,
-      pageCount: pages <= 0 ? 1 : pages,
-      kind: isBundled ? 'DJVM' : 'DJVU',
-    );
+    return DjvuProbeResult(isDjvu: true, pageCount: pages <= 0 ? 1 : pages, kind: isBundled ? 'DJVM' : 'DJVU');
   }
 
   static int _countFormPages(Uint8List bytes) {

@@ -18,6 +18,7 @@ else
   VERSION="${READARC_VERSION:-$BASE_VERSION-snapshot.$BUILD_NUMBER}"
 fi
 BUILD_DEBUG_ARTIFACTS="${BUILD_DEBUG_ARTIFACTS:-false}"
+REQUIRE_NATIVE_ENGINES="${READARC_REQUIRE_NATIVE_ENGINES:-false}"
 DMG_NAME="ReadArc-${VERSION}-macos-release.dmg"
 PKG_NAME="ReadArc-${VERSION}-macos-release.pkg"
 
@@ -29,6 +30,10 @@ cd "$APP_DIR"
 # Build the embedded DJVU engine when Rust is available. The library is copied
 # into the .app bundle after Flutter produces the release app.
 if ! "$ROOT_DIR/scripts/build_native_engines.sh" macos; then
+  if [[ "$REQUIRE_NATIVE_ENGINES" == "true" ]]; then
+    echo "ERROR: verified packages require the embedded universal macOS engine." >&2
+    exit 1
+  fi
   echo "Embedded DJVU macOS engine was not built. Continuing build without external converters." >&2
 fi
 

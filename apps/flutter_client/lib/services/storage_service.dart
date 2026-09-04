@@ -35,14 +35,10 @@ class StorageService {
       final primaryManifest = File(p.join(primary.path, 'manifest.json'));
       if (await primaryManifest.exists()) return;
 
-      final candidates = <Directory>[
-        Directory(p.join(documentsPath, 'ReadArc')),
-      ];
+      final candidates = <Directory>[Directory(p.join(documentsPath, 'ReadArc'))];
       try {
         final support = await getApplicationSupportDirectory();
-        candidates.addAll([
-          Directory(p.join(support.path, 'ReadArc')),
-        ]);
+        candidates.addAll([Directory(p.join(support.path, 'ReadArc'))]);
       } catch (_) {
         // Some platforms may not expose an application support directory.
       }
@@ -191,10 +187,8 @@ class StorageService {
       final rejectedDir = Directory(p.join((await appDir()).path, 'manifest_rejected'));
       if (!await rejectedDir.exists()) await rejectedDir.create(recursive: true);
       final stamp = DateTime.now().toUtc().toIso8601String().replaceAll(RegExp(r'[^0-9A-Za-z]+'), '_');
-      await File(p.join(rejectedDir.path, 'destructive_$stamp.json')).writeAsString(
-        const JsonEncoder.withIndent('  ').convert(candidate.toJson()),
-        flush: true,
-      );
+      await File(p.join(rejectedDir.path, 'destructive_$stamp.json'))
+          .writeAsString(const JsonEncoder.withIndent('  ').convert(candidate.toJson()), flush: true);
       return true;
     } catch (_) {
       // If the current manifest is unreadable, the recovery path in loadManifest()
@@ -299,15 +293,14 @@ class StorageService {
     try {
       final recoveryDir = Directory(p.join((await appDir()).path, 'manifest_recovery'));
       if (!await recoveryDir.exists()) await recoveryDir.create(recursive: true);
-      final ts = DateTime.now()
-          .toUtc()
-          .toIso8601String()
-          .replaceAll(':', '-')
-          .replaceAll('.', '-');
+      final ts = DateTime.now().toUtc().toIso8601String().replaceAll(':', '-').replaceAll('.', '-');
       final broken = File(p.join(recoveryDir.path, 'broken_manifest_$ts.json'));
       await broken.writeAsString(raw, flush: true);
       final note = File(p.join(recoveryDir.path, 'broken_manifest_$ts.txt'));
-      await note.writeAsString('Recovered from manifest parse error: $error\nSource: ${manifestFile.path}\n', flush: true);
+      await note.writeAsString(
+        'Recovered from manifest parse error: $error\nSource: ${manifestFile.path}\n',
+        flush: true,
+      );
     } catch (_) {
       // Never fail startup because recovery diagnostics cannot be written.
     }
@@ -357,7 +350,6 @@ class StorageService {
     return updated;
   }
 
-
   Future<LibraryManifest> trustDevice({
     required String deviceId,
     required String name,
@@ -384,13 +376,15 @@ class StorageService {
         clearRevocation: true,
       );
     } else {
-      devices.add(TrustedDeviceRecord(
-        deviceId: normalizedId,
-        name: normalizedName,
-        role: role,
-        publicKey: normalizedPublicKey,
-        keyFingerprint: _fingerprint(normalizedPublicKey),
-      ));
+      devices.add(
+        TrustedDeviceRecord(
+          deviceId: normalizedId,
+          name: normalizedName,
+          role: role,
+          publicKey: normalizedPublicKey,
+          keyFingerprint: _fingerprint(normalizedPublicKey),
+        ),
+      );
     }
     final updated = manifest.copyWith(trustedDevices: devices);
     await saveManifest(updated);
@@ -405,13 +399,14 @@ class StorageService {
     String ownerDevicePublicKey = '',
   }) async {
     final current = await loadManifest();
-    await saveManifest(current.copyWith(
-      accountId: accountId,
-      accountEncryptionKey: accountEncryptionKey.trim().isEmpty
-          ? current.accountEncryptionKey
-          : accountEncryptionKey.trim(),
-    ));
-    final manifest = await loadManifest();
+    await saveManifest(
+      current.copyWith(
+        accountId: accountId,
+        accountEncryptionKey: accountEncryptionKey.trim().isEmpty
+            ? current.accountEncryptionKey
+            : accountEncryptionKey.trim(),
+      ),
+    );
     final withOwner = await trustDevice(
       deviceId: ownerDeviceId,
       name: ownerDeviceName,
@@ -425,7 +420,6 @@ class StorageService {
       publicKey: withOwner.deviceSigningPublicKey,
     );
   }
-
 
   /// Creates a fresh local device identity when this installation was previously
   /// revoked and the user scans a new owner QR code. Reusing the old deviceId
@@ -462,8 +456,6 @@ class StorageService {
     return updated;
   }
 
-
-
   Future<LibraryManifest> revokeTrustedDevice(String deviceId, {String reason = 'revoked_by_owner'}) async {
     final manifest = await loadManifest();
     if (deviceId == manifest.deviceId) {
@@ -497,7 +489,6 @@ class StorageService {
     return updated;
   }
 
-
   Future<LibraryManifest> touchCurrentDevice() async {
     final manifest = await loadManifest();
     final now = DateTime.now().toUtc();
@@ -523,11 +514,7 @@ class StorageService {
     final index = books.indexWhere((b) => b.id == book.id);
     if (index >= 0) {
       final existing = books[index];
-      final availableOn = <String>{
-        ...existing.availableOnDeviceIds,
-        ...book.availableOnDeviceIds,
-      }.toList()
-        ..sort();
+      final availableOn = <String>{...existing.availableOnDeviceIds, ...book.availableOnDeviceIds}.toList()..sort();
       books[index] = existing.copyWith(
         title: book.title,
         fileName: book.fileName,
@@ -566,29 +553,15 @@ class StorageService {
     return updated;
   }
 
-  Future<void> addBookmark({
-    required String bookId,
-    required String label,
-    required String locator,
-  }) async {
+  Future<void> addBookmark({required String bookId, required String label, required String locator}) async {
     final manifest = await loadManifest();
     final updatedBooks = manifest.books.map((book) {
       if (book.id != bookId) return book;
-      final bookmark = BookmarkRecord(
-        bookId: bookId,
-        label: label,
-        locator: locator,
-      );
-      return book.copyWith(
-        bookmarks: [...book.bookmarks, bookmark],
-        updatedAt: DateTime.now().toUtc(),
-      );
+      final bookmark = BookmarkRecord(bookId: bookId, label: label, locator: locator);
+      return book.copyWith(bookmarks: [...book.bookmarks, bookmark], updatedAt: DateTime.now().toUtc());
     }).toList();
     await saveManifest(manifest.copyWith(books: updatedBooks));
   }
-
-
-
 
   Future<LibraryManifest> removeLocalBookCopy(String bookId) async {
     final manifest = await loadManifest();
@@ -601,15 +574,10 @@ class StorageService {
       }
       found = true;
       await _deleteLocalBookFileIfSafe(book.localPath);
-      final availableOn = book.availableOnDeviceIds
-          .where((deviceId) => deviceId != manifest.deviceId)
-          .toList()
-        ..sort();
-      updatedBooks.add(book.copyWith(
-        clearLocalPath: true,
-        availableOnDeviceIds: availableOn,
-        updatedAt: DateTime.now().toUtc(),
-      ));
+      final availableOn = book.availableOnDeviceIds.where((deviceId) => deviceId != manifest.deviceId).toList()..sort();
+      updatedBooks.add(
+        book.copyWith(clearLocalPath: true, availableOnDeviceIds: availableOn, updatedAt: DateTime.now().toUtc()),
+      );
     }
     if (!found) throw StateError('Книга не найдена в manifest: $bookId');
     final updated = manifest.copyWith(books: updatedBooks);
@@ -629,12 +597,9 @@ class StorageService {
       }
       found = true;
       await _deleteLocalBookFileIfSafe(book.localPath);
-      updatedBooks.add(book.copyWith(
-        clearLocalPath: true,
-        availableOnDeviceIds: const [],
-        deletedAt: now,
-        updatedAt: now,
-      ));
+      updatedBooks.add(
+        book.copyWith(clearLocalPath: true, availableOnDeviceIds: const [], deletedAt: now, updatedAt: now),
+      );
     }
     if (!found) throw StateError('Книга не найдена в manifest: $bookId');
     final updated = manifest.copyWith(books: updatedBooks);
@@ -642,20 +607,13 @@ class StorageService {
     return updated;
   }
 
-  Future<LibraryManifest> markBookDownloaded({
-    required String bookId,
-    required String localPath,
-  }) async {
+  Future<LibraryManifest> markBookDownloaded({required String bookId, required String localPath}) async {
     final manifest = await loadManifest();
     var found = false;
     final updatedBooks = manifest.books.map((book) {
       if (book.id != bookId) return book;
       found = true;
-      final availableOn = <String>{
-        ...book.availableOnDeviceIds,
-        manifest.deviceId,
-      }.toList()
-        ..sort();
+      final availableOn = <String>{...book.availableOnDeviceIds, manifest.deviceId}.toList()..sort();
       return book.copyWith(
         localPath: localPath,
         availableOnDeviceIds: availableOn,
@@ -671,33 +629,27 @@ class StorageService {
     return updated;
   }
 
-
-
   LibraryManifest _normalizeManifest(LibraryManifest manifest) {
-    final books = manifest.books.map((book) {
-      if (!book.isDeleted) return book;
-      final localPath = book.localPath?.trim() ?? '';
-      if (localPath.isEmpty) return book;
+    final books =
+        manifest.books.map((book) {
+          if (!book.isDeleted) return book;
+          final localPath = book.localPath?.trim() ?? '';
+          if (localPath.isEmpty) return book;
 
-      // Safety repair for stale remote tombstones. A normal user-initiated
-      // delete clears localPath first. If a deleted record still has a local
-      // file path, the book was almost certainly hidden by an older remote
-      // tombstone during sync. Keep the user's local library visible.
-      final availableOn = <String>{
-        ...book.availableOnDeviceIds,
-        manifest.deviceId,
-      }.toList()
-        ..sort();
-      return book.copyWith(
-        clearDeletedAt: true,
-        availableOnDeviceIds: availableOn,
-        updatedAt: DateTime.now().toUtc(),
-      );
-    }).toList()
-      ..sort((a, b) {
-        if (a.isDeleted != b.isDeleted) return a.isDeleted ? 1 : -1;
-        return compareBooksForLibrary(a, b);
-      });
+          // Safety repair for stale remote tombstones. A normal user-initiated
+          // delete clears localPath first. If a deleted record still has a local
+          // file path, the book was almost certainly hidden by an older remote
+          // tombstone during sync. Keep the user's local library visible.
+          final availableOn = <String>{...book.availableOnDeviceIds, manifest.deviceId}.toList()..sort();
+          return book.copyWith(
+            clearDeletedAt: true,
+            availableOnDeviceIds: availableOn,
+            updatedAt: DateTime.now().toUtc(),
+          );
+        }).toList()..sort((a, b) {
+          if (a.isDeleted != b.isDeleted) return a.isDeleted ? 1 : -1;
+          return compareBooksForLibrary(a, b);
+        });
     final devices = <String, TrustedDeviceRecord>{};
     for (final device in manifest.trustedDevices) {
       final existing = devices[device.deviceId];
@@ -718,24 +670,21 @@ class StorageService {
         if (a.isDeleted != b.isDeleted) return a.isDeleted ? 1 : -1;
         final ownerCompare = (b.role == 'owner' ? 1 : 0).compareTo(a.role == 'owner' ? 1 : 0);
         if (ownerCompare != 0) return ownerCompare;
-        final currentCompare = (b.deviceId == manifest.deviceId ? 1 : 0).compareTo(a.deviceId == manifest.deviceId ? 1 : 0);
+        final currentCompare = (b.deviceId == manifest.deviceId ? 1 : 0).compareTo(
+          a.deviceId == manifest.deviceId ? 1 : 0,
+        );
         if (currentCompare != 0) return currentCompare;
         return a.name.toLowerCase().compareTo(b.name.toLowerCase());
       });
     return manifest.copyWith(books: books, trustedDevices: sortedDevices);
   }
 
-
   Future<void> _backupManifestIfPresent(File manifestFile) async {
     try {
       if (!await manifestFile.exists()) return;
       final backupDir = Directory(p.join((await appDir()).path, 'manifest_backups'));
       if (!await backupDir.exists()) await backupDir.create(recursive: true);
-      final ts = DateTime.now()
-          .toUtc()
-          .toIso8601String()
-          .replaceAll(':', '-')
-          .replaceAll('.', '-');
+      final ts = DateTime.now().toUtc().toIso8601String().replaceAll(':', '-').replaceAll('.', '-');
       final backup = File(p.join(backupDir.path, 'manifest_$ts.json'));
       await manifestFile.copy(backup.path);
 
@@ -803,15 +752,11 @@ class StorageService {
   }
 
   Future<LibraryManifest> _ensureDeviceSigningKeys(LibraryManifest manifest) async {
-    if (manifest.deviceSigningPublicKey.trim().isNotEmpty &&
-        manifest.deviceSigningPrivateKey.trim().isNotEmpty) {
+    if (manifest.deviceSigningPublicKey.trim().isNotEmpty && manifest.deviceSigningPrivateKey.trim().isNotEmpty) {
       return manifest;
     }
     final keyPair = await _newDeviceSigningKeyPair();
-    return manifest.copyWith(
-      deviceSigningPublicKey: keyPair.publicKey,
-      deviceSigningPrivateKey: keyPair.privateKey,
-    );
+    return manifest.copyWith(deviceSigningPublicKey: keyPair.publicKey, deviceSigningPrivateKey: keyPair.privateKey);
   }
 
   Future<_DeviceSigningKeyPair> _newDeviceSigningKeyPair() async {
@@ -851,7 +796,6 @@ class StorageService {
     return 'Моё устройство';
   }
 }
-
 
 class _DeviceSigningKeyPair {
   const _DeviceSigningKeyPair({required this.publicKey, required this.privateKey});

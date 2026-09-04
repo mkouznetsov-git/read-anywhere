@@ -6,13 +6,13 @@ APP_DIR="$ROOT_DIR/apps/flutter_client"
 
 cd "$APP_DIR"
 flutter --version
-flutter pub get
+flutter pub get --enforce-lockfile
 flutter test
 
 # Relay smoke check: syntax must stay valid for CI packages.
 if command -v python3 >/dev/null 2>&1; then
   cd "$ROOT_DIR"
-  python3 -m py_compile server/rendezvous_relay/main.py
+  python3 -c 'from pathlib import Path; p = Path("server/rendezvous_relay/main.py"); compile(p.read_text(), str(p), "exec")'
 fi
 
 

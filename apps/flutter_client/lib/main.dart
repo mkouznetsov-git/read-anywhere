@@ -2,11 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
 import 'package:archive/archive.dart';
 import 'package:qr_code_scanner_plus/qr_code_scanner_plus.dart';
@@ -27,33 +27,31 @@ import 'ui/app_theme.dart';
 bool get _isDesktopReaderPlatform => Platform.isMacOS || Platform.isLinux || Platform.isWindows;
 bool get _isAndroidReaderPlatform => Platform.isAndroid;
 
-
-const Color _raDeepIndigo = Color(0xFF211B36);
-const Color _raIndigoSurface = Color(0xFF2A2340);
 const Color _raIndigoCard = Color(0xFF302849);
 const Color _raWarmGold = Color(0xFFC9AA78);
 const Color _raPaper = Color(0xFFF3E7CF);
-const Color _raPaperSoft = Color(0xFFF8F1E3);
 const Color _raInkBlue = Color(0xFF2A2F4A);
-const Color _raMutedInk = Color(0xFF6F6658);
 const Color _raMutedPaper = Color(0xFFCFC5B5);
 const Color _raFaintIndigo = Color(0xFF4A405F);
 
 void main() {
-  runZonedGuarded(() {
-    WidgetsFlutterBinding.ensureInitialized();
-    FlutterError.onError = (details) {
-      FlutterError.presentError(details);
-      debugPrint('ReadArc Flutter error: ${details.exceptionAsString()}\n${details.stack}');
-    };
-    PlatformDispatcher.instance.onError = (error, stack) {
-      debugPrint('ReadArc uncaught platform error: $error\n$stack');
-      return true;
-    };
-    runApp(const ReadArcApp());
-  }, (error, stack) {
-    debugPrint('ReadArc uncaught zone error: $error\n$stack');
-  });
+  runZonedGuarded(
+    () {
+      WidgetsFlutterBinding.ensureInitialized();
+      FlutterError.onError = (details) {
+        FlutterError.presentError(details);
+        debugPrint('ReadArc Flutter error: ${details.exceptionAsString()}\n${details.stack}');
+      };
+      PlatformDispatcher.instance.onError = (error, stack) {
+        debugPrint('ReadArc uncaught platform error: $error\n$stack');
+        return true;
+      };
+      runApp(const ReadArcApp());
+    },
+    (error, stack) {
+      debugPrint('ReadArc uncaught zone error: $error\n$stack');
+    },
+  );
 }
 
 class ReadArcApp extends StatefulWidget {
@@ -106,11 +104,7 @@ class _ReadArcAppState extends State<ReadArcApp> {
 }
 
 class LibraryScreen extends StatefulWidget {
-  const LibraryScreen({
-    super.key,
-    required this.storage,
-    required this.sync,
-  });
+  const LibraryScreen({super.key, required this.storage, required this.sync});
 
   final StorageService storage;
   final SyncService sync;
@@ -123,11 +117,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   late final _importService = BookImportService(widget.storage);
   LibraryManifest? _manifest;
   bool _busy = false;
-  bool _pairingBusy = false;
   bool _bulkDownloadBusy = false;
-  bool _logExpanded = false;
   String? _libraryLoadError;
-  PairingInvite? _pairingInvite;
   StreamSubscription<LibraryManifest>? _syncSubscription;
 
   @override
@@ -169,9 +160,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       await _reload();
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не удалось добавить книгу: $error')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось добавить книгу: $error')));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -180,34 +169,27 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _downloadBook(BookRecord book) async {
     if (!widget.sync.state.value.connected) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Нет подключения к relay.')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Нет подключения к relay.')));
       return;
     }
 
     final started = await widget.sync.requestBookFile(book);
     if (!mounted) return;
     if (!started) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Не удалось начать скачивание. Проверьте подключение к relay.')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Не удалось начать скачивание. Проверьте подключение к relay.')));
     }
   }
-
 
   Future<void> _downloadWholeLibrary(List<BookRecord> books) async {
     final toDownload = books.where((book) => !book.isDownloaded && !book.isDeleted).toList();
     if (toDownload.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Все книги уже скачаны на это устройство.')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Все книги уже скачаны на это устройство.')));
       return;
     }
     if (!widget.sync.state.value.connected) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Нет подключения к relay.')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Нет подключения к relay.')));
       return;
     }
     final totalBytes = toDownload.fold<int>(0, (sum, book) => sum + book.sizeBytes);
@@ -220,10 +202,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           'Будет загружено книг: ${toDownload.length}.',
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Нет'),
-          ),
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Нет')),
           FilledButton.icon(
             onPressed: () => Navigator.of(context).pop(true),
             icon: const Icon(Icons.download_for_offline_outlined),
@@ -262,9 +241,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
         await Future<void>.delayed(const Duration(milliseconds: 250));
       }
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Скачивание библиотеки: завершено $completed, запущено $started.')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Скачивание библиотеки: завершено $completed, запущено $started.')));
     } finally {
       if (mounted) setState(() => _bulkDownloadBusy = false);
     }
@@ -291,7 +269,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     await widget.sync.cancelBookFileDownload(book.id);
   }
 
-
   Future<void> _removeLocalCopy(BookRecord book) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -301,14 +278,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
           'Книга «${book.title}» останется в библиотеке аккаунта, но файл будет удалён с этого устройства. Позже её можно будет скачать снова с другого устройства.',
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Отмена'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Удалить файл'),
-          ),
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Отмена')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Удалить файл')),
         ],
       ),
     );
@@ -319,9 +290,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       await _reload();
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не удалось удалить файл: $error')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось удалить файл: $error')));
     }
   }
 
@@ -334,14 +303,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
           'Книга «${book.title}» исчезнет из библиотеки аккаунта на всех устройствах после синхронизации. Локальный файл на этом устройстве будет удалён.',
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Отмена'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Удалить из библиотеки'),
-          ),
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Отмена')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Удалить из библиотеки')),
         ],
       ),
     );
@@ -352,9 +315,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       await _reload();
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не удалось удалить книгу: $error')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось удалить книгу: $error')));
     }
   }
 
@@ -386,11 +347,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     ? null
                     : () => _downloadWholeLibrary(books),
                 icon: _bulkDownloadBusy
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
+                    ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
                     : const Icon(Icons.download_for_offline_outlined),
               );
             },
@@ -399,25 +356,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
             valueListenable: widget.sync.state,
             builder: (context, syncState, _) {
               return IconButton(
-                tooltip: syncState.connected
-                    ? 'Синхронизация подключена'
-                    : 'Синхронизация',
+                tooltip: syncState.connected ? 'Синхронизация подключена' : 'Синхронизация',
                 onPressed: () async {
                   await Navigator.of(context).push(
                     MaterialPageRoute(
-                      builder: (_) => SyncScreen(
-                        storage: widget.storage,
-                        sync: widget.sync,
-                      ),
+                      builder: (_) => SyncScreen(storage: widget.storage, sync: widget.sync),
                     ),
                   );
                   await _reload();
                 },
-                icon: Icon(
-                  syncState.connected
-                      ? Icons.sync_rounded
-                      : Icons.sync_disabled_rounded,
-                ),
+                icon: Icon(syncState.connected ? Icons.sync_rounded : Icons.sync_disabled_rounded),
               );
             },
           ),
@@ -426,68 +374,52 @@ class _LibraryScreenState extends State<LibraryScreen> {
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _busy ? null : _addBook,
         icon: _busy
-            ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
+            ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
             : const Icon(Icons.add_rounded),
         label: const Text('Добавить книгу'),
       ),
       body: _libraryLoadError != null && manifest == null
-          ? _LibraryLoadErrorView(
-              message: _libraryLoadError!,
-              onRetry: _reload,
-            )
+          ? _LibraryLoadErrorView(message: _libraryLoadError!, onRetry: _reload)
           : manifest == null
-              ? const Center(child: CircularProgressIndicator())
-              : books.isEmpty
-                  ? const _EmptyLibrary()
-                  : ValueListenableBuilder<SyncStateSnapshot>(
-                  valueListenable: widget.sync.state,
-                  builder: (context, syncState, _) {
-                    return ListView.builder(
-                      padding: const EdgeInsets.only(bottom: 96),
-                      itemCount: books.length,
-                      itemBuilder: (context, index) {
-                        final book = books[index];
-                        final transfer = syncState.downloadForBook(book.id);
-                        return _BookCard(
-                          book: book,
-                          transfer: transfer,
-                          onDownload: syncState.connected && !book.isDownloaded && transfer?.active != true
-                              ? () => _downloadBook(book)
-                              : null,
-                          onCancelDownload: transfer?.active == true
-                              ? () => _cancelBookDownload(book)
-                              : null,
-                          onRemoveLocalCopy: book.isDownloaded
-                              ? () => _removeLocalCopy(book)
-                              : null,
-                          onDeleteFromLibrary: () => _deleteFromLibrary(book),
-                          onOpen: book.isDownloaded
-                              ? () async {
-                                  await Navigator.of(context).push(
-                                    MaterialPageRoute(
-                                      builder: (_) => ReaderScreen(
-                                        book: book,
-                                        storage: widget.storage,
-                                        sync: widget.sync,
-                                      ),
-                                    ),
-                                  );
-                                  await _reload();
-                                }
-                              : null,
-                        );
-                      },
+          ? const Center(child: CircularProgressIndicator())
+          : books.isEmpty
+          ? const _EmptyLibrary()
+          : ValueListenableBuilder<SyncStateSnapshot>(
+              valueListenable: widget.sync.state,
+              builder: (context, syncState, _) {
+                return ListView.builder(
+                  padding: const EdgeInsets.only(bottom: 96),
+                  itemCount: books.length,
+                  itemBuilder: (context, index) {
+                    final book = books[index];
+                    final transfer = syncState.downloadForBook(book.id);
+                    return _BookCard(
+                      book: book,
+                      transfer: transfer,
+                      onDownload: syncState.connected && !book.isDownloaded && transfer?.active != true
+                          ? () => _downloadBook(book)
+                          : null,
+                      onCancelDownload: transfer?.active == true ? () => _cancelBookDownload(book) : null,
+                      onRemoveLocalCopy: book.isDownloaded ? () => _removeLocalCopy(book) : null,
+                      onDeleteFromLibrary: () => _deleteFromLibrary(book),
+                      onOpen: book.isDownloaded
+                          ? () async {
+                              await Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => ReaderScreen(book: book, storage: widget.storage, sync: widget.sync),
+                                ),
+                              );
+                              await _reload();
+                            }
+                          : null,
                     );
                   },
-                ),
+                );
+              },
+            ),
     );
   }
 }
-
 
 String _formatUiBytes(int bytes) {
   if (bytes < 1024) return '$bytes B';
@@ -495,7 +427,6 @@ String _formatUiBytes(int bytes) {
   if (bytes < 1024 * 1024 * 1024) return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
 }
-
 
 class _LibraryLoadErrorView extends StatelessWidget {
   const _LibraryLoadErrorView({required this.message, required this.onRetry});
@@ -583,7 +514,7 @@ class _BookCard extends StatelessWidget {
       elevation: 0,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(22),
-        side: BorderSide(color: _raWarmGold.withOpacity(0.18)),
+        side: BorderSide(color: _raWarmGold.withValues(alpha: 0.18)),
       ),
       child: InkWell(
         borderRadius: BorderRadius.circular(22),
@@ -598,10 +529,7 @@ class _BookCard extends StatelessWidget {
                 book.title,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: _raPaper,
-                      fontWeight: FontWeight.w800,
-                    ),
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(color: _raPaper, fontWeight: FontWeight.w800),
               ),
               const SizedBox(height: 9),
               Row(
@@ -622,7 +550,7 @@ class _BookCard extends StatelessWidget {
                           value: progressValue,
                           minHeight: 4,
                           valueColor: const AlwaysStoppedAnimation<Color>(_raWarmGold),
-                          backgroundColor: _raFaintIndigo.withOpacity(0.95),
+                          backgroundColor: _raFaintIndigo.withValues(alpha: 0.95),
                         ),
                       ),
                     ),
@@ -635,11 +563,7 @@ class _BookCard extends StatelessWidget {
                       textAlign: TextAlign.right,
                       maxLines: 1,
                       overflow: TextOverflow.clip,
-                      style: const TextStyle(
-                        color: _raMutedPaper,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                      ),
+                      style: const TextStyle(color: _raMutedPaper, fontSize: 11, fontWeight: FontWeight.w700),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -659,7 +583,7 @@ class _BookCard extends StatelessWidget {
                       style: TextButton.styleFrom(
                         visualDensity: VisualDensity.compact,
                         foregroundColor: _raWarmGold,
-                        backgroundColor: _raWarmGold.withOpacity(0.12),
+                        backgroundColor: _raWarmGold.withValues(alpha: 0.12),
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
                       ),
@@ -685,14 +609,17 @@ class _BookCard extends StatelessWidget {
                   ),
                 ],
               ),
-              if (showTransfer && transfer != null) ...[
+              if (showTransfer) ...[
                 const SizedBox(height: 8),
                 ClipRRect(
                   borderRadius: BorderRadius.circular(999),
                   child: LinearProgressIndicator(value: transfer.progressPercent.clamp(0, 100) / 100, minHeight: 4),
                 ),
                 const SizedBox(height: 4),
-                Text(hasDownloadError ? (transfer.error ?? 'Ошибка скачивания') : transfer.statusText, style: Theme.of(context).textTheme.bodySmall),
+                Text(
+                  hasDownloadError ? (transfer.error ?? 'Ошибка скачивания') : transfer.statusText,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
               ],
             ],
           ),
@@ -711,12 +638,7 @@ class _LibraryMetaChip extends StatelessWidget {
       label,
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: const TextStyle(
-        fontSize: 11,
-        fontWeight: FontWeight.w600,
-        letterSpacing: 0.2,
-        color: _raMutedPaper,
-      ),
+      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, letterSpacing: 0.2, color: _raMutedPaper),
     );
   }
 }
@@ -724,12 +646,7 @@ class _LibraryMetaChip extends StatelessWidget {
 enum _BookAction { removeLocalCopy, deleteFromLibrary }
 
 class ReaderScreen extends StatelessWidget {
-  const ReaderScreen({
-    super.key,
-    required this.book,
-    required this.storage,
-    required this.sync,
-  });
+  const ReaderScreen({super.key, required this.book, required this.storage, required this.sync});
 
   final BookRecord book;
   final StorageService storage;
@@ -764,20 +681,12 @@ class ReaderScreen extends StatelessWidget {
   }
 }
 
-enum _TextSourceKind { txt, fb2, epub, docx, doc, chm, djvu }
-
 class _TxtReaderScreen extends StatefulWidget {
-  const _TxtReaderScreen({
-    required this.book,
-    required this.storage,
-    required this.sync,
-    this.sourceKind = _TextSourceKind.txt,
-  });
+  const _TxtReaderScreen({required this.book, required this.storage, required this.sync});
 
   final BookRecord book;
   final StorageService storage;
   final SyncService sync;
-  final _TextSourceKind sourceKind;
 
   @override
   State<_TxtReaderScreen> createState() => _TxtReaderScreenState();
@@ -859,15 +768,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
       final file = File(book.localPath!);
       if (!await file.exists()) throw StateError('Файл отсутствует: ${book.localPath}');
       final bytes = await file.readAsBytes();
-      final raw = switch (widget.sourceKind) {
-        _TextSourceKind.fb2 => _extractFb2Text(_decodeTextFile(bytes)),
-        _TextSourceKind.epub => _extractEpubText(bytes),
-        _TextSourceKind.docx => _extractDocxText(bytes),
-        _TextSourceKind.doc => _extractLegacyBinaryText(bytes, 'DOC'),
-        _TextSourceKind.chm => _extractChmText(bytes),
-        _TextSourceKind.djvu => _safeUnsupportedBinaryPreview('DJVU'),
-        _TextSourceKind.txt => _normalizeText(_decodeTextFile(bytes)),
-      };
+      final raw = _normalizeText(_decodeTextFile(bytes));
       final totalChars = raw.length;
       final targetChar = _targetCharForBook(book, totalChars);
       if (!mounted) return;
@@ -883,16 +784,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
       });
     } catch (error) {
       if (!mounted) return;
-      final label = switch (widget.sourceKind) {
-        _TextSourceKind.fb2 => 'FB2',
-        _TextSourceKind.epub => 'EPUB',
-        _TextSourceKind.docx => 'DOCX',
-        _TextSourceKind.doc => 'DOC',
-        _TextSourceKind.chm => 'CHM',
-        _TextSourceKind.djvu => 'DJVU',
-        _TextSourceKind.txt => 'TXT',
-      };
-      setState(() => _loadError = 'Не удалось открыть $label: $error');
+      setState(() => _loadError = 'Не удалось открыть TXT: $error');
     }
   }
 
@@ -960,9 +852,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
         return ((decoded['anchorChar'] as num?)?.round() ?? 0).clamp(0, totalChars).toInt();
       }
       if (type == 'txt-page-v3' || type == 'txt-page-v2') {
-        return ((decoded['anchorChar'] as num?)?.round() ??
-                (decoded['startChar'] as num?)?.round() ??
-                0)
+        return ((decoded['anchorChar'] as num?)?.round() ?? (decoded['startChar'] as num?)?.round() ?? 0)
             .clamp(0, totalChars)
             .toInt();
       }
@@ -1080,7 +970,9 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
   void _setTextProgressFromFraction(double fraction) {
     if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
-    final target = (position.maxScrollExtent * fraction.clamp(0.0, 1.0)).clamp(position.minScrollExtent, position.maxScrollExtent).toDouble();
+    final target = (position.maxScrollExtent * fraction.clamp(0.0, 1.0))
+        .clamp(position.minScrollExtent, position.maxScrollExtent)
+        .toDouble();
     _scrollController.jumpTo(target);
     final locator = _currentLocator();
     if (locator != null) {
@@ -1096,25 +988,9 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
     if (_textProgressScrubActive) setState(() => _textProgressScrubActive = false);
   }
 
-  String get _textLocatorType => switch (widget.sourceKind) {
-        _TextSourceKind.fb2 => 'fb2-line-anchor-v1',
-        _TextSourceKind.epub => 'epub-line-anchor-v1',
-        _TextSourceKind.docx => 'docx-line-anchor-v1',
-        _TextSourceKind.doc => 'doc-line-anchor-v1',
-        _TextSourceKind.chm => 'chm-line-anchor-v1',
-        _TextSourceKind.djvu => 'djvu-line-anchor-v1',
-        _TextSourceKind.txt => 'txt-line-anchor-v1',
-      };
+  String get _textLocatorType => 'txt-line-anchor-v1';
 
-  String get _textReaderLabel => switch (widget.sourceKind) {
-        _TextSourceKind.fb2 => 'FB2',
-        _TextSourceKind.epub => 'EPUB',
-        _TextSourceKind.docx => 'DOCX',
-        _TextSourceKind.doc => 'DOC',
-        _TextSourceKind.chm => 'CHM',
-        _TextSourceKind.djvu => 'DJVU',
-        _TextSourceKind.txt => 'TXT',
-      };
+  String get _textReaderLabel => 'TXT';
 
   Future<void> _copyVisibleText() async {
     final lines = _lines;
@@ -1126,9 +1002,8 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
     if (text.isEmpty) return;
     await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Скопирован фрагмент $_textReaderLabel (${end - start} строк)')),
-    );
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('Скопирован фрагмент $_textReaderLabel (${end - start} строк)')));
   }
 
   Future<void> _saveProgress(_TextAnchorLocator locator) async {
@@ -1151,8 +1026,7 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
     await widget.storage.addBookmark(
       bookId: widget.book.id,
       label: 'Закладка ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
-      locator: locator?.toJsonString(type: _textLocatorType) ??
-          _book.currentLocator,
+      locator: locator?.toJsonString(type: _textLocatorType) ?? _book.currentLocator,
     );
     await widget.sync.broadcastLibrarySnapshot(reason: 'bookmark_added');
     if (!mounted) return;
@@ -1222,82 +1096,73 @@ class _TxtReaderScreenState extends State<_TxtReaderScreen> {
               ),
             )
           : raw == null
-              ? const Center(child: CircularProgressIndicator())
-              : Column(
-                  children: [
-                    Expanded(
-                      child: LayoutBuilder(
-                        builder: (context, constraints) {
-                          _ensureLinesForWidth(constraints.maxWidth);
-                          final currentLines = _lines;
-                          if (currentLines == null) {
-                            return const Center(child: CircularProgressIndicator());
-                          }
-                          return GestureDetector(
-                            behavior: HitTestBehavior.translucent,
-                            onTap: _deactivateTextProgressScrub,
-                            child: SelectionArea(
-                              child: Scrollbar(
-                                controller: _scrollController,
-                                thumbVisibility: true,
-                                interactive: true,
-                                child: ListView.builder(
-                                  controller: _scrollController,
-                                  padding: const EdgeInsets.fromLTRB(
-                                    _horizontalReaderPadding,
-                                    _topPadding,
-                                    _horizontalReaderPadding,
-                                    _bottomPadding,
-                                  ),
-                                  itemExtent: _lineExtent,
-                                  cacheExtent: _lineExtent * 60,
-                                  itemCount: currentLines.length,
-                                  itemBuilder: (context, index) {
-                                    final line = currentLines[index];
-                                    return Text(
-                                      line.text,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.clip,
-                                      softWrap: false,
-                                      style: _readerTextStyle,
-                                    );
-                                  },
-                                ),
+          ? const Center(child: CircularProgressIndicator())
+          : Column(
+              children: [
+                Expanded(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      _ensureLinesForWidth(constraints.maxWidth);
+                      final currentLines = _lines;
+                      if (currentLines == null) {
+                        return const Center(child: CircularProgressIndicator());
+                      }
+                      return GestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        onTap: _deactivateTextProgressScrub,
+                        child: SelectionArea(
+                          child: Scrollbar(
+                            controller: _scrollController,
+                            thumbVisibility: true,
+                            interactive: true,
+                            child: ListView.builder(
+                              scrollCacheExtent: const ScrollCacheExtent.pixels(_lineExtent * 60),
+                              controller: _scrollController,
+                              padding: const EdgeInsets.fromLTRB(
+                                _horizontalReaderPadding,
+                                _topPadding,
+                                _horizontalReaderPadding,
+                                _bottomPadding,
                               ),
+                              itemExtent: _lineExtent,
+                              itemCount: currentLines.length,
+                              itemBuilder: (context, index) {
+                                final line = currentLines[index];
+                                return Text(
+                                  line.text,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.clip,
+                                  softWrap: false,
+                                  style: _readerTextStyle,
+                                );
+                              },
                             ),
-                          );
-                        },
-                      ),
-                    ),
-                    if (!_fullScreen)
-                      _ContinuousReaderProgressBar(
-                        progress: (_lastProgress.clamp(0, 100) / 100).toDouble(),
-                        label: '${_lastProgress.clamp(0, 100).toStringAsFixed(1)}%',
-                        active: _textProgressScrubActive,
-                        onActivate: () => setState(() => _textProgressScrubActive = true),
-                        onFractionSelected: _setTextProgressFromFraction,
-                      ),
-                  ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
                 ),
+                if (!_fullScreen)
+                  _ContinuousReaderProgressBar(
+                    progress: (_lastProgress.clamp(0, 100) / 100).toDouble(),
+                    label: '${_lastProgress.clamp(0, 100).toStringAsFixed(1)}%',
+                    active: _textProgressScrubActive,
+                    onActivate: () => setState(() => _textProgressScrubActive = true),
+                    onFractionSelected: _setTextProgressFromFraction,
+                  ),
+              ],
+            ),
     );
   }
 }
 
-
-
-
 class _DocxReaderScreen extends StatefulWidget {
-  const _DocxReaderScreen({
-    required this.book,
-    required this.storage,
-    required this.sync,
-    this.sourceKind = _RichSourceKind.docx,
-  });
+  const _DocxReaderScreen({required this.book, required this.storage, required this.sync});
 
   final BookRecord book;
   final StorageService storage;
   final SyncService sync;
-  final _RichSourceKind sourceKind;
 
   @override
   State<_DocxReaderScreen> createState() => _DocxReaderScreenState();
@@ -1347,7 +1212,7 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
         break;
       }
     }
-    final label = _richFormatLabel(widget.sourceKind);
+    const label = 'DOCX';
     if (book.localPath == null) {
       if (mounted) setState(() => _loadError = 'Файл $label не скачан на это устройство');
       return;
@@ -1359,7 +1224,7 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
     }
     try {
       final bytes = await file.readAsBytes();
-      final document = _parseRichDocumentFromBytes(widget.sourceKind, bytes);
+      final document = _parseRichDocumentFromBytes(_RichSourceKind.docx, bytes);
       if (!mounted) return;
       setState(() {
         _runtimeBook = book;
@@ -1412,7 +1277,9 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
   void _setDocxProgressFromFraction(double fraction) {
     if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
-    final target = (position.maxScrollExtent * fraction.clamp(0.0, 1.0)).clamp(position.minScrollExtent, position.maxScrollExtent).toDouble();
+    final target = (position.maxScrollExtent * fraction.clamp(0.0, 1.0))
+        .clamp(position.minScrollExtent, position.maxScrollExtent)
+        .toDouble();
     _scrollController.jumpTo(target);
     final progress = _currentProgress();
     _progress = progress;
@@ -1440,13 +1307,13 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
     });
   }
 
-  String get _officeLocatorType => widget.sourceKind == _RichSourceKind.doc ? 'doc-rich-scroll-v1' : 'docx-rich-scroll-v1';
+  String get _officeLocatorType => 'docx-rich-scroll-v1';
 
   String _locatorJson(double progress) => jsonEncode({
-        'type': _officeLocatorType,
-        'progressPercent': progress.clamp(0.0, 100.0),
-        'updatedAt': DateTime.now().toUtc().toIso8601String(),
-      });
+    'type': _officeLocatorType,
+    'progressPercent': progress.clamp(0.0, 100.0),
+    'updatedAt': DateTime.now().toUtc().toIso8601String(),
+  });
 
   Future<void> _saveProgress(double progress) async {
     await widget.storage.updateProgress(
@@ -1460,22 +1327,21 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
   Future<void> _copyAll() async {
     final doc = _document;
     if (doc == null) return;
-    final text = [
-      ...doc.officeHeaderBlocks,
-      ...doc.blocks,
-      ...doc.officeFooterBlocks,
-    ].map((block) => block.plainText).where((line) => line.trim().isNotEmpty && line != _officePageBreakMarker).join('\n\n');
+    final text = [...doc.officeHeaderBlocks, ...doc.blocks, ...doc.officeFooterBlocks]
+        .map((block) => block.plainText)
+        .where((line) => line.trim().isNotEmpty && line != _officePageBreakMarker)
+        .join('\n\n');
     if (text.trim().isEmpty) return;
     await Clipboard.setData(ClipboardData(text: text));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Текст ${_richFormatLabel(widget.sourceKind)} скопирован')));
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Текст DOCX скопирован')));
   }
 
   Future<void> _addBookmark() async {
     final progress = _currentProgress();
     await widget.storage.addBookmark(
       bookId: widget.book.id,
-      label: 'Закладка ${_richFormatLabel(widget.sourceKind)} ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
+      label: 'Закладка DOCX ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
       locator: _locatorJson(progress),
     );
     await widget.sync.broadcastLibrarySnapshot(reason: 'bookmark_added');
@@ -1525,53 +1391,50 @@ class _DocxReaderScreenState extends State<_DocxReaderScreen> {
               ),
             )
           : document == null
-              ? const Center(child: CircularProgressIndicator())
-              : Column(
-                  children: [
-                    Expanded(
-                      child: ColoredBox(
-                        color: const Color(0xFFE7D7B9),
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.translucent,
-                          onTap: _deactivateDocxProgressScrub,
-                          child: Builder(
-                            builder: (context) {
-                              final reader = Scrollbar(
-                                controller: _scrollController,
-                                thumbVisibility: true,
-                                interactive: !Platform.isAndroid && !Platform.isIOS,
-                                child: ListView(
-                                  controller: _scrollController,
-                                  padding: const EdgeInsets.fromLTRB(14, 18, 14, 32),
-                                  cacheExtent: 3600,
-                                  children: [
-                                    _DocxPageView(document: document),
-                                  ],
-                                ),
-                              );
-                              // Android/iOS selection over a scaled Office page can trigger platform-specific
-                              // layout/paint failures. Keep the document visible on mobile and preserve
-                              // desktop text selection; mobile still has the toolbar "copy all" action.
-                              return _selectionAreaIsCheapForRichReader() ? SelectionArea(child: reader) : reader;
-                            },
-                          ),
-                        ),
+          ? const Center(child: CircularProgressIndicator())
+          : Column(
+              children: [
+                Expanded(
+                  child: ColoredBox(
+                    color: const Color(0xFFE7D7B9),
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.translucent,
+                      onTap: _deactivateDocxProgressScrub,
+                      child: Builder(
+                        builder: (context) {
+                          final reader = Scrollbar(
+                            controller: _scrollController,
+                            thumbVisibility: true,
+                            interactive: !Platform.isAndroid && !Platform.isIOS,
+                            child: ListView(
+                              scrollCacheExtent: const ScrollCacheExtent.pixels(3600),
+                              controller: _scrollController,
+                              padding: const EdgeInsets.fromLTRB(14, 18, 14, 32),
+                              children: [_DocxPageView(document: document)],
+                            ),
+                          );
+                          // Android/iOS selection over a scaled Office page can trigger platform-specific
+                          // layout/paint failures. Keep the document visible on mobile and preserve
+                          // desktop text selection; mobile still has the toolbar "copy all" action.
+                          return _selectionAreaIsCheapForRichReader() ? SelectionArea(child: reader) : reader;
+                        },
                       ),
                     ),
-                    if (!_fullScreen)
-                      _ContinuousReaderProgressBar(
-                        progress: (_progress.clamp(0, 100) / 100).toDouble(),
-                        label: '${_progress.clamp(0, 100).toStringAsFixed(1)}%',
-                        active: _docxProgressScrubActive,
-                        onActivate: () => setState(() => _docxProgressScrubActive = true),
-                        onFractionSelected: _setDocxProgressFromFraction,
-                      ),
-                  ],
+                  ),
                 ),
+                if (!_fullScreen)
+                  _ContinuousReaderProgressBar(
+                    progress: (_progress.clamp(0, 100) / 100).toDouble(),
+                    label: '${_progress.clamp(0, 100).toStringAsFixed(1)}%',
+                    active: _docxProgressScrubActive,
+                    onActivate: () => setState(() => _docxProgressScrubActive = true),
+                    onFractionSelected: _setDocxProgressFromFraction,
+                  ),
+              ],
+            ),
     );
   }
 }
-
 
 class _DocxPageView extends StatelessWidget {
   const _DocxPageView({required this.document});
@@ -1583,11 +1446,11 @@ class _DocxPageView extends StatelessWidget {
     // out here, so the paginator ignored Word-declared page breaks and then
     // guessed page starts from rough height estimates.
     final result = document.blocks.toList(growable: false);
-    if (result.any((block) => block.plainText.trim().isNotEmpty && block.plainText != _officePageBreakMarker)) return result;
+    if (result.any((block) => block.plainText.trim().isNotEmpty && block.plainText != _officePageBreakMarker)) {
+      return result;
+    }
     return const [
-      _Fb2Block.paragraph([
-        _Fb2Inline('DOCX открыт, но в документе не найдено отображаемое содержимое.'),
-      ]),
+      _Fb2Block.paragraph([_Fb2Inline('DOCX открыт, но в документе не найдено отображаемое содержимое.')]),
     ];
   }
 
@@ -1601,7 +1464,9 @@ class _DocxPageView extends StatelessWidget {
     // paginator lets body blocks consume this band, text visually sticks to the
     // signature/footer line at the bottom of the page.
     final footerReserve = document.officeFooterBlocks.isEmpty ? 0.0 : 18.0;
-    final usableHeight = (logicalBodyHeight - headerReserve - footerReserve + 44.0).clamp(300.0, logicalBodyHeight).toDouble();
+    final usableHeight = (logicalBodyHeight - headerReserve - footerReserve + 44.0)
+        .clamp(300.0, logicalBodyHeight)
+        .toDouble();
     final usableWidth = (page.logicalPageWidth - page.logicalLeftMargin - page.logicalRightMargin)
         .clamp(260.0, 1400.0)
         .toDouble();
@@ -1710,57 +1575,6 @@ class _DocxPageView extends StatelessWidget {
   }
 }
 
-class _DocxFixedPaperPage extends StatelessWidget {
-  const _DocxFixedPaperPage({
-    required this.document,
-    required this.blocks,
-    required this.viewportWidth,
-    required this.pageIndex,
-    required this.pageCount,
-  });
-
-  final _Fb2Document document;
-  final List<_Fb2Block> blocks;
-  final double viewportWidth;
-  final int pageIndex;
-  final int pageCount;
-
-  @override
-  Widget build(BuildContext context) {
-    final page = document.officePageFormat;
-    final pageWidth = page.logicalPageWidth;
-    final safeViewportWidth = viewportWidth.isFinite && viewportWidth > 0 ? viewportWidth : MediaQuery.of(context).size.width;
-
-    // Hotfix 04 deliberately renders the DOCX paper at its fixed logical width and
-    // lets the user pan horizontally if the screen is narrower. This is less fancy
-    // than fit-to-width zoom, but it is deterministic and keeps DOCX content visible
-    // on Android/macOS while the professional page engine is being hardened.
-    return SizedBox(
-      width: safeViewportWidth,
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        physics: const ClampingScrollPhysics(),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(minWidth: safeViewportWidth),
-          child: Align(
-            alignment: Alignment.topCenter,
-            child: SizedBox(
-              width: pageWidth,
-              child: _DocxPaperPage(
-                document: document,
-                blocks: blocks,
-                pageIndex: pageIndex,
-                pageCount: pageCount,
-                scale: 1.0,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _DocxPaperPage extends StatelessWidget {
   const _DocxPaperPage({
     required this.document,
@@ -1787,11 +1601,7 @@ class _DocxPaperPage extends StatelessWidget {
         color: Colors.white,
         border: Border.all(color: const Color(0xFFE0E0E0), width: 0.8),
         boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.18),
-            blurRadius: 22,
-            offset: const Offset(0, 10),
-          ),
+          BoxShadow(color: Colors.black.withValues(alpha: 0.18), blurRadius: 22, offset: const Offset(0, 10)),
         ],
       ),
       child: ClipRect(
@@ -1799,52 +1609,52 @@ class _DocxPaperPage extends StatelessWidget {
           width: fixedPageWidth,
           height: minHeight,
           child: Stack(
-          children: [
-            Padding(
-              padding: EdgeInsets.fromLTRB(
-                page.logicalLeftMargin * scale,
-                page.logicalTopMargin * scale,
-                page.logicalRightMargin * scale,
-                page.logicalBottomMargin * scale,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (document.officeHeaderBlocks.isNotEmpty)
-                    _DocxHeaderFooterView(
-                      blocks: document.officeHeaderBlocks,
-                      isHeader: true,
-                      pageIndex: pageIndex,
-                      pageCount: pageCount,
-                      scale: scale,
-                    ),
-                  for (final block in blocks) _DocxBlockView(block: block, scale: scale),
-                  const Spacer(),
-                  if (document.officeFooterBlocks.isNotEmpty) SizedBox(height: 16 * scale),
-                  if (document.officeFooterBlocks.isNotEmpty)
-                    _DocxHeaderFooterView(
-                      blocks: document.officeFooterBlocks,
-                      isHeader: false,
-                      pageIndex: pageIndex,
-                      pageCount: pageCount,
-                      scale: scale,
-                    ),
-                ],
-              ),
-            ),
-            Positioned(
-              top: (page.logicalTopMargin * 0.42).clamp(10.0, 34.0).toDouble() * scale,
-              right: (page.logicalRightMargin * 0.48).clamp(12.0, 46.0).toDouble() * scale,
-              child: Text(
-                '${pageIndex + 1}',
-                style: TextStyle(
-                  color: const Color(0xFF777777),
-                  fontSize: 8.6 * scale,
-                  height: 1.0,
-                  fontFamily: 'Times New Roman',
+            children: [
+              Padding(
+                padding: EdgeInsets.fromLTRB(
+                  page.logicalLeftMargin * scale,
+                  page.logicalTopMargin * scale,
+                  page.logicalRightMargin * scale,
+                  page.logicalBottomMargin * scale,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (document.officeHeaderBlocks.isNotEmpty)
+                      _DocxHeaderFooterView(
+                        blocks: document.officeHeaderBlocks,
+                        isHeader: true,
+                        pageIndex: pageIndex,
+                        pageCount: pageCount,
+                        scale: scale,
+                      ),
+                    for (final block in blocks) _DocxBlockView(block: block, scale: scale),
+                    const Spacer(),
+                    if (document.officeFooterBlocks.isNotEmpty) SizedBox(height: 16 * scale),
+                    if (document.officeFooterBlocks.isNotEmpty)
+                      _DocxHeaderFooterView(
+                        blocks: document.officeFooterBlocks,
+                        isHeader: false,
+                        pageIndex: pageIndex,
+                        pageCount: pageCount,
+                        scale: scale,
+                      ),
+                  ],
                 ),
               ),
-            ),
+              Positioned(
+                top: (page.logicalTopMargin * 0.42).clamp(10.0, 34.0).toDouble() * scale,
+                right: (page.logicalRightMargin * 0.48).clamp(12.0, 46.0).toDouble() * scale,
+                child: Text(
+                  '${pageIndex + 1}',
+                  style: TextStyle(
+                    color: const Color(0xFF777777),
+                    fontSize: 8.6 * scale,
+                    height: 1.0,
+                    fontFamily: 'Times New Roman',
+                  ),
+                ),
+              ),
             ],
           ),
         ),
@@ -1875,12 +1685,15 @@ class _DocxHeaderFooterView extends StatelessWidget {
     return Padding(
       padding: EdgeInsets.only(bottom: isHeader ? 14 * scale : 0, top: isHeader ? 0 : 6 * scale),
       child: DefaultTextStyle.merge(
-        style: TextStyle(color: const Color(0xFF777777), fontSize: 8.8 * scale, height: 1.08, fontFamily: 'Times New Roman'),
+        style: TextStyle(
+          color: const Color(0xFF777777),
+          fontSize: 8.8 * scale,
+          height: 1.08,
+          fontFamily: 'Times New Roman',
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            for (final block in visible) _DocxBlockView(block: block, compact: true, scale: scale),
-          ],
+          children: [for (final block in visible) _DocxBlockView(block: block, compact: true, scale: scale)],
         ),
       ),
     );
@@ -1923,12 +1736,21 @@ class _DocxBlockView extends StatelessWidget {
           child: Center(
             child: ConstrainedBox(
               constraints: BoxConstraints(maxHeight: (compact ? 160 : 520) * scale),
-              child: Image.memory(bytes, fit: BoxFit.contain, errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined)),
+              child: Image.memory(
+                bytes,
+                fit: BoxFit.contain,
+                errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_outlined),
+              ),
             ),
           ),
         );
       case _Fb2BlockKind.table:
-        return _DocxDocumentTableView(rows: block.tableRows, format: block.officeTableFormat, compact: compact, scale: scale);
+        return _DocxDocumentTableView(
+          rows: block.tableRows,
+          format: block.officeTableFormat,
+          compact: compact,
+          scale: scale,
+        );
       case _Fb2BlockKind.title:
       case _Fb2BlockKind.paragraph:
         final format = block.officeFormat;
@@ -1953,40 +1775,53 @@ class _DocxBlockView extends StatelessWidget {
             ),
             child: Row(
               children: [
-                Expanded(child: Text(cityDate.group(1)!.trim(), style: style.copyWith(fontWeight: FontWeight.w400), textAlign: TextAlign.left)),
-                Expanded(child: Text(cityDate.group(2)!.trim(), style: style.copyWith(fontWeight: FontWeight.w400), textAlign: TextAlign.right)),
+                Expanded(
+                  child: Text(
+                    cityDate.group(1)!.trim(),
+                    style: style.copyWith(fontWeight: FontWeight.w400),
+                    textAlign: TextAlign.left,
+                  ),
+                ),
+                Expanded(
+                  child: Text(
+                    cityDate.group(2)!.trim(),
+                    style: style.copyWith(fontWeight: FontWeight.w400),
+                    textAlign: TextAlign.right,
+                  ),
+                ),
               ],
             ),
           );
         }
-        final preserveLeadingWhitespace = RegExp(r'^\s*М\.?П\.?', caseSensitive: false).hasMatch(block.plainText.replaceAll('\u2003', ' '));
+        final preserveLeadingWhitespace = RegExp(
+          r'^\s*М\.?П\.?',
+          caseSensitive: false,
+        ).hasMatch(block.plainText.replaceAll('\u2003', ' '));
         final displayInlines = _docxDisplayInlines(block.inlines, preserveLeadingWhitespace: preserveLeadingWhitespace);
-        final prefixShouldBeBold = isTitle || format.bold || displayInlines.where((inline) => inline.text.trim().isNotEmpty).every((inline) => inline.bold);
+        final prefixShouldBeBold =
+            isTitle ||
+            format.bold ||
+            displayInlines.where((inline) => inline.text.trim().isNotEmpty).every((inline) => inline.bold);
         final text = block.kind == _Fb2BlockKind.title
             ? TextSpan(text: block.plainText.trimLeft())
-            : TextSpan(children: [
-                if (listPrefix != null && listPrefix.isNotEmpty)
-                  TextSpan(
-                    text: '$listPrefix ',
-                    style: style.copyWith(
-                      fontSize: isTitle && !compact ? size.clamp(12.5, 17.5).toDouble() : size,
-                      fontWeight: prefixShouldBeBold ? FontWeight.w700 : style.fontWeight,
+            : TextSpan(
+                children: [
+                  if (listPrefix != null && listPrefix.isNotEmpty)
+                    TextSpan(
+                      text: '$listPrefix ',
+                      style: style.copyWith(
+                        fontSize: isTitle && !compact ? size.clamp(12.5, 17.5).toDouble() : size,
+                        fontWeight: prefixShouldBeBold ? FontWeight.w700 : style.fontWeight,
+                      ),
                     ),
-                  ),
-                ...displayInlines.map((inline) => _docxInlineSpan(inline, format, compact: compact, scale: scale)),
-              ]);
-        final isNumbered = listPrefix != null && listPrefix.isNotEmpty;
-        final alreadyNumbered = RegExp(r'^\s*(?:\d+(?:\.\d+)*[.)]?|[а-яё]\))\s+', caseSensitive: false).hasMatch(plain);
-        // Avoid the visible "staircase" effect: Word can combine hanging/first-line
-        // indents with tab stops, but Flutter Text cannot. For paragraphs that
-        // already contain their legal number in the text, keep the body left edge
-        // aligned. Only generated numbering receives a small hanging gutter.
-        final useGeneratedNumberGutter = isNumbered && !alreadyNumbered;
+                  ...displayInlines.map((inline) => _docxInlineSpan(inline, format, compact: compact, scale: scale)),
+                ],
+              );
         // Word can express hanging indents with tab stops. Flutter Text cannot
         // reproduce that exactly in a single paragraph widget; applying raw
         // left/first-line indents created the visible DOCX "staircase". Keep the
         // body edge aligned and reserve only a tiny gutter for generated numbers.
-        final leftIndent = 0.0;
+        const leftIndent = 0.0;
         return Padding(
           padding: EdgeInsets.only(
             top: compact ? 0 : format.spaceBefore.clamp(0.0, 32.0).toDouble() * scale,
@@ -1994,17 +1829,11 @@ class _DocxBlockView extends StatelessWidget {
             left: leftIndent * scale,
             right: compact ? 0 : format.rightIndent.clamp(0.0, 96.0).toDouble() * scale,
           ),
-          child: Text.rich(
-            text,
-            style: style,
-            textAlign: _officeTextAlign(format.align),
-            softWrap: true,
-          ),
+          child: Text.rich(text, style: style, textAlign: _officeTextAlign(format.align), softWrap: true),
         );
     }
   }
 }
-
 
 List<_Fb2Inline> _docxDisplayInlines(List<_Fb2Inline> source, {bool preserveLeadingWhitespace = false}) {
   if (source.isEmpty) return source;
@@ -2016,36 +1845,45 @@ List<_Fb2Inline> _docxDisplayInlines(List<_Fb2Inline> source, {bool preserveLead
     if (!strippedLeading) {
       final trimmed = text.replaceFirst(RegExp(r'^[ \t\u00A0]+'), '');
       if (trimmed.isEmpty) {
-        result.add(_Fb2Inline(
-          '',
-          href: inline.href,
-          bold: inline.bold,
-          italic: inline.italic,
-          underline: inline.underline,
-          fontSize: inline.fontSize,
-          fontFamily: inline.fontFamily,
-          color: inline.color,
-        ));
+        result.add(
+          _Fb2Inline(
+            '',
+            href: inline.href,
+            bold: inline.bold,
+            italic: inline.italic,
+            underline: inline.underline,
+            fontSize: inline.fontSize,
+            fontFamily: inline.fontFamily,
+            color: inline.color,
+          ),
+        );
         continue;
       }
       text = trimmed;
       strippedLeading = true;
     }
-    result.add(_Fb2Inline(
-      text,
-      href: inline.href,
-      bold: inline.bold,
-      italic: inline.italic,
-      underline: inline.underline,
-      fontSize: inline.fontSize,
-      fontFamily: inline.fontFamily,
-      color: inline.color,
-    ));
+    result.add(
+      _Fb2Inline(
+        text,
+        href: inline.href,
+        bold: inline.bold,
+        italic: inline.italic,
+        underline: inline.underline,
+        fontSize: inline.fontSize,
+        fontFamily: inline.fontFamily,
+        color: inline.color,
+      ),
+    );
   }
   return result.where((inline) => inline.text.isNotEmpty).toList(growable: false);
 }
 
-InlineSpan _docxInlineSpan(_Fb2Inline inline, _OfficeParagraphFormat format, {bool compact = false, double scale = 1.0}) {
+InlineSpan _docxInlineSpan(
+  _Fb2Inline inline,
+  _OfficeParagraphFormat format, {
+  bool compact = false,
+  double scale = 1.0,
+}) {
   final size = (inline.fontSize ?? format.fontSize) * scale;
   return TextSpan(
     text: inline.text,
@@ -2061,11 +1899,11 @@ InlineSpan _docxInlineSpan(_Fb2Inline inline, _OfficeParagraphFormat format, {bo
 }
 
 TextAlign _officeTextAlign(_OfficeTextAlign align) => switch (align) {
-      _OfficeTextAlign.center => TextAlign.center,
-      _OfficeTextAlign.right => TextAlign.right,
-      _OfficeTextAlign.justify => TextAlign.justify,
-      _OfficeTextAlign.left => TextAlign.left,
-    };
+  _OfficeTextAlign.center => TextAlign.center,
+  _OfficeTextAlign.right => TextAlign.right,
+  _OfficeTextAlign.justify => TextAlign.justify,
+  _OfficeTextAlign.left => TextAlign.left,
+};
 
 class _DocxDocumentTableView extends StatelessWidget {
   const _DocxDocumentTableView({required this.rows, this.format, this.compact = false, this.scale = 1.0});
@@ -2085,7 +1923,9 @@ class _DocxDocumentTableView extends StatelessWidget {
     return Padding(
       padding: EdgeInsets.symmetric(vertical: (compact ? 4 : 8) * scale),
       child: DecoratedBox(
-        decoration: BoxDecoration(border: Border.all(color: borderColor, width: borderWidth)),
+        decoration: BoxDecoration(
+          border: Border.all(color: borderColor, width: borderWidth),
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -2102,7 +1942,13 @@ class _DocxDocumentTableView extends StatelessWidget {
     );
   }
 
-  List<Widget> _buildRowCells(int rowIndex, int columnCount, List<double> widths, Color borderColor, double borderWidth) {
+  List<Widget> _buildRowCells(
+    int rowIndex,
+    int columnCount,
+    List<double> widths,
+    Color borderColor,
+    double borderWidth,
+  ) {
     final widgets = <Widget>[];
     final row = rows[rowIndex];
     var column = 0;
@@ -2114,19 +1960,30 @@ class _DocxDocumentTableView extends StatelessWidget {
       }
       final effectiveSpan = span <= 0 ? 1 : span;
       final text = column < row.length ? row[column] : '';
-      final flex = widths.skip(column).take(effectiveSpan).fold<double>(0, (sum, value) => sum + value).clamp(0.5, 100000.0);
+      final flex = widths
+          .skip(column)
+          .take(effectiveSpan)
+          .fold<double>(0, (sum, value) => sum + value)
+          .clamp(0.5, 100000.0);
       widgets.add(
         Expanded(
           flex: (flex * 1000).round().clamp(1, 1000000).toInt(),
           child: DecoratedBox(
             decoration: BoxDecoration(
               border: Border(
-                right: column + effectiveSpan >= columnCount ? BorderSide.none : BorderSide(color: borderColor, width: borderWidth),
-                bottom: rowIndex == rows.length - 1 ? BorderSide.none : BorderSide(color: borderColor, width: borderWidth),
+                right: column + effectiveSpan >= columnCount
+                    ? BorderSide.none
+                    : BorderSide(color: borderColor, width: borderWidth),
+                bottom: rowIndex == rows.length - 1
+                    ? BorderSide.none
+                    : BorderSide(color: borderColor, width: borderWidth),
               ),
             ),
             child: Padding(
-              padding: EdgeInsets.symmetric(horizontal: (compact ? 2.5 : 3.2) * scale, vertical: (compact ? 1.8 : 2.4) * scale),
+              padding: EdgeInsets.symmetric(
+                horizontal: (compact ? 2.5 : 3.2) * scale,
+                vertical: (compact ? 1.8 : 2.4) * scale,
+              ),
               child: Text(
                 text,
                 textAlign: _docxTableCellAlign(text, rowIndex, column, columnCount, format),
@@ -2135,8 +1992,12 @@ class _DocxDocumentTableView extends StatelessWidget {
                   fontSize: (compact ? 8.5 : 10.2) * scale,
                   height: 1.08,
                   fontFamily: 'Times New Roman',
-                  fontWeight: _docxTableCellShouldBeBold(rows, rowIndex, column, columnCount, format) ? FontWeight.w700 : FontWeight.w400,
-                  fontStyle: _docxTableCellShouldItalic(rows, rowIndex, column, format) ? FontStyle.italic : FontStyle.normal,
+                  fontWeight: _docxTableCellShouldBeBold(rows, rowIndex, column, columnCount, format)
+                      ? FontWeight.w700
+                      : FontWeight.w400,
+                  fontStyle: _docxTableCellShouldItalic(rows, rowIndex, column, format)
+                      ? FontStyle.italic
+                      : FontStyle.normal,
                 ),
                 softWrap: true,
               ),
@@ -2158,7 +2019,6 @@ int _officeCellSpanAt(_OfficeTableFormat? format, int row, int column) {
   return value <= 0 ? 0 : value;
 }
 
-
 TextAlign _docxTableCellAlign(String text, int rowIndex, int column, int columnCount, _OfficeTableFormat? format) {
   final explicit = _officeCellAlignAt(format, rowIndex, column);
   if (explicit != null) return _officeTextAlign(explicit);
@@ -2171,12 +2031,23 @@ TextAlign _docxTableCellAlign(String text, int rowIndex, int column, int columnC
   return TextAlign.left;
 }
 
-bool _docxTableCellShouldBeBold(List<List<String>> rows, int rowIndex, int column, int columnCount, _OfficeTableFormat? format) {
+bool _docxTableCellShouldBeBold(
+  List<List<String>> rows,
+  int rowIndex,
+  int column,
+  int columnCount,
+  _OfficeTableFormat? format,
+) {
   if (_officeCellFlagAt(format?.cellBold ?? const [], rowIndex, column)) return true;
   final text = column < rows[rowIndex].length ? rows[rowIndex][column].trim() : '';
   if (text.isEmpty) return false;
   if (rowIndex == 0) return true;
-  if (RegExp(r'^(?:покупатель|поставщик|порядок расч|срок постав|грузополучател|существенные условия|итого)\b', caseSensitive: false).hasMatch(text)) return true;
+  if (RegExp(
+    r'^(?:покупатель|поставщик|порядок расч|срок постав|грузополучател|существенные условия|итого)\b',
+    caseSensitive: false,
+  ).hasMatch(text)) {
+    return true;
+  }
   return false;
 }
 
@@ -2193,15 +2064,15 @@ bool _docxTableCellShouldItalic(List<List<String>> rows, int rowIndex, int colum
 List<double> _docxColumnWidths(List<List<String>> rows, int columnCount, _OfficeTableFormat? format) {
   final grid = format?.columnTwips ?? const <int>[];
   if (grid.length >= columnCount && grid.take(columnCount).any((value) => value > 0)) {
-    return [
-      for (var index = 0; index < columnCount; index++) grid[index].clamp(240, 12000).toDouble(),
-    ];
+    return [for (var index = 0; index < columnCount; index++) grid[index].clamp(240, 12000).toDouble()];
   }
   final weights = List<double>.filled(columnCount, 1.0);
   for (final row in rows) {
     for (var i = 0; i < columnCount; i++) {
       final cell = i < row.length ? row[i] : '';
-      final longestWord = RegExp(r'\S+').allMatches(cell).fold<int>(0, (value, match) => match.group(0)!.length > value ? match.group(0)!.length : value);
+      final longestWord = RegExp(r'\S+')
+          .allMatches(cell)
+          .fold<int>(0, (value, match) => match.group(0)!.length > value ? match.group(0)!.length : value);
       final textWeight = (cell.length / 18.0).clamp(1.0, 4.5).toDouble();
       weights[i] = weights[i] < textWeight ? textWeight : weights[i];
       if (longestWord > 16) weights[i] = weights[i] < 2.4 ? 2.4 : weights[i];
@@ -2213,34 +2084,34 @@ List<double> _docxColumnWidths(List<List<String>> rows, int columnCount, _Office
 enum _RichSourceKind { fb2, epub, docx, doc, chm, djvu }
 
 String _richFormatLabel(_RichSourceKind kind) => switch (kind) {
-      _RichSourceKind.fb2 => 'FB2',
-      _RichSourceKind.epub => 'EPUB',
-      _RichSourceKind.docx => 'DOCX',
-      _RichSourceKind.doc => 'DOC',
-      _RichSourceKind.chm => 'CHM',
-      _RichSourceKind.djvu => 'DJVU',
-    };
-
+  _RichSourceKind.fb2 => 'FB2',
+  _RichSourceKind.epub => 'EPUB',
+  _RichSourceKind.docx => 'DOCX',
+  _RichSourceKind.doc => 'DOC',
+  _RichSourceKind.chm => 'CHM',
+  _RichSourceKind.djvu => 'DJVU',
+};
 
 _Fb2Document _parseRichDocumentFromBytes(_RichSourceKind kind, Uint8List bytes) => switch (kind) {
-      _RichSourceKind.epub => _parseEpubDocument(bytes),
-      _RichSourceKind.docx => _parseDocxDocument(bytes),
-      _RichSourceKind.doc => _parseDocDocument(bytes),
-      _RichSourceKind.fb2 => _parseFb2Document(_decodeTextFile(bytes)),
-      _RichSourceKind.chm => _makeFb2Document([_Fb2Block.paragraph([_Fb2Inline(_safeUnsupportedBinaryPreview('CHM'))])]),
-      _RichSourceKind.djvu => _makeFb2Document([_Fb2Block.paragraph([_Fb2Inline(_safeUnsupportedBinaryPreview('DJVU'))])]),
-    };
+  _RichSourceKind.epub => _parseEpubDocument(bytes),
+  _RichSourceKind.docx => _parseDocxDocument(bytes),
+  _RichSourceKind.doc => _parseDocDocument(bytes),
+  _RichSourceKind.fb2 => _parseFb2Document(_decodeTextFile(bytes)),
+  _RichSourceKind.chm => _makeFb2Document([
+    _Fb2Block.paragraph([_Fb2Inline(_safeUnsupportedBinaryPreview('CHM'))]),
+  ]),
+  _RichSourceKind.djvu => _makeFb2Document([
+    _Fb2Block.paragraph([_Fb2Inline(_safeUnsupportedBinaryPreview('DJVU'))]),
+  ]),
+};
 
-
-Future<_Fb2Document> _parseReaderDocumentFromFileSafely({
-  required _RichSourceKind kind,
-  required File file,
-}) async {
+Future<_Fb2Document> _parseReaderDocumentFromFileSafely({required _RichSourceKind kind, required File file}) async {
   final label = _richFormatLabel(kind);
   try {
-    return await _parseReaderDocumentFromFile(kind: kind, file: file).timeout(
-      kind == _RichSourceKind.djvu ? const Duration(seconds: 75) : const Duration(seconds: 45),
-    );
+    return await _parseReaderDocumentFromFile(
+      kind: kind,
+      file: file,
+    ).timeout(kind == _RichSourceKind.djvu ? const Duration(seconds: 75) : const Duration(seconds: 45));
   } on TimeoutException {
     return _formatAdapterFailureDocument(
       label,
@@ -2248,17 +2119,11 @@ Future<_Fb2Document> _parseReaderDocumentFromFileSafely({
     );
   } catch (error, stackTrace) {
     debugPrint('ReadArc $label adapter failed: $error\n$stackTrace');
-    return _formatAdapterFailureDocument(
-      label,
-      'Не удалось безопасно подготовить файл: $error',
-    );
+    return _formatAdapterFailureDocument(label, 'Не удалось безопасно подготовить файл: $error');
   }
 }
 
-Future<_Fb2Document> _parseReaderDocumentFromFile({
-  required _RichSourceKind kind,
-  required File file,
-}) async {
+Future<_Fb2Document> _parseReaderDocumentFromFile({required _RichSourceKind kind, required File file}) async {
   switch (kind) {
     case _RichSourceKind.chm:
       return _parseChmDocumentFromFile(file);
@@ -2282,10 +2147,8 @@ Future<_Fb2Document> _parseReaderDocumentFromFile({
 _Fb2Document _formatAdapterFailureDocument(String label, String message) {
   return _makeFb2Document([
     _Fb2Block.title(label),
-    _Fb2Block.paragraph([
-      _Fb2Inline(message),
-    ]),
-    _Fb2Block.paragraph([
+    _Fb2Block.paragraph([_Fb2Inline(message)]),
+    const _Fb2Block.paragraph([
       _Fb2Inline(
         'ReadArc больше не должен закрываться при ошибке адаптера. Для тяжёлых форматов будет использоваться pipeline processed artifacts: оригинал хранится в библиотеке, а подготовленное представление создаётся отдельно и безопасно переиспользуется на устройствах.',
       ),
@@ -2296,7 +2159,12 @@ _Fb2Document _formatAdapterFailureDocument(String label, String message) {
 bool _selectionAreaIsCheapForRichReader() => Platform.isMacOS || Platform.isWindows || Platform.isLinux;
 
 class _Fb2ReaderScreen extends StatefulWidget {
-  const _Fb2ReaderScreen({required this.book, required this.storage, required this.sync, this.sourceKind = _RichSourceKind.fb2});
+  const _Fb2ReaderScreen({
+    required this.book,
+    required this.storage,
+    required this.sync,
+    this.sourceKind = _RichSourceKind.fb2,
+  });
 
   final BookRecord book;
   final StorageService storage;
@@ -2395,10 +2263,7 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
       return;
     }
     try {
-      final document = await _parseReaderDocumentFromFileSafely(
-        kind: widget.sourceKind,
-        file: file,
-      );
+      final document = await _parseReaderDocumentFromFileSafely(kind: widget.sourceKind, file: file);
       if (!mounted) return;
       setState(() {
         _runtimeBook = book;
@@ -2418,7 +2283,11 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
 
     final current = _currentLocator() ?? _lastKnownLocator;
     final built = _buildFb2RenderUnits(document, usableWidth);
-    final units = built.isEmpty ? [_Fb2RenderUnit.text(const [_Fb2LineSegment('')], 0, 0, false, 0, 0)] : built;
+    final units = built.isEmpty
+        ? [
+            const _Fb2RenderUnit.text([_Fb2LineSegment('')], 0, 0, false, 0, 0),
+          ]
+        : built;
     final target = _didInitialRestore && current != null
         ? _targetUnitForLocator(current, units)
         : _targetUnitForBook(_book, units);
@@ -2455,7 +2324,12 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
         final locatorProgress = (decoded['progressPercent'] as num?)?.toDouble();
         final anchorChar = (decoded['anchorChar'] as num?)?.round();
         final totalChars = (_document?.totalTextChars ?? (decoded['totalChars'] as num?)?.round() ?? 0);
-        if ((type == 'fb2-unit-anchor-v4' || type == 'epub-unit-anchor-v2' || type == 'docx-unit-anchor-v1' || type == 'chm-unit-anchor-v1' || type == 'djvu-unit-anchor-v1') && anchorChar != null) {
+        if ((type == 'fb2-unit-anchor-v4' ||
+                type == 'epub-unit-anchor-v2' ||
+                type == 'docx-unit-anchor-v1' ||
+                type == 'chm-unit-anchor-v1' ||
+                type == 'djvu-unit-anchor-v1') &&
+            anchorChar != null) {
           return _unitIndexForAnchorChar(anchorChar.clamp(0, totalChars > 0 ? totalChars : 1 << 30).toInt(), units);
         }
         // If manifest.progressPercent and currentLocator disagree, trust the
@@ -2465,9 +2339,15 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
         // in the list but reopening on Android jumping back to 1.4%.
         final locatorWidth = (decoded['usableWidth'] as num?)?.toDouble();
         final savedUnitCount = (decoded['unitCount'] as num?)?.round();
-        final widthChanged = locatorWidth != null && _lastUsableWidth > 0 && (locatorWidth - _lastUsableWidth).abs() > 16;
-        final unitCountChanged = savedUnitCount != null && savedUnitCount > 0 && ((savedUnitCount - units.length).abs() / units.length) > 0.04;
-        if ((locatorProgress != null && (locatorProgress - progress).abs() > 0.75) || widthChanged || unitCountChanged) {
+        final widthChanged =
+            locatorWidth != null && _lastUsableWidth > 0 && (locatorWidth - _lastUsableWidth).abs() > 16;
+        final unitCountChanged =
+            savedUnitCount != null &&
+            savedUnitCount > 0 &&
+            ((savedUnitCount - units.length).abs() / units.length) > 0.04;
+        if ((locatorProgress != null && (locatorProgress - progress).abs() > 0.75) ||
+            widthChanged ||
+            unitCountChanged) {
           return byProgress();
         }
 
@@ -2497,7 +2377,9 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
           return (idx < 0 ? byProgress() : idx).clamp(0, units.length - 1).toInt();
         }
         if (type == 'fb2-line-anchor-v1') {
-          final lineIndex = ((decoded['lineIndex'] as num?)?.round() ?? byProgress()).clamp(0, units.length - 1).toInt();
+          final lineIndex = ((decoded['lineIndex'] as num?)?.round() ?? byProgress())
+              .clamp(0, units.length - 1)
+              .toInt();
           return lineIndex;
         }
       }
@@ -2507,7 +2389,9 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
 
   int _targetUnitForLocator(_Fb2UnitLocator locator, List<_Fb2RenderUnit> units) {
     if (locator.anchorChar > 0) return _unitIndexForAnchorChar(locator.anchorChar, units);
-    final idx = units.indexWhere((unit) => unit.blockIndex == locator.blockIndex && unit.unitInBlock == locator.unitInBlock);
+    final idx = units.indexWhere(
+      (unit) => unit.blockIndex == locator.blockIndex && unit.unitInBlock == locator.unitInBlock,
+    );
     if (idx >= 0) return idx;
     return locator.unitIndex.clamp(0, units.length - 1).toInt();
   }
@@ -2551,7 +2435,9 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
           break;
         }
         if (!jumped && mounted && _scrollController.hasClients) {
-          _scrollController.jumpTo(_offsetForUnit(_pendingUnitIndex).clamp(0.0, _scrollController.position.maxScrollExtent));
+          _scrollController.jumpTo(
+            _offsetForUnit(_pendingUnitIndex).clamp(0.0, _scrollController.position.maxScrollExtent),
+          );
         }
         final locator = _currentLocator() ?? _locatorForUnit(_pendingUnitIndex);
         _lastKnownLocator = locator;
@@ -2639,7 +2525,9 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
   void _setRichProgressFromFraction(double fraction) {
     if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
-    final target = (position.maxScrollExtent * fraction.clamp(0.0, 1.0)).clamp(position.minScrollExtent, position.maxScrollExtent).toDouble();
+    final target = (position.maxScrollExtent * fraction.clamp(0.0, 1.0))
+        .clamp(position.minScrollExtent, position.maxScrollExtent)
+        .toDouble();
     _scrollController.jumpTo(target);
     final locator = _currentLocator();
     if (locator != null) {
@@ -2663,14 +2551,16 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     final manifest = await widget.storage.updateProgress(
       bookId: widget.book.id,
       progressPercent: locator.progressPercent,
-      locator: locator.toJsonString(type: switch (widget.sourceKind) {
-        _RichSourceKind.epub => 'epub-unit-anchor-v2',
-        _RichSourceKind.docx => 'docx-unit-anchor-v1',
-        _RichSourceKind.doc => 'doc-unit-anchor-v1',
-        _RichSourceKind.chm => 'chm-unit-anchor-v1',
-        _RichSourceKind.djvu => 'djvu-unit-anchor-v1',
-        _RichSourceKind.fb2 => 'fb2-unit-anchor-v4',
-      }),
+      locator: locator.toJsonString(
+        type: switch (widget.sourceKind) {
+          _RichSourceKind.epub => 'epub-unit-anchor-v2',
+          _RichSourceKind.docx => 'docx-unit-anchor-v1',
+          _RichSourceKind.doc => 'doc-unit-anchor-v1',
+          _RichSourceKind.chm => 'chm-unit-anchor-v1',
+          _RichSourceKind.djvu => 'djvu-unit-anchor-v1',
+          _RichSourceKind.fb2 => 'fb2-unit-anchor-v4',
+        },
+      ),
     );
     for (final book in manifest.books) {
       if (book.id == widget.book.id) {
@@ -2686,14 +2576,17 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
     await widget.storage.addBookmark(
       bookId: widget.book.id,
       label: 'Закладка ${DateTime.now().toLocal().toIso8601String().substring(0, 16)}',
-      locator: locator?.toJsonString(type: switch (widget.sourceKind) {
-            _RichSourceKind.epub => 'epub-unit-anchor-v2',
-            _RichSourceKind.docx => 'docx-unit-anchor-v1',
-            _RichSourceKind.doc => 'doc-unit-anchor-v1',
-            _RichSourceKind.chm => 'chm-unit-anchor-v1',
-            _RichSourceKind.djvu => 'djvu-unit-anchor-v1',
-            _RichSourceKind.fb2 => 'fb2-unit-anchor-v4',
-          }) ??
+      locator:
+          locator?.toJsonString(
+            type: switch (widget.sourceKind) {
+              _RichSourceKind.epub => 'epub-unit-anchor-v2',
+              _RichSourceKind.docx => 'docx-unit-anchor-v1',
+              _RichSourceKind.doc => 'doc-unit-anchor-v1',
+              _RichSourceKind.chm => 'chm-unit-anchor-v1',
+              _RichSourceKind.djvu => 'djvu-unit-anchor-v1',
+              _RichSourceKind.fb2 => 'fb2-unit-anchor-v4',
+            },
+          ) ??
           _book.currentLocator,
     );
     await widget.sync.broadcastLibrarySnapshot(reason: 'bookmark_added');
@@ -2853,65 +2746,61 @@ class _Fb2ReaderScreenState extends State<_Fb2ReaderScreen> {
               ),
             )
           : document == null
-              ? const Center(child: CircularProgressIndicator())
-              : Column(
-                  children: [
-                    Expanded(
-                      child: LayoutBuilder(
-                        builder: (context, constraints) {
-                          _ensureUnitsForWidth(constraints.maxWidth);
-                          final currentUnits = _units;
-                          if (currentUnits == null) {
-                            return const Center(child: CircularProgressIndicator());
-                          }
-                          final readerList = ListView.builder(
-                            controller: _scrollController,
-                            padding: const EdgeInsets.fromLTRB(
-                              _horizontalReaderPadding,
-                              _topPadding,
-                              _horizontalReaderPadding,
-                              _bottomPadding,
-                            ),
-                            cacheExtent: _lineExtent * 220,
-                            itemExtentBuilder: (index, dimensions) => currentUnits[index].extent,
-                            itemCount: currentUnits.length,
-                            itemBuilder: (context, index) {
-                              final unit = currentUnits[index];
-                              return RepaintBoundary(
-                                child: _Fb2UnitView(
-                                  unit: unit,
-                                  onOpenLink: _openExternalLink,
-                                ),
-                              );
-                            },
-                          );
-                          return GestureDetector(
-                            behavior: HitTestBehavior.translucent,
-                            onTap: _deactivateRichProgressScrub,
-                            child: Scrollbar(
-                              controller: _scrollController,
-                              thumbVisibility: true,
-                              interactive: !Platform.isAndroid && !Platform.isIOS,
-                              child: _selectionAreaIsCheapForRichReader() ? SelectionArea(child: readerList) : readerList,
-                            ),
+          ? const Center(child: CircularProgressIndicator())
+          : Column(
+              children: [
+                Expanded(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      _ensureUnitsForWidth(constraints.maxWidth);
+                      final currentUnits = _units;
+                      if (currentUnits == null) {
+                        return const Center(child: CircularProgressIndicator());
+                      }
+                      final readerList = ListView.builder(
+                        scrollCacheExtent: const ScrollCacheExtent.pixels(_lineExtent * 220),
+                        controller: _scrollController,
+                        padding: const EdgeInsets.fromLTRB(
+                          _horizontalReaderPadding,
+                          _topPadding,
+                          _horizontalReaderPadding,
+                          _bottomPadding,
+                        ),
+                        itemExtentBuilder: (index, dimensions) => currentUnits[index].extent,
+                        itemCount: currentUnits.length,
+                        itemBuilder: (context, index) {
+                          final unit = currentUnits[index];
+                          return RepaintBoundary(
+                            child: _Fb2UnitView(unit: unit, onOpenLink: _openExternalLink),
                           );
                         },
-                      ),
-                    ),
-                    if (!_fullScreen)
-                      _ContinuousReaderProgressBar(
-                        progress: (_progress.clamp(0, 100) / 100).toDouble(),
-                        label: '${_progress.clamp(0, 100).toStringAsFixed(1)}%',
-                        active: _richProgressScrubActive,
-                        onActivate: () => setState(() => _richProgressScrubActive = true),
-                        onFractionSelected: _setRichProgressFromFraction,
-                      ),
-                  ],
+                      );
+                      return GestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        onTap: _deactivateRichProgressScrub,
+                        child: Scrollbar(
+                          controller: _scrollController,
+                          thumbVisibility: true,
+                          interactive: !Platform.isAndroid && !Platform.isIOS,
+                          child: _selectionAreaIsCheapForRichReader() ? SelectionArea(child: readerList) : readerList,
+                        ),
+                      );
+                    },
+                  ),
                 ),
+                if (!_fullScreen)
+                  _ContinuousReaderProgressBar(
+                    progress: (_progress.clamp(0, 100) / 100).toDouble(),
+                    label: '${_progress.clamp(0, 100).toStringAsFixed(1)}%',
+                    active: _richProgressScrubActive,
+                    onActivate: () => setState(() => _richProgressScrubActive = true),
+                    onFractionSelected: _setRichProgressFromFraction,
+                  ),
+              ],
+            ),
     );
   }
 }
-
 
 class _Fb2UnitView extends StatelessWidget {
   const _Fb2UnitView({required this.unit, required this.onOpenLink});
@@ -2991,7 +2880,7 @@ class _DocxTableUnitView extends StatelessWidget {
         child: DecoratedBox(
           decoration: BoxDecoration(
             color: const Color(0xFFFFF7E8),
-            border: Border.all(color: const Color(0xFFC9AA78).withOpacity(0.65)),
+            border: Border.all(color: const Color(0xFFC9AA78).withValues(alpha: 0.65)),
             borderRadius: BorderRadius.circular(14),
           ),
           child: ClipRRect(
@@ -3003,13 +2892,13 @@ class _DocxTableUnitView extends StatelessWidget {
                 child: Table(
                   defaultColumnWidth: const IntrinsicColumnWidth(),
                   border: TableBorder.symmetric(
-                    inside: BorderSide(color: const Color(0xFFC9AA78).withOpacity(0.35)),
+                    inside: BorderSide(color: const Color(0xFFC9AA78).withValues(alpha: 0.35)),
                   ),
                   children: [
                     for (var rowIndex = 0; rowIndex < rows.length; rowIndex++)
                       TableRow(
                         decoration: BoxDecoration(
-                          color: rowIndex == 0 ? const Color(0xFFF0DBAE).withOpacity(0.45) : Colors.transparent,
+                          color: rowIndex == 0 ? const Color(0xFFF0DBAE).withValues(alpha: 0.45) : Colors.transparent,
                         ),
                         children: [
                           for (var column = 0; column < columnCount; column++)
@@ -3039,13 +2928,7 @@ class _DocxTableUnitView extends StatelessWidget {
 }
 
 class _Fb2LineSegment {
-  const _Fb2LineSegment(
-    this.text, {
-    this.href,
-    this.bold = false,
-    this.italic = false,
-    this.underline = false,
-  });
+  const _Fb2LineSegment(this.text, {this.href, this.bold = false, this.italic = false, this.underline = false});
 
   final String text;
   final String? href;
@@ -3053,7 +2936,6 @@ class _Fb2LineSegment {
   final bool italic;
   final bool underline;
 }
-
 
 class _Fb2RenderUnit {
   const _Fb2RenderUnit.text(
@@ -3063,27 +2945,25 @@ class _Fb2RenderUnit {
     this.isTitle,
     this.anchorChar,
     this.endChar,
-  )   : imageBytes = null,
-        tableRows = const [],
-        extent = isTitle ? _Fb2ReaderScreenState._titleExtent : _Fb2ReaderScreenState._lineExtent;
+  ) : imageBytes = null,
+      tableRows = const [],
+      extent = isTitle ? _Fb2ReaderScreenState._titleExtent : _Fb2ReaderScreenState._lineExtent;
 
   const _Fb2RenderUnit.image(this.imageBytes, this.blockIndex, this.unitInBlock, this.anchorChar, this.endChar)
-      : segments = const [],
-        tableRows = const [],
-        isTitle = false,
-        extent = blockIndex == 0 ? _Fb2ReaderScreenState._coverImageExtent : _Fb2ReaderScreenState._imageExtent;
+    : segments = const [],
+      tableRows = const [],
+      isTitle = false,
+      extent = blockIndex == 0 ? _Fb2ReaderScreenState._coverImageExtent : _Fb2ReaderScreenState._imageExtent;
 
   _Fb2RenderUnit.table(this.tableRows, this.blockIndex, this.unitInBlock, this.anchorChar, this.endChar)
-      : segments = const [],
-        imageBytes = null,
-        isTitle = false,
-        extent = _tableExtent(tableRows);
+    : segments = const [],
+      imageBytes = null,
+      isTitle = false,
+      extent = _tableExtent(tableRows);
 
   static double _tableExtent(List<List<String>> rows) {
     if (rows.isEmpty) return _Fb2ReaderScreenState._lineExtent;
-    final widest = rows
-        .expand((row) => row)
-        .fold<int>(0, (max, cell) => cell.length > max ? cell.length : max);
+    final widest = rows.expand((row) => row).fold<int>(0, (max, cell) => cell.length > max ? cell.length : max);
     final extraForWrappedCells = (widest / 48).floor().clamp(0, 4) * 14.0;
     return (rows.length * (38.0 + extraForWrappedCells) + 22.0).clamp(58.0, 520.0).toDouble();
   }
@@ -3129,19 +3009,19 @@ class _Fb2UnitLocator {
   }
 
   String toJsonString({String type = 'fb2-unit-anchor-v4'}) => jsonEncode({
-        'type': type,
-        'unitIndex': unitIndex,
-        'unitCount': unitCount,
-        'blockIndex': blockIndex,
-        'unitInBlock': unitInBlock,
-        'anchorChar': anchorChar,
-        'totalChars': totalChars,
-        'scrollOffset': scrollOffset,
-        'totalExtent': totalExtent,
-        'usableWidth': usableWidth,
-        'progressPercent': progressPercent,
-        'updatedAt': DateTime.now().toUtc().toIso8601String(),
-      });
+    'type': type,
+    'unitIndex': unitIndex,
+    'unitCount': unitCount,
+    'blockIndex': blockIndex,
+    'unitInBlock': unitInBlock,
+    'anchorChar': anchorChar,
+    'totalChars': totalChars,
+    'scrollOffset': scrollOffset,
+    'totalExtent': totalExtent,
+    'usableWidth': usableWidth,
+    'progressPercent': progressPercent,
+    'updatedAt': DateTime.now().toUtc().toIso8601String(),
+  });
 }
 
 List<_Fb2RenderUnit> _buildFb2RenderUnits(_Fb2Document document, double usableWidth) {
@@ -3154,16 +3034,32 @@ List<_Fb2RenderUnit> _buildFb2RenderUnits(_Fb2Document document, double usableWi
     switch (block.kind) {
       case _Fb2BlockKind.image:
         final bytes = block.imageBytes;
-        if (bytes != null && bytes.isNotEmpty) units.add(_Fb2RenderUnit.image(bytes, blockIndex, 0, blockStartChar, blockEndChar));
+        if (bytes != null && bytes.isNotEmpty) {
+          units.add(_Fb2RenderUnit.image(bytes, blockIndex, 0, blockStartChar, blockEndChar));
+        }
         break;
       case _Fb2BlockKind.table:
-        if (block.tableRows.isNotEmpty) units.add(_Fb2RenderUnit.table(block.tableRows, blockIndex, 0, blockStartChar, blockEndChar));
+        if (block.tableRows.isNotEmpty) {
+          units.add(_Fb2RenderUnit.table(block.tableRows, blockIndex, 0, blockStartChar, blockEndChar));
+        }
         break;
       case _Fb2BlockKind.title:
-        units.addAll(_wrapFb2Segments([_Fb2LineSegment(block.plainText)], blockIndex, true, charsPerLine, blockStartChar));
+        units.addAll(
+          _wrapFb2Segments([_Fb2LineSegment(block.plainText)], blockIndex, true, charsPerLine, blockStartChar),
+        );
         break;
       case _Fb2BlockKind.paragraph:
-        final segments = block.inlines.map((inline) => _Fb2LineSegment(inline.text, href: inline.href, bold: inline.bold, italic: inline.italic, underline: inline.underline)).toList();
+        final segments = block.inlines
+            .map(
+              (inline) => _Fb2LineSegment(
+                inline.text,
+                href: inline.href,
+                bold: inline.bold,
+                italic: inline.italic,
+                underline: inline.underline,
+              ),
+            )
+            .toList();
         units.addAll(_wrapFb2Segments(segments, blockIndex, false, charsPerLine, blockStartChar));
         break;
     }
@@ -3171,7 +3067,13 @@ List<_Fb2RenderUnit> _buildFb2RenderUnits(_Fb2Document document, double usableWi
   return units;
 }
 
-List<_Fb2RenderUnit> _wrapFb2Segments(List<_Fb2LineSegment> source, int blockIndex, bool isTitle, int charsPerLine, int blockStartChar) {
+List<_Fb2RenderUnit> _wrapFb2Segments(
+  List<_Fb2LineSegment> source,
+  int blockIndex,
+  bool isTitle,
+  int charsPerLine,
+  int blockStartChar,
+) {
   final result = <_Fb2RenderUnit>[];
   final current = <_Fb2LineSegment>[];
   var currentLen = 0;
@@ -3184,7 +3086,16 @@ List<_Fb2RenderUnit> _wrapFb2Segments(List<_Fb2LineSegment> source, int blockInd
     if (current.isEmpty) return;
     final normalized = current.where((segment) => segment.text.isNotEmpty).toList();
     if (normalized.isNotEmpty) {
-      result.add(_Fb2RenderUnit.text(List.unmodifiable(normalized), blockIndex, unitInBlock, isTitle, unitStartChar, unitEndChar));
+      result.add(
+        _Fb2RenderUnit.text(
+          List.unmodifiable(normalized),
+          blockIndex,
+          unitInBlock,
+          isTitle,
+          unitStartChar,
+          unitEndChar,
+        ),
+      );
       unitInBlock += 1;
     }
     current.clear();
@@ -3203,7 +3114,15 @@ List<_Fb2RenderUnit> _wrapFb2Segments(List<_Fb2LineSegment> source, int blockInd
       }
       if (current.isEmpty) unitStartChar = cursor;
       if (text.length <= remaining) {
-        current.add(_Fb2LineSegment(text, href: segment.href, bold: segment.bold, italic: segment.italic, underline: segment.underline));
+        current.add(
+          _Fb2LineSegment(
+            text,
+            href: segment.href,
+            bold: segment.bold,
+            italic: segment.italic,
+            underline: segment.underline,
+          ),
+        );
         currentLen += text.length;
         cursor += text.length;
         unitEndChar = cursor;
@@ -3213,7 +3132,15 @@ List<_Fb2RenderUnit> _wrapFb2Segments(List<_Fb2LineSegment> source, int blockInd
         if (cut <= 0 || cut < remaining * 0.45) cut = remaining;
         final part = text.substring(0, cut).trimRight();
         if (part.isNotEmpty) {
-          current.add(_Fb2LineSegment(part, href: segment.href, bold: segment.bold, italic: segment.italic, underline: segment.underline));
+          current.add(
+            _Fb2LineSegment(
+              part,
+              href: segment.href,
+              bold: segment.bold,
+              italic: segment.italic,
+              underline: segment.underline,
+            ),
+          );
           currentLen += part.length;
           cursor += part.length;
           unitEndChar = cursor;
@@ -3373,12 +3300,7 @@ bool _officeCellFlagAt(List<List<bool>> matrix, int row, int column) {
 }
 
 class _OfficeNumberingLevel {
-  const _OfficeNumberingLevel({
-    required this.level,
-    required this.textPattern,
-    required this.format,
-    this.start = 1,
-  });
+  const _OfficeNumberingLevel({required this.level, required this.textPattern, required this.format, this.start = 1});
 
   final int level;
   final String textPattern;
@@ -3413,41 +3335,44 @@ class _Fb2Inline {
 }
 
 class _Fb2Block {
-  const _Fb2Block.paragraph(
-    this.inlines, {
-    this.anchors = const [],
-    this.officeFormat = const _OfficeParagraphFormat(),
-  })  : kind = _Fb2BlockKind.paragraph,
-        imageBytes = null,
-        tableRows = const [],
-        officeTableFormat = null,
-        _titleText = '';
+  const _Fb2Block.paragraph(this.inlines, {this.anchors = const [], this.officeFormat = const _OfficeParagraphFormat()})
+    : kind = _Fb2BlockKind.paragraph,
+      imageBytes = null,
+      tableRows = const [],
+      officeTableFormat = null,
+      _titleText = '';
   const _Fb2Block.title(
     String text, {
     this.anchors = const [],
-    this.officeFormat = const _OfficeParagraphFormat(headingLevel: 1, fontSize: 15.5, bold: true, lineHeight: 1.16, spaceBefore: 6.0, spaceAfter: 4.0, align: _OfficeTextAlign.center),
-  })  : kind = _Fb2BlockKind.title,
-        inlines = const [],
-        imageBytes = null,
-        tableRows = const [],
-        officeTableFormat = null,
-        _titleText = text;
+    this.officeFormat = const _OfficeParagraphFormat(
+      headingLevel: 1,
+      fontSize: 15.5,
+      bold: true,
+      lineHeight: 1.16,
+      spaceBefore: 6.0,
+      spaceAfter: 4.0,
+      align: _OfficeTextAlign.center,
+    ),
+  }) : kind = _Fb2BlockKind.title,
+       inlines = const [],
+       imageBytes = null,
+       tableRows = const [],
+       officeTableFormat = null,
+       _titleText = text;
   const _Fb2Block.image(this.imageBytes, {this.anchors = const []})
-      : kind = _Fb2BlockKind.image,
-        inlines = const [],
-        tableRows = const [],
-        officeTableFormat = null,
-        officeFormat = const _OfficeParagraphFormat(align: _OfficeTextAlign.center),
-        _titleText = '';
-  const _Fb2Block.table(
-    this.tableRows, {
-    this.anchors = const [],
-    this.officeTableFormat,
-  })  : kind = _Fb2BlockKind.table,
-        inlines = const [],
-        imageBytes = null,
-        officeFormat = const _OfficeParagraphFormat(spaceBefore: 5.0, spaceAfter: 8.0),
-        _titleText = '';
+    : kind = _Fb2BlockKind.image,
+      inlines = const [],
+      tableRows = const [],
+      officeTableFormat = null,
+      officeFormat = const _OfficeParagraphFormat(align: _OfficeTextAlign.center),
+      _titleText = '';
+  const _Fb2Block.table(this.tableRows, {this.officeTableFormat})
+    : kind = _Fb2BlockKind.table,
+      inlines = const [],
+      imageBytes = null,
+      anchors = const [],
+      officeFormat = const _OfficeParagraphFormat(spaceBefore: 5.0, spaceAfter: 8.0),
+      _titleText = '';
 
   final _Fb2BlockKind kind;
   final List<_Fb2Inline> inlines;
@@ -3459,10 +3384,10 @@ class _Fb2Block {
   final _OfficeTableFormat? officeTableFormat;
 
   String get plainText => switch (kind) {
-        _Fb2BlockKind.title => _titleText,
-        _Fb2BlockKind.table => tableRows.map((row) => row.join('\t')).join('\n'),
-        _ => inlines.map((item) => item.text).join(),
-      };
+    _Fb2BlockKind.title => _titleText,
+    _Fb2BlockKind.table => tableRows.map((row) => row.join('\t')).join('\n'),
+    _ => inlines.map((item) => item.text).join(),
+  };
 }
 
 class _Fb2Document {
@@ -3507,7 +3432,9 @@ _Fb2Document _makeFb2Document(
   var cursor = 0;
   for (final block in blocks) {
     starts.add(cursor);
-    final length = block.plainText == _officePageBreakMarker ? 0 : (block.kind == _Fb2BlockKind.image ? 1 : block.plainText.trimRight().length);
+    final length = block.plainText == _officePageBreakMarker
+        ? 0
+        : (block.kind == _Fb2BlockKind.image ? 1 : block.plainText.trimRight().length);
     cursor += length <= 0 ? 1 : length;
     cursor += 1; // Stable separator between blocks; keeps progress based on top logical line.
   }
@@ -3521,26 +3448,6 @@ _Fb2Document _makeFb2Document(
     officeFooterBlocks: List.unmodifiable(officeFooterBlocks),
   );
 }
-
-class _Fb2Locator {
-  const _Fb2Locator({required this.blockIndex, required this.blockCount});
-  final int blockIndex;
-  final int blockCount;
-
-  double get progressPercent {
-    if (blockCount <= 1) return blockCount == 1 && blockIndex > 0 ? 100 : 0;
-    return ((blockIndex / (blockCount - 1)) * 100).clamp(0.0, 100.0).toDouble();
-  }
-
-  String toJsonString() => jsonEncode({
-        'type': 'fb2-block-anchor-v1',
-        'blockIndex': blockIndex,
-        'blockCount': blockCount,
-        'progressPercent': progressPercent,
-        'updatedAt': DateTime.now().toUtc().toIso8601String(),
-      });
-}
-
 
 _Fb2Document _parseEpubDocument(Uint8List bytes) {
   final archive = ZipDecoder().decodeBytes(bytes, verify: false);
@@ -3567,16 +3474,20 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
     final body = bodyMatch?.group(1) ?? html;
     final linkCount = RegExp(r'<a\b[^>]*\bhref\s*=', caseSensitive: false).allMatches(body).length;
     if (linkCount < 12) return false;
-    final headings = RegExp(r'<h[1-6]\b[^>]*>(.*?)</h[1-6]>', caseSensitive: false, dotAll: true)
-        .allMatches(body)
-        .map((m) => _htmlToPlainText(m.group(1) ?? '').trim().toLowerCase())
-        .join(' ');
+    final headings = RegExp(
+      r'<h[1-6]\b[^>]*>(.*?)</h[1-6]>',
+      caseSensitive: false,
+      dotAll: true,
+    ).allMatches(body).map((m) => _htmlToPlainText(m.group(1) ?? '').trim().toLowerCase()).join(' ');
     final text = _htmlToPlainText(body).replaceAll(RegExp(r'\s+'), ' ').trim();
     final linkDensity = text.isEmpty ? linkCount.toDouble() : linkCount / text.length;
     final paragraphCount = RegExp(r'<(?:p|div|blockquote)\b', caseSensitive: false).allMatches(body).length;
     final tocHeading = RegExp(r'(?:оглавление|содержание|contents|table of contents|toc)').hasMatch(headings);
     final firstSpineGeneratedToc = lowerPath.contains('index_split_000') && linkCount >= 20;
-    return tocHeading || firstSpineGeneratedToc || (linkCount >= 25 && paragraphCount <= 4) || (linkCount >= 40 && linkDensity > 0.004);
+    return tocHeading ||
+        firstSpineGeneratedToc ||
+        (linkCount >= 25 && paragraphCount <= 4) ||
+        (linkCount >= 40 && linkDensity > 0.004);
   }
 
   final container = findFile('META-INF/container.xml');
@@ -3665,11 +3576,26 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
       final path = _joinZipPath(baseDir, href);
       final lower = href.toLowerCase();
       final idLower = id.toLowerCase();
-      final looksReadable = mediaType.contains('xhtml') || mediaType.contains('html') || lower.endsWith('.xhtml') || lower.endsWith('.html') || lower.endsWith('.htm');
-      final looksImage = mediaType.startsWith('image/') || lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.gif') || lower.endsWith('.webp');
+      final looksReadable =
+          mediaType.contains('xhtml') ||
+          mediaType.contains('html') ||
+          lower.endsWith('.xhtml') ||
+          lower.endsWith('.html') ||
+          lower.endsWith('.htm');
+      final looksImage =
+          mediaType.startsWith('image/') ||
+          lower.endsWith('.png') ||
+          lower.endsWith('.jpg') ||
+          lower.endsWith('.jpeg') ||
+          lower.endsWith('.gif') ||
+          lower.endsWith('.webp');
       if (looksReadable) {
         manifest[id] = path;
-        if (properties.split(RegExp(r'\s+')).contains('nav') || idLower == 'toc' || idLower == 'nav' || lower.contains('/toc.') || lower.contains('/nav.')) {
+        if (properties.split(RegExp(r'\s+')).contains('nav') ||
+            idLower == 'toc' ||
+            idLower == 'nav' ||
+            lower.contains('/toc.') ||
+            lower.contains('/nav.')) {
           epubNavPaths.add(path);
         }
       }
@@ -3677,7 +3603,11 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
         final image = findFile(path);
         if (image != null) {
           imagePaths[path] = _archiveFileBytes(image);
-          if (properties.contains('cover-image') || coverImageIds.contains(id) || idLower == 'cover' || idLower == 'cover-image' || lower.contains('cover')) {
+          if (properties.contains('cover-image') ||
+              coverImageIds.contains(id) ||
+              idLower == 'cover' ||
+              idLower == 'cover-image' ||
+              lower.contains('cover')) {
             epubCoverImagePaths.add(path);
           }
         }
@@ -3694,8 +3624,15 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
   if (orderedPaths.isEmpty) {
     for (final file in archive.files) {
       final name = file.name.toLowerCase();
-      if (file.isFile && (name.endsWith('.xhtml') || name.endsWith('.html') || name.endsWith('.htm'))) orderedPaths.add(file.name);
-      if (file.isFile && (name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.gif') || name.endsWith('.webp'))) {
+      if (file.isFile && (name.endsWith('.xhtml') || name.endsWith('.html') || name.endsWith('.htm'))) {
+        orderedPaths.add(file.name);
+      }
+      if (file.isFile &&
+          (name.endsWith('.png') ||
+              name.endsWith('.jpg') ||
+              name.endsWith('.jpeg') ||
+              name.endsWith('.gif') ||
+              name.endsWith('.webp'))) {
         imagePaths[file.name] = _archiveFileBytes(file);
       }
     }
@@ -3705,7 +3642,8 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
   final blocks = <_Fb2Block>[];
   final addedCoverImages = <String>{};
   for (final coverPath in epubCoverImagePaths) {
-    final image = imagePaths[coverPath] ?? (findFile(coverPath) == null ? null : _archiveFileBytes(findFile(coverPath)!));
+    final image =
+        imagePaths[coverPath] ?? (findFile(coverPath) == null ? null : _archiveFileBytes(findFile(coverPath)!));
     if (image != null && addedCoverImages.add(coverPath)) {
       blocks.add(_Fb2Block.image(image));
     }
@@ -3724,11 +3662,7 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
       // Sprint 43: keep generated EPUB TOC pages clickable, but render every
       // anchor as a separate compact paragraph. This restores TOC links without
       // dumping nested lists as one dense text blob.
-      final anchorMatches = RegExp(
-        r'''<a\b([^>]*)>(.*?)</a>''',
-        caseSensitive: false,
-        dotAll: true,
-      ).allMatches(html);
+      final anchorMatches = RegExp(r'''<a\b([^>]*)>(.*?)</a>''', caseSensitive: false, dotAll: true).allMatches(html);
       for (final link in anchorMatches) {
         final attrs = link.group(1) ?? '';
         final hrefRaw = _xmlAttr(attrs, 'href') ?? _attr(attrs, 'href');
@@ -3754,13 +3688,21 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
     final contentHtml = bodyMatch?.group(1) ?? html;
     final blockRe = navigationHtml
         ? RegExp(r'<(h[1-6]|li)\b([^>]*)>(.*?)</\1>', caseSensitive: false, dotAll: true)
-        : RegExp(r'<(h[1-6]|p|li|blockquote|div)\b([^>]*)>(.*?)</\1>|<(img|image)\b([^>]*)/?>', caseSensitive: false, dotAll: true);
+        : RegExp(
+            r'<(h[1-6]|p|li|blockquote|div)\b([^>]*)>(.*?)</\1>|<(img|image)\b([^>]*)/?>',
+            caseSensitive: false,
+            dotAll: true,
+          );
     for (final match in blockRe.allMatches(contentHtml)) {
       final tag = ((match.group(1) ?? match.group(4) ?? '')).toLowerCase();
       final attrs = match.group(2) ?? match.group(5) ?? '';
       final body = match.group(3) ?? '';
       if (tag == 'img' || tag == 'image') {
-        final srcRaw = _xmlAttr(match.group(0) ?? '', 'src') ?? _xmlAttr(match.group(0) ?? '', 'href') ?? _xmlAttr(match.group(0) ?? '', 'xlink:href') ?? _xmlAttr(match.group(0) ?? '', 'l:href');
+        final srcRaw =
+            _xmlAttr(match.group(0) ?? '', 'src') ??
+            _xmlAttr(match.group(0) ?? '', 'href') ??
+            _xmlAttr(match.group(0) ?? '', 'xlink:href') ??
+            _xmlAttr(match.group(0) ?? '', 'l:href');
         if (srcRaw != null && srcRaw.isNotEmpty) {
           final src = _normalizeHtmlHref(srcRaw, normalizedPath);
           final image = imagePaths[src] ?? (findFile(src) == null ? null : _archiveFileBytes(findFile(src)!));
@@ -3774,7 +3716,12 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
         final className = ((_xmlAttr('<x $attrs>', 'class') ?? _attr(attrs, 'class') ?? '').toLowerCase());
         final containsChildBlocks = RegExp(r'<(?:h[1-6]|p|li|blockquote|div)\b', caseSensitive: false).hasMatch(body);
         final plainBody = _htmlToPlainText(body).replaceAll(RegExp(r'\s+'), ' ').trim();
-        final keepDiv = className.contains('paragraph') || className.contains('title') || className.contains('subtitle') || className.contains('caption') || (!containsChildBlocks && plainBody.isNotEmpty);
+        final keepDiv =
+            className.contains('paragraph') ||
+            className.contains('title') ||
+            className.contains('subtitle') ||
+            className.contains('caption') ||
+            (!containsChildBlocks && plainBody.isNotEmpty);
         if (!keepDiv) continue;
       }
       final targetIndex = blocks.length;
@@ -3785,14 +3732,17 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
 
       for (final img in RegExp(r'''<(?:img|image)\b[^>]*>''', caseSensitive: false).allMatches(body)) {
         final tagText = img.group(0) ?? '';
-        final srcRaw = _xmlAttr(tagText, 'src') ?? _xmlAttr(tagText, 'href') ?? _xmlAttr(tagText, 'xlink:href') ?? _xmlAttr(tagText, 'l:href');
+        final srcRaw =
+            _xmlAttr(tagText, 'src') ??
+            _xmlAttr(tagText, 'href') ??
+            _xmlAttr(tagText, 'xlink:href') ??
+            _xmlAttr(tagText, 'l:href');
         if (srcRaw == null || srcRaw.isEmpty) continue;
         final src = _normalizeHtmlHref(srcRaw, normalizedPath);
         final image = imagePaths[src] ?? (findFile(src) == null ? null : _archiveFileBytes(findFile(src)!));
         if (image != null && addedCoverImages.add(src)) {
           blocks.add(_Fb2Block.image(image, anchors: anchors));
-        } else if (image != null) {
-        }
+        } else if (image != null) {}
       }
       final inlines = _parseHtmlInlines(body, normalizedPath);
       final text = inlines.map((item) => item.text).join().replaceAll(RegExp(r'\s+'), ' ').trim();
@@ -3806,11 +3756,14 @@ _Fb2Document _parseEpubDocument(Uint8List bytes) {
   }
 
   return _makeFb2Document(
-    blocks.isEmpty ? [_Fb2Block.paragraph(const [_Fb2Inline('Не удалось извлечь содержимое EPUB.')])] : blocks,
+    blocks.isEmpty
+        ? [
+            const _Fb2Block.paragraph([_Fb2Inline('Не удалось извлечь содержимое EPUB.')]),
+          ]
+        : blocks,
     linkTargets: linkTargets,
   );
 }
-
 
 _Fb2Document _parseDocDocument(Uint8List bytes) {
   // Many “.doc” files in the wild are actually OOXML/DOCX with a wrong
@@ -3833,7 +3786,14 @@ List<_Fb2Block> _parseLegacyDocBlocks(Uint8List bytes) {
   final streamPayloads = <Uint8List>[];
   final ole = _OleCompoundFile.tryOpen(bytes);
   if (ole != null) {
-    for (final name in const ['WordDocument', '0Table', '1Table', 'Data', 'SummaryInformation', 'DocumentSummaryInformation']) {
+    for (final name in const [
+      'WordDocument',
+      '0Table',
+      '1Table',
+      'Data',
+      'SummaryInformation',
+      'DocumentSummaryInformation',
+    ]) {
       final stream = ole.stream(name);
       if (stream != null && stream.isNotEmpty && stream.length <= 96 * 1024 * 1024) {
         streamPayloads.add(stream);
@@ -3852,10 +3812,7 @@ List<_Fb2Block> _parseLegacyDocBlocks(Uint8List bytes) {
   final lines = <String>[];
   for (final source in candidates) {
     for (final raw in source.split(RegExp(r'[\r\n]+'))) {
-      final line = raw
-          .replaceAll('\x00', '')
-          .replaceAll(RegExp(r'[ \t\u00A0]+'), ' ')
-          .trim();
+      final line = raw.replaceAll('\x00', '').replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trim();
       if (!_looksReadableOfficeLine(line)) continue;
       final fingerprint = line.toLowerCase();
       if (seen.add(fingerprint)) lines.add(line);
@@ -3865,9 +3822,7 @@ List<_Fb2Block> _parseLegacyDocBlocks(Uint8List bytes) {
   }
 
   if (lines.isEmpty) return const [];
-  final blocks = <_Fb2Block>[
-    const _Fb2Block.title('DOC'),
-  ];
+  final blocks = <_Fb2Block>[const _Fb2Block.title('DOC')];
   final paragraphBuffer = StringBuffer();
   void flushParagraph() {
     final text = paragraphBuffer.toString().trim();
@@ -3906,7 +3861,9 @@ bool _looksReadableOfficeLine(String line) {
   if (text.length < 4 || text.length > 1200) return false;
   if (RegExp(r'^[\W_\d]+$').hasMatch(text)) return false;
   if (RegExp(r'(?:[A-Za-z]:\\|/)[^ ]{20,}').hasMatch(text)) return false;
-  if (RegExp(r'^(?:Microsoft|WordDocument|Root Entry|CompObj|ObjInfo)$', caseSensitive: false).hasMatch(text)) return false;
+  if (RegExp(r'^(?:Microsoft|WordDocument|Root Entry|CompObj|ObjInfo)$', caseSensitive: false).hasMatch(text)) {
+    return false;
+  }
   final letters = RegExp(r'[A-Za-zА-Яа-яЁё]').allMatches(text).length;
   final words = RegExp(r'[A-Za-zА-Яа-яЁё]{2,}').allMatches(text).length;
   final bad = RegExp(r'[�\x00-\x08\x0B\x0C\x0E-\x1F]').allMatches(text).length;
@@ -3941,9 +3898,6 @@ class _OleCompoundFile {
 
   static const _free = 0xFFFFFFFF;
   static const _endOfChain = 0xFFFFFFFE;
-  static const _fatSector = 0xFFFFFFFD;
-  static const _difatSector = 0xFFFFFFFC;
-
   final Uint8List bytes;
   final int sectorSize;
   final int miniSectorSize;
@@ -4069,7 +4023,10 @@ class _OleCompoundFile {
       }
     }
     if (entry == null || entry.type != 2 || entry.size <= 0) return null;
-    if (entry.size < miniStreamCutoff && miniFat.isNotEmpty && rootEntry != null && rootEntry!.startSector != _endOfChain) {
+    if (entry.size < miniStreamCutoff &&
+        miniFat.isNotEmpty &&
+        rootEntry != null &&
+        rootEntry!.startSector != _endOfChain) {
       return _readMiniStream(entry);
     }
     return _readRegularStream(entry.startSector, entry.size);
@@ -4233,7 +4190,11 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
 
   _OfficePageFormat pageFormatFromXml(String xml) {
     var sectPr = '';
-    for (final match in RegExp(r'<w:sectPr\b[^>]*>.*?</w:sectPr>', caseSensitive: false, dotAll: true).allMatches(xml)) {
+    for (final match in RegExp(
+      r'<w:sectPr\b[^>]*>.*?</w:sectPr>',
+      caseSensitive: false,
+      dotAll: true,
+    ).allMatches(xml)) {
       sectPr = match.group(0) ?? sectPr;
     }
     final pgSz = firstTag(sectPr, 'pgSz') ?? '';
@@ -4257,7 +4218,10 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
   }) {
     var result = base;
     final styleToken = '${styleId ?? ''} ${styleName ?? ''}'.toLowerCase();
-    final headingMatch = RegExp(r'heading\s*([1-6])|heading([1-6])|заголовок\s*([1-6])', caseSensitive: false).firstMatch(styleToken);
+    final headingMatch = RegExp(
+      r'heading\s*([1-6])|heading([1-6])|заголовок\s*([1-6])',
+      caseSensitive: false,
+    ).firstMatch(styleToken);
     if (headingMatch != null) {
       final level = int.tryParse(headingMatch.group(1) ?? headingMatch.group(2) ?? headingMatch.group(3) ?? '1') ?? 1;
       result = result.copyWith(
@@ -4313,7 +4277,9 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       result = result.copyWith(
         leftIndent: left == null ? null : twipsToLogical(left).clamp(0.0, 120.0).toDouble(),
         rightIndent: right == null ? null : twipsToLogical(right).clamp(0.0, 120.0).toDouble(),
-        firstLineIndent: firstLine == null && hanging == null ? null : twipsToLogical(firstLine ?? -hanging!).clamp(-64.0, 96.0).toDouble(),
+        firstLineIndent: firstLine == null && hanging == null
+            ? null
+            : twipsToLogical(firstLine ?? -hanging!).clamp(-64.0, 96.0).toDouble(),
       );
     }
 
@@ -4336,7 +4302,11 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     if (file == null) return const {};
     final xml = _decodeTextFile(_archiveFileBytes(file));
     final result = <String, _OfficeParagraphFormat>{};
-    for (final match in RegExp(r'<w:style\b([^>]*)>(.*?)</w:style>', caseSensitive: false, dotAll: true).allMatches(xml)) {
+    for (final match in RegExp(
+      r'<w:style\b([^>]*)>(.*?)</w:style>',
+      caseSensitive: false,
+      dotAll: true,
+    ).allMatches(xml)) {
       final attrs = match.group(1) ?? '';
       final body = match.group(2) ?? '';
       final type = wordAttr(attrs, 'type') ?? '';
@@ -4359,7 +4329,11 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     if (file == null) return const {};
     final xml = _decodeTextFile(_archiveFileBytes(file));
     final result = <String, String>{};
-    for (final match in RegExp(r'<w:style\b([^>]*)>(.*?)</w:style>', caseSensitive: false, dotAll: true).allMatches(xml)) {
+    for (final match in RegExp(
+      r'<w:style\b([^>]*)>(.*?)</w:style>',
+      caseSensitive: false,
+      dotAll: true,
+    ).allMatches(xml)) {
       final attrs = match.group(1) ?? '';
       final body = match.group(2) ?? '';
       final type = wordAttr(attrs, 'type') ?? '';
@@ -4374,20 +4348,27 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
 
   final styleParagraphProperties = parseStyleParagraphProperties();
 
-
   Map<String, Map<int, _OfficeNumberingLevel>> parseNumbering() {
     final file = findFile('word/numbering.xml');
     if (file == null) return const {};
     final xml = _decodeTextFile(_archiveFileBytes(file));
 
     final abstractLevels = <String, Map<int, _OfficeNumberingLevel>>{};
-    for (final abstractMatch in RegExp(r'<w:abstractNum\b([^>]*)>(.*?)</w:abstractNum>', caseSensitive: false, dotAll: true).allMatches(xml)) {
+    for (final abstractMatch in RegExp(
+      r'<w:abstractNum\b([^>]*)>(.*?)</w:abstractNum>',
+      caseSensitive: false,
+      dotAll: true,
+    ).allMatches(xml)) {
       final abstractAttrs = abstractMatch.group(1) ?? '';
       final abstractId = wordAttr(abstractAttrs, 'abstractNumId');
       if (abstractId == null || abstractId.isEmpty) continue;
       final body = abstractMatch.group(2) ?? '';
       final levels = <int, _OfficeNumberingLevel>{};
-      for (final lvlMatch in RegExp(r'<w:lvl\b([^>]*)>(.*?)</w:lvl>', caseSensitive: false, dotAll: true).allMatches(body)) {
+      for (final lvlMatch in RegExp(
+        r'<w:lvl\b([^>]*)>(.*?)</w:lvl>',
+        caseSensitive: false,
+        dotAll: true,
+      ).allMatches(body)) {
         final lvlAttrs = lvlMatch.group(1) ?? '';
         final level = int.tryParse(wordAttr(lvlAttrs, 'ilvl') ?? '') ?? 0;
         final lvlBody = lvlMatch.group(2) ?? '';
@@ -4400,7 +4381,11 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     }
 
     final byNumId = <String, Map<int, _OfficeNumberingLevel>>{};
-    for (final numMatch in RegExp(r'<w:num\b([^>]*)>(.*?)</w:num>', caseSensitive: false, dotAll: true).allMatches(xml)) {
+    for (final numMatch in RegExp(
+      r'<w:num\b([^>]*)>(.*?)</w:num>',
+      caseSensitive: false,
+      dotAll: true,
+    ).allMatches(xml)) {
       final attrs = numMatch.group(1) ?? '';
       final numId = wordAttr(attrs, 'numId');
       final body = numMatch.group(2) ?? '';
@@ -4423,7 +4408,9 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     currentTopNumber = value;
     for (final counters in numberingCounters.values) {
       counters[0] = value;
-      for (var i = 1; i < counters.length; i++) counters[i] = 0;
+      for (var i = 1; i < counters.length; i++) {
+        counters[i] = 0;
+      }
     }
   }
 
@@ -4439,7 +4426,9 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
     if (info == null || info.isBullet) return '•';
     if (level > 0 && currentTopNumber != null && counters[0] != currentTopNumber) {
       counters[0] = currentTopNumber!;
-      for (var i = 1; i < counters.length; i++) counters[i] = 0;
+      for (var i = 1; i < counters.length; i++) {
+        counters[i] = 0;
+      }
     }
     final startAt = info.start <= 0 ? 1 : info.start;
     counters[level] = counters[level] <= 0 ? startAt : counters[level] + 1;
@@ -4450,7 +4439,9 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       currentTopNumber = counters[0];
       for (final other in numberingCounters.values) {
         other[0] = currentTopNumber!;
-        for (var i = 1; i < other.length; i++) other[i] = 0;
+        for (var i = 1; i < other.length; i++) {
+          other[i] = 0;
+        }
       }
       counters[0] = currentTopNumber!;
     }
@@ -4499,16 +4490,19 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       final text = textFromXml(run, trim: false);
       if (text.isEmpty) continue;
       final rPr = innerTagBody(run, 'rPr');
-      inlines.add(_Fb2Inline(
-        text,
-        bold: onTag(rPr, 'b'),
-        italic: onTag(rPr, 'i'),
-        underline: RegExp(r'<w:u\b', caseSensitive: false).hasMatch(rPr) &&
-            !RegExp(r'''<w:u\b[^>]*(?:w:)?val\s*=\s*["']none["']''', caseSensitive: false).hasMatch(rPr),
-        fontSize: fontSizeFromRPr(rPr),
-        fontFamily: fontFamilyFromRPr(rPr),
-        color: colorFromRPr(rPr),
-      ));
+      inlines.add(
+        _Fb2Inline(
+          text,
+          bold: onTag(rPr, 'b'),
+          italic: onTag(rPr, 'i'),
+          underline:
+              RegExp(r'<w:u\b', caseSensitive: false).hasMatch(rPr) &&
+              !RegExp(r'''<w:u\b[^>]*(?:w:)?val\s*=\s*["']none["']''', caseSensitive: false).hasMatch(rPr),
+          fontSize: fontSizeFromRPr(rPr),
+          fontFamily: fontFamilyFromRPr(rPr),
+          color: colorFromRPr(rPr),
+        ),
+      );
     }
     if (inlines.isEmpty) {
       final text = textFromXml(xml);
@@ -4520,7 +4514,10 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
   List<Uint8List> imagesFromXml(String xml, Map<String, String> rels) {
     final images = <Uint8List>[];
     final ids = <String>{};
-    for (final match in RegExp(r'''<(?:a:blip|v:imagedata)\b[^>]*(?:r:embed|r:id)\s*=\s*["']([^"']+)["'][^>]*>''', caseSensitive: false).allMatches(xml)) {
+    for (final match in RegExp(
+      r'''<(?:a:blip|v:imagedata)\b[^>]*(?:r:embed|r:id)\s*=\s*["']([^"']+)["'][^>]*>''',
+      caseSensitive: false,
+    ).allMatches(xml)) {
       final id = match.group(1);
       if (id != null && id.isNotEmpty) ids.add(id);
     }
@@ -4556,7 +4553,8 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
         final tcPr = innerTagBody(cellXml, 'tcPr');
         final spanTag = firstTag(tcPr, 'gridSpan') ?? '';
         final span = (int.tryParse(wordVal(spanTag) ?? '') ?? 1).clamp(1, 12).toInt();
-        final firstParagraph = RegExp(r'<w:p\b[^>]*>.*?</w:p>', caseSensitive: false, dotAll: true).firstMatch(cellXml)?.group(0) ?? '';
+        final firstParagraph =
+            RegExp(r'<w:p\b[^>]*>.*?</w:p>', caseSensitive: false, dotAll: true).firstMatch(cellXml)?.group(0) ?? '';
         final pPr = innerTagBody(firstParagraph, 'pPr');
         final rPr = innerTagBody(firstParagraph, 'rPr');
         final jc = firstTag(pPr, 'jc');
@@ -4600,16 +4598,17 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
         final span = (int.tryParse(wordVal(spanTag) ?? '') ?? 1).clamp(1, 12).toInt();
         final vMergeTag = firstTag(tcPr, 'vMerge');
         final vMergeValue = vMergeTag == null ? null : wordVal(vMergeTag)?.toLowerCase();
-        final isVMergeContinuation = vMergeTag != null && (vMergeValue == null || vMergeValue.isEmpty || vMergeValue == 'continue');
+        final isVMergeContinuation =
+            vMergeTag != null && (vMergeValue == null || vMergeValue.isEmpty || vMergeValue == 'continue');
         final cellText = isVMergeContinuation
             ? ''
             : RegExp(r'<w:p\b[^>]*>.*?</w:p>', caseSensitive: false, dotAll: true)
-                .allMatches(cellXml)
-                .map((p) => textFromXml(p.group(0) ?? '', trim: false).trimRight())
-                .join('\n')
-                .replaceAll(RegExp(r'[ \t\u00A0]*\n[ \t\u00A0]*'), '\n')
-                .replaceAll(RegExp(r'[ \t\u00A0]+'), ' ')
-                .trimRight();
+                  .allMatches(cellXml)
+                  .map((p) => textFromXml(p.group(0) ?? '', trim: false).trimRight())
+                  .join('\n')
+                  .replaceAll(RegExp(r'[ \t\u00A0]*\n[ \t\u00A0]*'), '\n')
+                  .replaceAll(RegExp(r'[ \t\u00A0]+'), ' ')
+                  .trimRight();
         cells.add(cellText.isEmpty ? ' ' : cellText);
         for (var extra = 1; extra < span; extra++) {
           cells.add('');
@@ -4646,7 +4645,10 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
         continue;
       }
 
-      final hasPageBreak = RegExp(r'''<w:br\b[^>]*(?:w:)?type\s*=\s*["']page["'][^>]*/?>''', caseSensitive: false).hasMatch(raw);
+      final hasPageBreak = RegExp(
+        r'''<w:br\b[^>]*(?:w:)?type\s*=\s*["']page["'][^>]*/?>''',
+        caseSensitive: false,
+      ).hasMatch(raw);
       final firstBreakIndex = hasPageBreak ? raw.indexOf(RegExp(r'<w:br\b', caseSensitive: false)) : -1;
       final firstTextIndex = raw.indexOf(RegExp(r'<w:t\b', caseSensitive: false));
       final breakBeforeText = hasPageBreak && (firstTextIndex < 0 || firstBreakIndex < firstTextIndex);
@@ -4658,10 +4660,14 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       final rPr = innerTagBody(raw, 'rPr');
       final styleTag = firstTag(pPr, 'pStyle') ?? '';
       final styleId = wordVal(styleTag);
-      final styleFormat = styleId == null ? const _OfficeParagraphFormat() : (styles[styleId] ?? const _OfficeParagraphFormat());
+      final styleFormat = styleId == null
+          ? const _OfficeParagraphFormat()
+          : (styles[styleId] ?? const _OfficeParagraphFormat());
       var paragraphFormat = formatFromPr(pPr, rPr, base: styleFormat, styleId: styleId);
       final stylePPr = styleId == null ? '' : (styleParagraphProperties[styleId] ?? '');
-      final explicitNumber = numberPrefixForParagraph(RegExp(r'<w:numPr\b', caseSensitive: false).hasMatch(pPr) ? pPr : stylePPr);
+      final explicitNumber = numberPrefixForParagraph(
+        RegExp(r'<w:numPr\b', caseSensitive: false).hasMatch(pPr) ? pPr : stylePPr,
+      );
       if (explicitNumber != null && explicitNumber.isNotEmpty) {
         paragraphFormat = paragraphFormat.copyWith(
           isList: true,
@@ -4676,20 +4682,25 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
       if (text.isEmpty && !hasPageBreak && RegExp(r'<w:p\b', caseSensitive: false).hasMatch(raw)) {
         // Preserve intentional blank paragraphs. In contracts and signatures an
         // empty Word paragraph is often layout, not noise.
-        partBlocks.add(_Fb2Block.paragraph(
-          const [_Fb2Inline(' ')],
-          officeFormat: paragraphFormat.copyWith(
-            fontSize: paragraphFormat.fontSize <= 0 ? 12.0 : paragraphFormat.fontSize,
-            lineHeight: paragraphFormat.lineHeight <= 0 ? 1.18 : paragraphFormat.lineHeight,
-            spaceBefore: paragraphFormat.spaceBefore == 0 ? 2.0 : paragraphFormat.spaceBefore,
-            spaceAfter: paragraphFormat.spaceAfter == 0 ? 9.0 : paragraphFormat.spaceAfter,
+        partBlocks.add(
+          _Fb2Block.paragraph(
+            const [_Fb2Inline(' ')],
+            officeFormat: paragraphFormat.copyWith(
+              fontSize: paragraphFormat.fontSize <= 0 ? 12.0 : paragraphFormat.fontSize,
+              lineHeight: paragraphFormat.lineHeight <= 0 ? 1.18 : paragraphFormat.lineHeight,
+              spaceBefore: paragraphFormat.spaceBefore == 0 ? 2.0 : paragraphFormat.spaceBefore,
+              spaceAfter: paragraphFormat.spaceAfter == 0 ? 9.0 : paragraphFormat.spaceAfter,
+            ),
           ),
-        ));
+        );
       }
       if (text.isNotEmpty) {
         if (paragraphFormat.headingLevel > 0) {
           partBlocks.add(_Fb2Block.title(text, officeFormat: paragraphFormat));
-        } else if (paragraphFormat.isList && paragraphFormat.listNumberText == null && !text.startsWith('•') && !RegExp(r'^\d+(?:\.\d+)*[.)]?').hasMatch(text)) {
+        } else if (paragraphFormat.isList &&
+            paragraphFormat.listNumberText == null &&
+            !text.startsWith('•') &&
+            !RegExp(r'^\d+(?:\.\d+)*[.)]?').hasMatch(text)) {
           partBlocks.add(_Fb2Block.paragraph([const _Fb2Inline('• '), ...inlines], officeFormat: paragraphFormat));
         } else {
           partBlocks.add(_Fb2Block.paragraph(inlines, officeFormat: paragraphFormat));
@@ -4710,7 +4721,10 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
   final headerBlocks = <_Fb2Block>[];
   final footerBlocks = <_Fb2Block>[];
   final seenHeaderFooter = <String>{};
-  for (final ref in RegExp(r'<w:(headerReference|footerReference)\b[^>]*>', caseSensitive: false).allMatches(documentXml)) {
+  for (final ref in RegExp(
+    r'<w:(headerReference|footerReference)\b[^>]*>',
+    caseSensitive: false,
+  ).allMatches(documentXml)) {
     final tag = ref.group(0) ?? '';
     final kind = (ref.group(1) ?? '').toLowerCase();
     final id = _xmlAttr(tag, 'r:id') ?? wordAttr(tag, 'id');
@@ -4731,7 +4745,9 @@ _Fb2Document _parseDocxDocument(Uint8List bytes) {
   blocks.addAll(parsePart('word/comments.xml', title: 'Комментарии'));
   if (blocks.isEmpty) {
     return _makeFb2Document(
-      const [_Fb2Block.paragraph([_Fb2Inline('DOCX не содержит извлекаемого текста.')])],
+      const [
+        _Fb2Block.paragraph([_Fb2Inline('DOCX не содержит извлекаемого текста.')]),
+      ],
       officePageFormat: pageFormat,
       officeHeaderBlocks: headerBlocks,
       officeFooterBlocks: footerBlocks,
@@ -4750,7 +4766,11 @@ bool _looksLikeZip(Uint8List bytes) => bytes.length >= 4 && bytes[0] == 0x50 && 
 List<_Fb2Inline> _parseHtmlInlines(String html, String currentPath) {
   final result = <_Fb2Inline>[];
   var cursor = 0;
-  final linkRe = RegExp(r'''<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>''', caseSensitive: false, dotAll: true);
+  final linkRe = RegExp(
+    r'''<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>(.*?)</a>''',
+    caseSensitive: false,
+    dotAll: true,
+  );
   for (final match in linkRe.allMatches(html)) {
     final before = _htmlToPlainText(html.substring(cursor, match.start)).trim();
     if (before.isNotEmpty) result.add(_Fb2Inline('$before '));
@@ -4895,7 +4915,13 @@ _Fb2Document _parseFb2Document(String xmlText) {
       if (trimmed.isNotEmpty) blocks.add(_Fb2Block.paragraph([_Fb2Inline(trimmed)]));
     }
   }
-  return _makeFb2Document(blocks.isEmpty ? [_Fb2Block.paragraph(const [_Fb2Inline('Не удалось извлечь содержимое FB2.')])] : blocks);
+  return _makeFb2Document(
+    blocks.isEmpty
+        ? [
+            const _Fb2Block.paragraph([_Fb2Inline('Не удалось извлечь содержимое FB2.')]),
+          ]
+        : blocks,
+  );
 }
 
 List<_Fb2Inline> _parseFb2Inlines(String rawBlock) {
@@ -4942,8 +4968,6 @@ String? _attr(String attrs, String name) {
   return singleQuoted == null ? null : _decodeXmlEntities(singleQuoted.group(1) ?? '').trim();
 }
 
-
-
 class _ChmSafeReaderScreen extends StatelessWidget {
   const _ChmSafeReaderScreen({required this.book, required this.storage, required this.sync});
 
@@ -4975,10 +4999,8 @@ class _ChmSafeReaderScreen extends StatelessWidget {
                         Expanded(
                           child: Text(
                             'CHM safe mode',
-                            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                                  color: const Color(0xFF2A2F4A),
-                                  fontWeight: FontWeight.w800,
-                                ),
+                            style: Theme.of(context).textTheme.titleLarge
+                                ?.copyWith(color: const Color(0xFF2A2F4A), fontWeight: FontWeight.w800),
                           ),
                         ),
                       ],
@@ -4990,10 +5012,7 @@ class _ChmSafeReaderScreen extends StatelessWidget {
                       style: TextStyle(fontSize: 16, height: 1.45, color: Color(0xFF2A2F4A)),
                     ),
                     const SizedBox(height: 14),
-                    Text(
-                      book.fileName,
-                      style: const TextStyle(fontSize: 13.5, color: Color(0xFF5E6380)),
-                    ),
+                    Text(book.fileName, style: const TextStyle(fontSize: 13.5, color: Color(0xFF5E6380))),
                   ],
                 ),
               ),
@@ -5074,13 +5093,11 @@ class _DjvuReaderScreenState extends State<_DjvuReaderScreen> {
         return;
       }
       if (mounted) setState(() => _status = 'Проверяем DJVU и готовим кэш страниц…');
-      final artifact = await _prepareDjvuArtifact(
-        book: book,
-        sourceFile: source,
-        storage: widget.storage,
-      );
-      final geometries = await _readDjvuPageGeometries(source, artifact.pageCount)
-          .timeout(const Duration(seconds: 10), onTimeout: () => const <_DjvuPageGeometry>[]);
+      final artifact = await _prepareDjvuArtifact(book: book, sourceFile: source, storage: widget.storage);
+      final geometries = await _readDjvuPageGeometries(
+        source,
+        artifact.pageCount,
+      ).timeout(const Duration(seconds: 10), onTimeout: () => const <_DjvuPageGeometry>[]);
       if (!mounted) return;
       setState(() {
         _runtimeBook = book;
@@ -5108,7 +5125,9 @@ class _DjvuReaderScreenState extends State<_DjvuReaderScreen> {
   Future<void> _loadTextLayerLater(File sourceFile) async {
     try {
       final textDoc = await _tryExtractDjvuText(sourceFile).timeout(const Duration(seconds: 35));
-      final text = textDoc?.blocks.map((block) => block.plainText).where((text) => text.trim().isNotEmpty).join('\n\n').trim() ?? '';
+      final text =
+          textDoc?.blocks.map((block) => block.plainText).where((text) => text.trim().isNotEmpty).join('\n\n').trim() ??
+          '';
       if (!mounted || text.isEmpty) return;
       setState(() => _textLayer = text);
     } catch (error) {
@@ -5166,7 +5185,11 @@ class _DjvuReaderScreenState extends State<_DjvuReaderScreen> {
       try {
         final offset = _offsetForPage(page, _lastViewportWidth).clamp(0.0, _scrollController.position.maxScrollExtent);
         if (animated) {
-          await _scrollController.animateTo(offset, duration: const Duration(milliseconds: 220), curve: Curves.easeOutCubic);
+          await _scrollController.animateTo(
+            offset,
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+          );
         } else {
           _scrollController.jumpTo(offset);
         }
@@ -5177,14 +5200,15 @@ class _DjvuReaderScreenState extends State<_DjvuReaderScreen> {
   }
 
   String _locatorJson(int page) => jsonEncode({
-        'type': 'djvu-page-v2',
-        'page': page,
-        'pages': _pageCount,
-        'progressPercent': _progress(page),
-        'updatedAt': DateTime.now().toUtc().toIso8601String(),
-      });
+    'type': 'djvu-page-v2',
+    'page': page,
+    'pages': _pageCount,
+    'progressPercent': _progress(page),
+    'updatedAt': DateTime.now().toUtc().toIso8601String(),
+  });
 
-  double _progress(int page) => _pageCount <= 1 ? 0.0 : (((page - 1) / (_pageCount - 1)) * 100).clamp(0.0, 100.0).toDouble();
+  double _progress(int page) =>
+      _pageCount <= 1 ? 0.0 : (((page - 1) / (_pageCount - 1)) * 100).clamp(0.0, 100.0).toDouble();
 
   Future<void> _savePage(int page) async {
     await widget.storage.updateProgress(
@@ -5204,14 +5228,6 @@ class _DjvuReaderScreenState extends State<_DjvuReaderScreen> {
     await widget.sync.broadcastLibrarySnapshot(reason: 'bookmark_added');
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Закладка добавлена')));
-  }
-
-  Future<void> _copyDjvuTextLayer() async {
-    final text = (_textLayer ?? '').trim();
-    if (text.isEmpty) return;
-    await Clipboard.setData(ClipboardData(text: text));
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Текст DJVU скопирован')));
   }
 
   Future<void> _showDjvuSelectableText() async {
@@ -5293,62 +5309,61 @@ class _DjvuReaderScreenState extends State<_DjvuReaderScreen> {
       body: _error != null
           ? _ReaderDiagnosticPage(title: 'DJVU не подготовлен', message: _error!)
           : source == null || pagesDir == null || _pageCount <= 0
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const CircularProgressIndicator(),
-                      const SizedBox(height: 16),
-                      Text(_status ?? 'Открываем DJVU…', textAlign: TextAlign.center),
-                    ],
-                  ),
-                )
-              : Column(
-                  children: [
-                    Expanded(
-                      child: LayoutBuilder(
-                        builder: (context, constraints) {
-                          _lastViewportWidth = constraints.maxWidth;
-                          final horizontalInset = _isAndroidReaderPlatform ? 10.0 : 18.0;
-                          final displayWidth = (constraints.maxWidth - horizontalInset * 2).clamp(240.0, 1800.0).toDouble();
-                          final geometry = (_page - 1) < _pageGeometries.length
-                              ? _pageGeometries[_page - 1]
-                              : const _DjvuPageGeometry(width: 595, height: 842, dpi: 300);
-                          final displayHeight = _djvuPageDisplayHeight(geometry, displayWidth);
-                          final dpr = MediaQuery.of(context).devicePixelRatio
-                              .clamp(Platform.isAndroid ? 2.75 : 2.0, Platform.isAndroid ? 4.0 : 3.0)
-                              .toDouble();
-                          return _DjvuSinglePageReader(
-                            sourceFile: source,
-                            pagesDir: pagesDir,
-                            page: _page,
-                            pages: _pageCount,
-                            displayWidth: displayWidth,
-                            displayHeight: displayHeight,
-                            devicePixelRatio: dpr,
-                            openAtBottom: _openDjvuPageAtBottom,
-                            onTapContent: _deactivateDjvuProgressScrub,
-                            onLongPressContent: _showDjvuSelectableText,
-                            onPrevious: _page <= 1 ? null : () => _goToDjvuPage(_page - 1, openAtBottom: true),
-                            onNext: _page >= _pageCount ? null : () => _goToDjvuPage(_page + 1, openAtBottom: false),
-                          );
-                        },
-                      ),
-                    ),
-                    if (!_fullScreen)
-                      _PagedReaderProgressBar(
+          ? Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const CircularProgressIndicator(),
+                  const SizedBox(height: 16),
+                  Text(_status ?? 'Открываем DJVU…', textAlign: TextAlign.center),
+                ],
+              ),
+            )
+          : Column(
+              children: [
+                Expanded(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      _lastViewportWidth = constraints.maxWidth;
+                      final horizontalInset = _isAndroidReaderPlatform ? 10.0 : 18.0;
+                      final displayWidth = (constraints.maxWidth - horizontalInset * 2).clamp(240.0, 1800.0).toDouble();
+                      final geometry = (_page - 1) < _pageGeometries.length
+                          ? _pageGeometries[_page - 1]
+                          : const _DjvuPageGeometry(width: 595, height: 842, dpi: 300);
+                      final displayHeight = _djvuPageDisplayHeight(geometry, displayWidth);
+                      final dpr = MediaQuery.of(context).devicePixelRatio
+                          .clamp(Platform.isAndroid ? 2.75 : 2.0, Platform.isAndroid ? 4.0 : 3.0)
+                          .toDouble();
+                      return _DjvuSinglePageReader(
+                        sourceFile: source,
+                        pagesDir: pagesDir,
                         page: _page,
                         pages: _pageCount,
-                        active: _djvuProgressScrubActive,
-                        onActivate: () => setState(() => _djvuProgressScrubActive = true),
-                        onPageSelected: _setDjvuPageFromProgress,
-                      ),
-                  ],
+                        displayWidth: displayWidth,
+                        displayHeight: displayHeight,
+                        devicePixelRatio: dpr,
+                        openAtBottom: _openDjvuPageAtBottom,
+                        onTapContent: _deactivateDjvuProgressScrub,
+                        onLongPressContent: _showDjvuSelectableText,
+                        onPrevious: _page <= 1 ? null : () => _goToDjvuPage(_page - 1, openAtBottom: true),
+                        onNext: _page >= _pageCount ? null : () => _goToDjvuPage(_page + 1, openAtBottom: false),
+                      );
+                    },
+                  ),
                 ),
+                if (!_fullScreen)
+                  _PagedReaderProgressBar(
+                    page: _page,
+                    pages: _pageCount,
+                    active: _djvuProgressScrubActive,
+                    onActivate: () => setState(() => _djvuProgressScrubActive = true),
+                    onPageSelected: _setDjvuPageFromProgress,
+                  ),
+              ],
+            ),
     );
   }
 }
-
 
 class _DjvuSinglePageReader extends StatefulWidget {
   const _DjvuSinglePageReader({
@@ -5463,7 +5478,9 @@ class _DjvuSinglePageReaderState extends State<_DjvuSinglePageReader> {
   Widget build(BuildContext context) {
     final page = Center(
       child: _DjvuPageView(
-        key: ValueKey('djvu-page-${widget.page}-${widget.displayWidth.round()}-${widget.devicePixelRatio.toStringAsFixed(2)}'),
+        key: ValueKey(
+          'djvu-page-${widget.page}-${widget.displayWidth.round()}-${widget.devicePixelRatio.toStringAsFixed(2)}',
+        ),
         sourceFile: widget.sourceFile,
         pagesDir: widget.pagesDir,
         pageNumber: widget.page,
@@ -5500,18 +5517,15 @@ class _DjvuSinglePageReaderState extends State<_DjvuSinglePageReader> {
       reader = Stack(
         children: [
           Positioned.fill(child: reader),
-          Positioned.fill(child: _PagedReaderAndroidNavButtons(previous: widget.onPrevious, next: widget.onNext)),
+          Positioned.fill(
+            child: _PagedReaderAndroidNavButtons(previous: widget.onPrevious, next: widget.onNext),
+          ),
         ],
       );
     }
 
     if (!_isDesktopReaderPlatform) return reader;
-    return Focus(
-      focusNode: _focusNode,
-      autofocus: true,
-      onKeyEvent: _handleKeyEvent,
-      child: reader,
-    );
+    return Focus(focusNode: _focusNode, autofocus: true, onKeyEvent: _handleKeyEvent, child: reader);
   }
 }
 
@@ -5542,10 +5556,8 @@ class _ReaderDiagnosticPage extends StatelessWidget {
                       Expanded(
                         child: Text(
                           title,
-                          style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                                color: const Color(0xFF2A2F4A),
-                                fontWeight: FontWeight.w800,
-                              ),
+                          style: Theme.of(context).textTheme.titleLarge
+                              ?.copyWith(color: const Color(0xFF2A2F4A), fontWeight: FontWeight.w800),
                         ),
                       ),
                     ],
@@ -5561,7 +5573,6 @@ class _ReaderDiagnosticPage extends StatelessWidget {
     );
   }
 }
-
 
 class _DjvuPageGeometry {
   const _DjvuPageGeometry({required this.width, required this.height, required this.dpi});
@@ -5624,14 +5635,17 @@ Future<_DjvuArtifact> _prepareDjvuArtifact({
 
   final pageCount = await _readDjvuPageCount(sourceFile);
   if (pageCount == null || pageCount <= 0) {
-    throw StateError('ReadArc распознал DJVU как неподготовленный файл, но встроенный probe не смог определить количество страниц. Внешние ddjvu/djvused больше не используются.');
+    throw StateError(
+      'ReadArc распознал DJVU как неподготовленный файл, но встроенный probe не смог определить количество страниц. Внешние ddjvu/djvused больше не используются.',
+    );
   }
 
   var reuse = false;
   if (await manifestFile.exists()) {
     try {
       final data = jsonDecode(await manifestFile.readAsString()) as Map<String, dynamic>;
-      reuse = (data['kind'] == 'djvu-pages-v1' || data['kind'] == 'djvu-embedded-v1') &&
+      reuse =
+          (data['kind'] == 'djvu-pages-v1' || data['kind'] == 'djvu-embedded-v1') &&
           data['sourceSha256'] == book.contentSha256 &&
           data['renderProfile'] == renderProfile &&
           data['pageCount'] == pageCount;
@@ -5720,7 +5734,8 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
     });
   }
 
-  File _pageFile() => File('${widget.pagesDir.path}${Platform.pathSeparator}page_${widget.pageNumber.toString().padLeft(5, '0')}.png');
+  File _pageFile() =>
+      File('${widget.pagesDir.path}${Platform.pathSeparator}page_${widget.pageNumber.toString().padLeft(5, '0')}.png');
 
   Future<File?> _cachedRender() async {
     final out = _pageFile();
@@ -5731,8 +5746,14 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
     // downscale with high filtering. This keeps Android text crisp while the
     // paged viewer limits memory to one visible page plus a small cache.
     final qualityScale = Platform.isAndroid ? 2.05 : 1.75;
-    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio * qualityScale).round().clamp(1700, Platform.isAndroid ? 3600 : 3200).toInt();
-    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio * qualityScale).round().clamp(2400, Platform.isAndroid ? 5400 : 4800).toInt();
+    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio * qualityScale)
+        .round()
+        .clamp(1700, Platform.isAndroid ? 3600 : 3200)
+        .toInt();
+    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio * qualityScale)
+        .round()
+        .clamp(2400, Platform.isAndroid ? 5400 : 4800)
+        .toInt();
     final key = '${widget.sourceFile.path}:${widget.pageNumber}:$pixelWidth:$pixelHeight';
     final existing = _renderJobs[key];
     if (existing != null) return existing;
@@ -5747,17 +5768,26 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
   }
 
   Future<void> _precacheAdjacentPages() async {
-    final nextPages = <int>[widget.pageNumber + 1, widget.pageNumber + 2, widget.pageNumber + 3, widget.pageNumber - 1]
-        .where((page) => page >= 1 && page <= widget.pageCount)
-        .toList(growable: false);
+    final nextPages = <int>[
+      widget.pageNumber + 1,
+      widget.pageNumber + 2,
+      widget.pageNumber + 3,
+      widget.pageNumber - 1,
+    ].where((page) => page >= 1 && page <= widget.pageCount).toList(growable: false);
     for (final page in nextPages) {
       final out = File('${widget.pagesDir.path}${Platform.pathSeparator}page_${page.toString().padLeft(5, '0')}.png');
       try {
         if (await out.exists() && await out.length() > 0) continue;
       } catch (_) {}
       final qualityScale = Platform.isAndroid ? 2.05 : 1.75;
-      final pixelWidth = (widget.displayWidth * widget.devicePixelRatio * qualityScale).round().clamp(1700, Platform.isAndroid ? 3600 : 3200).toInt();
-      final pixelHeight = (widget.displayHeight * widget.devicePixelRatio * qualityScale).round().clamp(2400, Platform.isAndroid ? 5400 : 4800).toInt();
+      final pixelWidth = (widget.displayWidth * widget.devicePixelRatio * qualityScale)
+          .round()
+          .clamp(1700, Platform.isAndroid ? 3600 : 3200)
+          .toInt();
+      final pixelHeight = (widget.displayHeight * widget.devicePixelRatio * qualityScale)
+          .round()
+          .clamp(2400, Platform.isAndroid ? 5400 : 4800)
+          .toInt();
       final key = '${widget.sourceFile.path}:$page:$pixelWidth:$pixelHeight';
       if (_renderJobs.containsKey(key)) continue;
       while (_renderOrder.length >= 14) {
@@ -5809,7 +5839,14 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
           if (file == null) {
             if (snapshot.connectionState == ConnectionState.done) {
               return const _DjvuPageSheet(
-                child: Center(child: Padding(padding: EdgeInsets.all(18), child: Text('Не удалось отрисовать страницу DJVU встроенным движком ReadArc. Проверьте, что native engine вошёл в сборку.'))),
+                child: Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(18),
+                    child: Text(
+                      'Не удалось отрисовать страницу DJVU встроенным движком ReadArc. Проверьте, что native engine вошёл в сборку.',
+                    ),
+                  ),
+                ),
               );
             }
             return const _DjvuPageSheet(child: Center(child: CircularProgressIndicator()));
@@ -5831,7 +5868,6 @@ class _DjvuPageViewState extends State<_DjvuPageView> {
   }
 }
 
-
 class _DjvuPageSheet extends StatelessWidget {
   const _DjvuPageSheet({required this.child});
 
@@ -5842,14 +5878,8 @@ class _DjvuPageSheet extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: Colors.white,
-        border: Border.all(color: Colors.black.withOpacity(0.34), width: 1.1),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.22),
-            blurRadius: 8,
-            offset: const Offset(0, 3),
-          ),
-        ],
+        border: Border.all(color: Colors.black.withValues(alpha: 0.34), width: 1.1),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.22), blurRadius: 8, offset: const Offset(0, 3))],
       ),
       child: ClipRect(child: child),
     );
@@ -5859,29 +5889,6 @@ class _DjvuPageSheet extends StatelessWidget {
 String _djvuFriendlyError(Object error) {
   final message = '$error';
   return '$message\n\nReadArc больше не использует внешние ddjvu/djvused/djvutxt. Для DJVU выбран встроенный путь: pure Rust djvu-rs через native/FFI engine. Приложение должно оставаться открытым и показывать диагностику внутри reader-а.';
-}
-
-Future<void> _requireNativeTool(String executable) async {
-  final resolved = await _resolveNativeTool(executable);
-  if (resolved == executable && !(await File(executable).exists())) {
-    // Process.start will still find tools from PATH in terminal/dev builds. For
-    // packaged macOS apps the PATH is short, so _resolveNativeTool checks the
-    // Homebrew/MacPorts locations before we get here.
-  }
-  try {
-    if (executable == 'djvused') {
-      await _runNativeTool(executable, ['-v'], timeout: const Duration(seconds: 5));
-    } else if (executable == 'ddjvu') {
-      await _runNativeTool(executable, ['-help'], timeout: const Duration(seconds: 5));
-    }
-  } catch (error) {
-    // Some tools return non-zero for help/version, so only throw when the
-    // executable cannot be resolved to PATH or common desktop locations.
-    final common = await _resolveNativeTool(executable);
-    if (common == executable) {
-      throw StateError('Не найдена команда $executable.');
-    }
-  }
 }
 
 class _PdfReaderScreen extends StatefulWidget {
@@ -5910,7 +5917,6 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
   bool _fullScreen = false;
   bool _pdfProgressScrubActive = false;
   bool _openPdfPageAtBottom = false;
-  bool _restoringScroll = false;
   double _lastViewportWidth = 0;
 
   BookRecord get _book => _runtimeBook ?? widget.book;
@@ -6022,7 +6028,7 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
   }
 
   void _onPdfScroll() {
-    if (_restoringScroll || !_scrollController.hasClients || _pages <= 0 || _lastViewportWidth <= 0) return;
+    if (!_scrollController.hasClients || _pages <= 0 || _lastViewportWidth <= 0) return;
     final page = _pageForOffset(_scrollController.offset, _lastViewportWidth).clamp(1, _pages).toInt();
     if (page != _page) {
       _page = page;
@@ -6074,18 +6080,6 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Закладка добавлена')));
   }
 
-  bool get _hasPdfTextLayer => (_textLayer ?? '').trim().isNotEmpty;
-
-  Future<void> _copyPdfTextLayer() async {
-    final text = (_textLayer ?? '').trim();
-    if (text.isEmpty) return;
-    await Clipboard.setData(ClipboardData(text: text));
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Текст PDF скопирован')),
-    );
-  }
-
   Future<void> _showPdfSelectableText() async {
     final text = (_textLayer ?? '').trim();
     if (text.isEmpty || !mounted) return;
@@ -6122,15 +6116,6 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
     }
   }
 
-  double _offsetForPage(int page, double viewportWidth) {
-    final safe = page.clamp(1, _pages).toInt();
-    var offset = 12.0;
-    for (var i = 0; i < safe - 1 && i < _pageGeometries.length; i++) {
-      offset += _pdfPageDisplayHeight(_pageGeometries[i], viewportWidth) + 12.0;
-    }
-    return offset;
-  }
-
   int _pageForOffset(double offset, double viewportWidth) {
     if (_pageGeometries.isEmpty) return 1;
     var cursor = 12.0;
@@ -6140,23 +6125,6 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
       cursor += height;
     }
     return _pageGeometries.length;
-  }
-
-  void _schedulePdfScrollToPage(int page, {required bool animated}) {
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (!mounted || !_scrollController.hasClients || _lastViewportWidth <= 0) return;
-      _restoringScroll = true;
-      try {
-        final offset = _offsetForPage(page, _lastViewportWidth).clamp(0.0, _scrollController.position.maxScrollExtent);
-        if (animated) {
-          await _scrollController.animateTo(offset, duration: const Duration(milliseconds: 220), curve: Curves.easeOutCubic);
-        } else {
-          _scrollController.jumpTo(offset);
-        }
-      } finally {
-        _restoringScroll = false;
-      }
-    });
   }
 
   @override
@@ -6212,52 +6180,50 @@ class _PdfReaderScreenState extends State<_PdfReaderScreen> {
               ),
             )
           : document == null
-              ? const Center(child: CircularProgressIndicator())
-              : Column(
-                  children: [
-                    Expanded(
-                      child: LayoutBuilder(
-                              builder: (context, constraints) {
-                                _lastViewportWidth = constraints.maxWidth;
-                                final dpr = MediaQuery.of(context).devicePixelRatio
-                                    .clamp(Platform.isAndroid ? 2.25 : 1.75, Platform.isAndroid ? 3.25 : 2.5)
-                                    .toDouble();
-                                final geometry = (_page - 1) < _pageGeometries.length
-                                    ? _pageGeometries[_page - 1]
-                                    : const _PdfPageGeometry(width: 595, height: 842);
-                                final displayWidth = constraints.maxWidth.clamp(220.0, 1800.0).toDouble();
-                                final displayHeight = _pdfPageDisplayHeight(geometry, displayWidth);
-                                return _LargePdfSinglePageReader(
-                                  document: document,
-                                  page: _page,
-                                  pages: _pages,
-                                  displayWidth: displayWidth,
-                                  displayHeight: displayHeight,
-                                  devicePixelRatio: dpr,
-                                  openAtBottom: _openPdfPageAtBottom,
-                                  onTapContent: _deactivatePdfProgressScrub,
-                                  onLongPressContent: _showPdfSelectableText,
-                                  onPrevious: _page <= 1 ? null : () => _goToPdfPage(_page - 1, openAtBottom: true),
-                                  onNext: _page >= _pages ? null : () => _goToPdfPage(_page + 1, openAtBottom: false),
-                                );
-                              },
-                            ),
-                    ),
-                    if (!_fullScreen)
-                      _PagedReaderProgressBar(
+          ? const Center(child: CircularProgressIndicator())
+          : Column(
+              children: [
+                Expanded(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      _lastViewportWidth = constraints.maxWidth;
+                      final dpr = MediaQuery.of(context).devicePixelRatio
+                          .clamp(Platform.isAndroid ? 2.25 : 1.75, Platform.isAndroid ? 3.25 : 2.5)
+                          .toDouble();
+                      final geometry = (_page - 1) < _pageGeometries.length
+                          ? _pageGeometries[_page - 1]
+                          : const _PdfPageGeometry(width: 595, height: 842);
+                      final displayWidth = constraints.maxWidth.clamp(220.0, 1800.0).toDouble();
+                      final displayHeight = _pdfPageDisplayHeight(geometry, displayWidth);
+                      return _LargePdfSinglePageReader(
+                        document: document,
                         page: _page,
                         pages: _pages,
-                        active: _pdfProgressScrubActive,
-                        onActivate: () => setState(() => _pdfProgressScrubActive = true),
-                        onPageSelected: _setPdfPageFromProgress,
-                      ),
-                  ],
+                        displayWidth: displayWidth,
+                        displayHeight: displayHeight,
+                        devicePixelRatio: dpr,
+                        openAtBottom: _openPdfPageAtBottom,
+                        onTapContent: _deactivatePdfProgressScrub,
+                        onLongPressContent: _showPdfSelectableText,
+                        onPrevious: _page <= 1 ? null : () => _goToPdfPage(_page - 1, openAtBottom: true),
+                        onNext: _page >= _pages ? null : () => _goToPdfPage(_page + 1, openAtBottom: false),
+                      );
+                    },
+                  ),
                 ),
+                if (!_fullScreen)
+                  _PagedReaderProgressBar(
+                    page: _page,
+                    pages: _pages,
+                    active: _pdfProgressScrubActive,
+                    onActivate: () => setState(() => _pdfProgressScrubActive = true),
+                    onPageSelected: _setPdfPageFromProgress,
+                  ),
+              ],
+            ),
     );
   }
 }
-
-
 
 class _LargePdfSinglePageReader extends StatefulWidget {
   const _LargePdfSinglePageReader({
@@ -6370,7 +6336,9 @@ class _LargePdfSinglePageReaderState extends State<_LargePdfSinglePageReader> {
   Widget build(BuildContext context) {
     final page = Center(
       child: _PdfFitWidthPage(
-        key: ValueKey('pdf-page-${widget.page}-${widget.displayWidth.round()}-${widget.devicePixelRatio.toStringAsFixed(2)}'),
+        key: ValueKey(
+          'pdf-page-${widget.page}-${widget.displayWidth.round()}-${widget.devicePixelRatio.toStringAsFixed(2)}',
+        ),
         document: widget.document,
         pageNumber: widget.page,
         displayWidth: widget.displayWidth,
@@ -6405,18 +6373,15 @@ class _LargePdfSinglePageReaderState extends State<_LargePdfSinglePageReader> {
       reader = Stack(
         children: [
           Positioned.fill(child: reader),
-          Positioned.fill(child: _PagedReaderAndroidNavButtons(previous: widget.onPrevious, next: widget.onNext)),
+          Positioned.fill(
+            child: _PagedReaderAndroidNavButtons(previous: widget.onPrevious, next: widget.onNext),
+          ),
         ],
       );
     }
 
     if (!_isDesktopReaderPlatform) return reader;
-    return Focus(
-      focusNode: _focusNode,
-      autofocus: true,
-      onKeyEvent: _handleKeyEvent,
-      child: reader,
-    );
+    return Focus(focusNode: _focusNode, autofocus: true, onKeyEvent: _handleKeyEvent, child: reader);
   }
 }
 
@@ -6485,18 +6450,37 @@ class _ContinuousReaderProgressBarState extends State<_ContinuousReaderProgressB
           mainAxisSize: MainAxisSize.min,
           children: [
             MouseRegion(
-              onEnter: (_) { if (_desktopHoverMode) setState(() => _hover = true); },
-              onExit: (_) { if (_desktopHoverMode) setState(() { _hover = false; _previewFraction = null; _previewDx = null; }); },
+              onEnter: (_) {
+                if (_desktopHoverMode) setState(() => _hover = true);
+              },
+              onExit: (_) {
+                if (_desktopHoverMode) {
+                  setState(() {
+                    _hover = false;
+                    _previewFraction = null;
+                    _previewDx = null;
+                  });
+                }
+              },
               child: LayoutBuilder(
                 builder: (context, constraints) {
                   final bubbleVisible = active && (_dragging || widget.active || (_desktopHoverMode && _hover));
-                  final bubbleLeft = ((_previewDx ?? (_displayFraction * constraints.maxWidth)) - 32).clamp(0.0, (constraints.maxWidth - 64).clamp(0.0, constraints.maxWidth)).toDouble();
+                  final bubbleLeft = ((_previewDx ?? (_displayFraction * constraints.maxWidth)) - 32)
+                      .clamp(0.0, (constraints.maxWidth - 64).clamp(0.0, constraints.maxWidth))
+                      .toDouble();
                   return GestureDetector(
                     behavior: HitTestBehavior.opaque,
                     onTapDown: (details) {
                       setState(() => _dragging = true);
-                      if (_desktopHoverMode) { _handlePosition(details.localPosition, constraints.maxWidth); return; }
-                      if (!widget.active) { widget.onActivate(); _handlePosition(details.localPosition, constraints.maxWidth); return; }
+                      if (_desktopHoverMode) {
+                        _handlePosition(details.localPosition, constraints.maxWidth);
+                        return;
+                      }
+                      if (!widget.active) {
+                        widget.onActivate();
+                        _handlePosition(details.localPosition, constraints.maxWidth);
+                        return;
+                      }
                       _handlePosition(details.localPosition, constraints.maxWidth);
                     },
                     onTapUp: (_) => _finishPreview(),
@@ -6507,7 +6491,9 @@ class _ContinuousReaderProgressBarState extends State<_ContinuousReaderProgressB
                       _handlePosition(details.localPosition, constraints.maxWidth);
                     },
                     onHorizontalDragUpdate: (details) {
-                      if (_desktopHoverMode || widget.active || _dragging) _handlePosition(details.localPosition, constraints.maxWidth);
+                      if (_desktopHoverMode || widget.active || _dragging) {
+                        _handlePosition(details.localPosition, constraints.maxWidth);
+                      }
                     },
                     onHorizontalDragEnd: (_) => _finishPreview(),
                     onHorizontalDragCancel: _finishPreview,
@@ -6522,17 +6508,25 @@ class _ContinuousReaderProgressBarState extends State<_ContinuousReaderProgressB
                               top: 0,
                               child: DecoratedBox(
                                 decoration: BoxDecoration(
-                                  color: indigo.withOpacity(0.92),
+                                  color: indigo.withValues(alpha: 0.92),
                                   borderRadius: BorderRadius.circular(999),
                                   boxShadow: [
-                                    BoxShadow(color: Colors.black.withOpacity(0.16), blurRadius: 8, offset: const Offset(0, 2)),
+                                    BoxShadow(
+                                      color: Colors.black.withValues(alpha: 0.16),
+                                      blurRadius: 8,
+                                      offset: const Offset(0, 2),
+                                    ),
                                   ],
                                 ),
                                 child: Padding(
                                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                                   child: Text(
                                     '${(_displayFraction * 100).clamp(0, 100).toStringAsFixed(1)}%',
-                                    style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700),
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700,
+                                    ),
                                   ),
                                 ),
                               ),
@@ -6551,7 +6545,9 @@ class _ContinuousReaderProgressBarState extends State<_ContinuousReaderProgressB
                                   value: _displayFraction,
                                   minHeight: visualHeight,
                                   valueColor: AlwaysStoppedAnimation<Color>(active ? indigo : gold),
-                                  backgroundColor: active ? indigo.withOpacity(0.20) : gold.withOpacity(0.20),
+                                  backgroundColor: active
+                                      ? indigo.withValues(alpha: 0.20)
+                                      : gold.withValues(alpha: 0.20),
                                 ),
                               ),
                             ),
@@ -6565,7 +6561,10 @@ class _ContinuousReaderProgressBarState extends State<_ContinuousReaderProgressB
             ),
             Align(
               alignment: Alignment.centerRight,
-              child: Text(widget.label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: indigo)),
+              child: Text(
+                widget.label,
+                style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: indigo),
+              ),
             ),
           ],
         ),
@@ -6662,7 +6661,7 @@ class _PagedReaderProgressBarState extends State<_PagedReaderProgressBar> {
                           value: progress,
                           minHeight: visualHeight,
                           valueColor: AlwaysStoppedAnimation<Color>(active ? indigo : gold),
-                          backgroundColor: active ? indigo.withOpacity(0.20) : gold.withOpacity(0.20),
+                          backgroundColor: active ? indigo.withValues(alpha: 0.20) : gold.withValues(alpha: 0.20),
                         ),
                       ),
                     ),
@@ -6722,10 +6721,10 @@ class _AndroidPageTurnButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final enabled = onPressed != null;
     return Material(
-      color: _raWarmGold.withOpacity(enabled ? 0.20 : 0.08),
+      color: _raWarmGold.withValues(alpha: enabled ? 0.20 : 0.08),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(17),
-        side: BorderSide(color: _raWarmGold.withOpacity(enabled ? 0.34 : 0.12), width: 0.8),
+        side: BorderSide(color: _raWarmGold.withValues(alpha: enabled ? 0.34 : 0.12), width: 0.8),
       ),
       child: InkWell(
         borderRadius: BorderRadius.circular(17),
@@ -6733,13 +6732,12 @@ class _AndroidPageTurnButton extends StatelessWidget {
         child: SizedBox(
           width: 50,
           height: 38,
-          child: Icon(icon, size: 27, color: _raWarmGold.withOpacity(enabled ? 0.92 : 0.24)),
+          child: Icon(icon, size: 27, color: _raWarmGold.withValues(alpha: enabled ? 0.92 : 0.24)),
         ),
       ),
     );
   }
 }
-
 
 Future<void> _showSelectableDocumentText(BuildContext context, {required String title, required String text}) async {
   final content = text.trim();
@@ -6748,18 +6746,11 @@ Future<void> _showSelectableDocumentText(BuildContext context, {required String 
     context: context,
     isScrollControlled: true,
     backgroundColor: _raPaper,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-    ),
+    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
     builder: (context) {
       return SafeArea(
         child: Padding(
-          padding: EdgeInsets.only(
-            left: 18,
-            right: 18,
-            top: 14,
-            bottom: 18 + MediaQuery.of(context).viewInsets.bottom,
-          ),
+          padding: EdgeInsets.only(left: 18, right: 18, top: 14, bottom: 18 + MediaQuery.of(context).viewInsets.bottom),
           child: ConstrainedBox(
             constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.78),
             child: Column(
@@ -6773,7 +6764,8 @@ Future<void> _showSelectableDocumentText(BuildContext context, {required String 
                         title,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.titleMedium?.copyWith(color: _raInkBlue, fontWeight: FontWeight.w800),
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(color: _raInkBlue, fontWeight: FontWeight.w800),
                       ),
                     ),
                     IconButton(
@@ -6852,8 +6844,14 @@ class _PdfFitWidthPageState extends State<_PdfFitWidthPage> {
   }
 
   Future<Uint8List?> _cachedRender() {
-    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio).round().clamp(720, Platform.isAndroid ? 2600 : 2400);
-    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio).round().clamp(960, Platform.isAndroid ? 3900 : 3400);
+    final pixelWidth = (widget.displayWidth * widget.devicePixelRatio).round().clamp(
+      720,
+      Platform.isAndroid ? 2600 : 2400,
+    );
+    final pixelHeight = (widget.displayHeight * widget.devicePixelRatio).round().clamp(
+      960,
+      Platform.isAndroid ? 3900 : 3400,
+    );
     final key = '${identityHashCode(widget.document)}:${widget.pageNumber}:$pixelWidth:$pixelHeight';
     final existing = _renderCache[key];
     if (existing != null) return existing;
@@ -6872,7 +6870,9 @@ class _PdfFitWidthPageState extends State<_PdfFitWidthPage> {
     final completer = Completer<Uint8List?>();
     _renderQueue = _renderQueue.then((_) async {
       try {
-        completer.complete(await _render(pixelWidth, pixelHeight).timeout(const Duration(seconds: 20), onTimeout: () => null));
+        completer.complete(
+          await _render(pixelWidth, pixelHeight).timeout(const Duration(seconds: 20), onTimeout: () => null),
+        );
       } catch (error, stackTrace) {
         debugPrint('PDF page render failed: $error\n$stackTrace');
         completer.complete(null);
@@ -6926,60 +6926,10 @@ class _PdfFitWidthPageState extends State<_PdfFitWidthPage> {
   }
 }
 
-class _PdfTextLayerView extends StatelessWidget {
-  const _PdfTextLayerView({required this.text, required this.onCopyAll});
-
-  final String text;
-  final VoidCallback onCopyAll;
-
-  @override
-  Widget build(BuildContext context) {
-    return ColoredBox(
-      color: const Color(0xFFF3E7CF),
-      child: SelectionArea(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(24, 22, 24, 34),
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.text_fields_rounded, color: Color(0xFF2A2F4A)),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    'Текстовый слой PDF',
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          color: const Color(0xFF2A2F4A),
-                          fontWeight: FontWeight.w700,
-                        ),
-                  ),
-                ),
-                TextButton.icon(
-                  onPressed: onCopyAll,
-                  icon: const Icon(Icons.copy_all_rounded),
-                  label: const Text('Копировать'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Text(
-              text,
-              style: const TextStyle(
-                fontSize: 18,
-                height: 1.58,
-                color: Color(0xFF2A2F4A),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 Future<String> _extractPdfTextLayer(File file) async {
   try {
     final bytes = await file.readAsBytes();
-    return compute(_extractPdfTextFromBytes, bytes);
+    return await compute(_extractPdfTextFromBytes, bytes);
   } catch (_) {
     return '';
   }
@@ -7198,17 +7148,17 @@ class _TextAnchorLocator {
   }
 
   String toJsonString({String type = 'txt-line-anchor-v1'}) => jsonEncode({
-        'type': type,
-        'anchorChar': anchorChar,
-        'totalChars': totalChars,
-        'lineIndex': lineIndex,
-        'lineCount': lineCount,
-        if (scrollOffset != null) 'scrollOffset': scrollOffset,
-        if (maxScrollExtent != null) 'maxScrollExtent': maxScrollExtent,
-        if (viewportWidth != null) 'viewportWidth': viewportWidth,
-        'progressPercent': progressPercent,
-        'updatedAt': DateTime.now().toUtc().toIso8601String(),
-      });
+    'type': type,
+    'anchorChar': anchorChar,
+    'totalChars': totalChars,
+    'lineIndex': lineIndex,
+    'lineCount': lineCount,
+    if (scrollOffset != null) 'scrollOffset': scrollOffset,
+    if (maxScrollExtent != null) 'maxScrollExtent': maxScrollExtent,
+    if (viewportWidth != null) 'viewportWidth': viewportWidth,
+    'progressPercent': progressPercent,
+    'updatedAt': DateTime.now().toUtc().toIso8601String(),
+  });
 }
 
 int _lineIndexForChar(List<_TextLine> lines, int charIndex) {
@@ -7257,11 +7207,7 @@ List<_TextLine> _buildDisplayLines(String text, double usableWidth) {
         }
       }
       final display = sourceLine.substring(localStart, localEnd).trimRight();
-      result.add(_TextLine(
-        text: display,
-        startChar: globalStart + localStart,
-        endChar: globalStart + localEnd,
-      ));
+      result.add(_TextLine(text: display, startChar: globalStart + localStart, endChar: globalStart + localEnd));
       localStart = localEnd;
       while (localStart < sourceLine.length && sourceLine.codeUnitAt(localStart) == 0x20) {
         localStart += 1;
@@ -7276,10 +7222,7 @@ List<_TextLine> _buildDisplayLines(String text, double usableWidth) {
 double _fontWidthEstimate(double fontSize) => fontSize * 0.56;
 
 String _decodeTextFile(List<int> bytes) {
-  if (bytes.length >= 3 &&
-      bytes[0] == 0xEF &&
-      bytes[1] == 0xBB &&
-      bytes[2] == 0xBF) {
+  if (bytes.length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) {
     return utf8.decode(bytes.sublist(3), allowMalformed: true);
   }
   try {
@@ -7290,156 +7233,6 @@ String _decodeTextFile(List<int> bytes) {
 }
 
 String _normalizeText(String text) => text.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
-
-
-String _extractEpubText(Uint8List bytes) {
-  final archive = ZipDecoder().decodeBytes(bytes, verify: false);
-  ArchiveFile? findFile(String path) {
-    final normalized = path.replaceAll('\\', '/');
-    for (final file in archive.files) {
-      if (!file.isFile) continue;
-      if (file.name.replaceAll('\\', '/') == normalized) return file;
-    }
-    return null;
-  }
-
-  String fileText(ArchiveFile file) => _decodeTextFile(_archiveFileBytes(file));
-
-  bool isLikelyNavigationHtml(String html, String path) {
-    final lowerPath = path.toLowerCase();
-    if (lowerPath.endsWith('/nav.xhtml') ||
-        lowerPath.endsWith('/nav.html') ||
-        lowerPath.endsWith('/toc.xhtml') ||
-        lowerPath.endsWith('/toc.html')) {
-      return true;
-    }
-    final bodyMatch = RegExp(r'<body\b[^>]*>(.*?)</body>', caseSensitive: false, dotAll: true).firstMatch(html);
-    final body = bodyMatch?.group(1) ?? html;
-    final linkCount = RegExp(r'<a\b[^>]*\bhref\s*=', caseSensitive: false).allMatches(body).length;
-    if (linkCount < 12) return false;
-    final headings = RegExp(r'<h[1-6]\b[^>]*>(.*?)</h[1-6]>', caseSensitive: false, dotAll: true)
-        .allMatches(body)
-        .map((m) => _htmlToPlainText(m.group(1) ?? '').trim().toLowerCase())
-        .join(' ');
-    final text = _htmlToPlainText(body).replaceAll(RegExp(r'\s+'), ' ').trim();
-    final linkDensity = text.isEmpty ? linkCount.toDouble() : linkCount / text.length;
-    final paragraphCount = RegExp(r'<(?:p|div|blockquote)\b', caseSensitive: false).allMatches(body).length;
-    final tocHeading = RegExp(r'(?:оглавление|содержание|contents|table of contents|toc)').hasMatch(headings);
-    final firstSpineGeneratedToc = lowerPath.contains('index_split_000') && linkCount >= 20;
-    return tocHeading || firstSpineGeneratedToc || (linkCount >= 25 && paragraphCount <= 4) || (linkCount >= 40 && linkDensity > 0.004);
-  }
-
-  final container = findFile('META-INF/container.xml');
-  var opfPath = '';
-  if (container != null) {
-    final containerText = fileText(container);
-    final match = RegExp("full-path\\s*=\\s*[\"']([^\"']+)[\"']", caseSensitive: false).firstMatch(containerText);
-    opfPath = match?.group(1) ?? '';
-  }
-  if (opfPath.isEmpty) {
-    for (final file in archive.files) {
-      if (file.isFile && file.name.toLowerCase().endsWith('.opf')) {
-        opfPath = file.name;
-        break;
-      }
-    }
-  }
-  final opf = opfPath.isEmpty ? null : findFile(opfPath);
-  final orderedPaths = <String>[];
-  if (opf != null) {
-    final opfText = fileText(opf);
-    final baseDir = _zipDirName(opfPath);
-    final manifest = <String, String>{};
-    for (final match in RegExp(r'<item\b[^>]*>', caseSensitive: false).allMatches(opfText)) {
-      final tag = match.group(0) ?? '';
-      final id = _xmlAttr(tag, 'id');
-      final href = _xmlAttr(tag, 'href');
-      final mediaType = (_xmlAttr(tag, 'media-type') ?? '').toLowerCase();
-      if (id == null || href == null) continue;
-      final lower = href.toLowerCase();
-      final looksReadable = mediaType.contains('xhtml') || mediaType.contains('html') || lower.endsWith('.xhtml') || lower.endsWith('.html') || lower.endsWith('.htm');
-      if (looksReadable) manifest[id] = _joinZipPath(baseDir, href);
-    }
-    for (final match in RegExp(r'<itemref\b[^>]*>', caseSensitive: false).allMatches(opfText)) {
-      final idref = _xmlAttr(match.group(0) ?? '', 'idref');
-      final path = idref == null ? null : manifest[idref];
-      if (path != null) orderedPaths.add(path);
-    }
-    if (orderedPaths.isEmpty) orderedPaths.addAll(manifest.values);
-  }
-  if (orderedPaths.isEmpty) {
-    for (final file in archive.files) {
-      final name = file.name.toLowerCase();
-      if (file.isFile && (name.endsWith('.xhtml') || name.endsWith('.html') || name.endsWith('.htm'))) {
-        orderedPaths.add(file.name);
-      }
-    }
-    orderedPaths.sort();
-  }
-  final buffer = StringBuffer();
-  for (final path in orderedPaths) {
-    final file = findFile(path);
-    if (file == null) continue;
-    final text = _htmlToPlainText(fileText(file));
-    if (text.trim().isEmpty) continue;
-    if (buffer.isNotEmpty) buffer.writeln('\n');
-    buffer.writeln(text.trim());
-  }
-  final result = _normalizeText(buffer.toString());
-  if (result.trim().isEmpty) throw StateError('EPUB не содержит читаемого XHTML/HTML текста');
-  return result;
-}
-
-
-String _extractDocxText(Uint8List bytes) {
-  final archive = ZipDecoder().decodeBytes(bytes, verify: false);
-  ArchiveFile? findFile(String path) {
-    for (final file in archive.files) {
-      if (file.isFile && file.name.replaceAll('\\', '/') == path) return file;
-    }
-    return null;
-  }
-
-  final parts = <String>[];
-  for (final path in const [
-    'word/document.xml',
-    'word/footnotes.xml',
-    'word/endnotes.xml',
-  ]) {
-    final file = findFile(path);
-    if (file == null) continue;
-    var xml = _decodeTextFile(_archiveFileBytes(file));
-    xml = xml.replaceAll(RegExp(r'<w:tab\b[^>]*/>', caseSensitive: false), '\t');
-    xml = xml.replaceAll(RegExp(r'<w:br\b[^>]*/>', caseSensitive: false), '\n');
-    xml = xml.replaceAll(RegExp(r'</w:p>', caseSensitive: false), '\n');
-    final buffer = StringBuffer();
-    for (final match in RegExp(r'<w:t\b[^>]*>(.*?)</w:t>', caseSensitive: false, dotAll: true).allMatches(xml)) {
-      buffer.write(_decodeXmlEntities(match.group(1) ?? ''));
-    }
-    final text = buffer.toString().replaceAll(RegExp(r'\n{3,}'), '\n\n').trim();
-    if (text.isNotEmpty) parts.add(text);
-  }
-  final result = _normalizeText(parts.join('\n\n'));
-  if (result.trim().isEmpty) throw StateError('DOCX не содержит извлекаемого текста');
-  return result;
-}
-
-String _extractLegacyBinaryText(Uint8List bytes, String formatLabel) {
-  // Adapter for formats that require native converters or processed artifacts in production
-  // (CHM/DJVU/legacy binary DOC). It extracts readable string runs so the file
-  // can at least be indexed/opened while the original remains available for
-  // transfer. Proper renderers/converters should replace this adapter later.
-  final decoded = _decodeTextFile(bytes);
-  final lines = <String>[];
-  for (final match in RegExp(r'[\x09\x0A\x0D\x20-\x7EА-Яа-яЁё№«»—–…]{8,}').allMatches(decoded)) {
-    final line = match.group(0)!.replaceAll(RegExp(r'[ \t\x00]+'), ' ').trim();
-    if (line.length >= 8) lines.add(line);
-  }
-  if (lines.isEmpty) {
-    return 'Формат $formatLabel добавлен в библиотеку. Для полноценного чтения нужен локальный конвертер или подготовленное представление. Оригинальный файл сохранён и синхронизируется между устройствами.';
-  }
-  return lines.take(20000).join('\n');
-}
 
 String _safeUnsupportedBinaryPreview(String formatLabel) {
   return '$formatLabel-файл сохранён и синхронизируется как оригинал. Чтобы не показывать бинарные “кракозябры”, ReadArc не открывает этот формат как сырой текст. Для полноценного просмотра нужен нативный адаптер/конвертер формата.';
@@ -7478,7 +7271,10 @@ String _extractChmText(Uint8List bytes) {
 
     // TOC/index files in CHM often contain plain visible titles near Local/Name
     // fields. Extract only such labeled snippets; do not scan arbitrary binary.
-    for (final match in RegExp(r'(?:Name|Local|Title)\s*[:=]?\s*([^\n\r<>]{8,180})', caseSensitive: false).allMatches(source)) {
+    for (final match in RegExp(
+      r'(?:Name|Local|Title)\s*[:=]?\s*([^\n\r<>]{8,180})',
+      caseSensitive: false,
+    ).allMatches(source)) {
       addCandidate(match.group(1) ?? '');
     }
   }
@@ -7497,8 +7293,6 @@ String _extractChmText(Uint8List bytes) {
 
   return preview;
 }
-
-
 
 Future<String> _extractChmPreviewFromFile(File sourceFile) async {
   try {
@@ -7533,9 +7327,13 @@ Future<_Fb2Document> _parseChmDocumentFromFile(File sourceFile) async {
         .where((part) => part.isNotEmpty)
         .map((part) => _Fb2Block.paragraph([_Fb2Inline(part)]))
         .toList(growable: false);
-    return _makeFb2Document(blocks.isEmpty
-        ? [_Fb2Block.paragraph([_Fb2Inline(_safeUnsupportedBinaryPreview('CHM'))])]
-        : blocks);
+    return _makeFb2Document(
+      blocks.isEmpty
+          ? [
+              _Fb2Block.paragraph([_Fb2Inline(_safeUnsupportedBinaryPreview('CHM'))]),
+            ]
+          : blocks,
+    );
   } catch (error, stackTrace) {
     debugPrint('CHM adapter failure: $error\n$stackTrace');
     return _formatAdapterFailureDocument('CHM', 'CHM-адаптер завершился ошибкой: $error');
@@ -7549,9 +7347,24 @@ Future<List<File>> _tryExtractChmWithNativeTools(File sourceFile) async {
     tempDir = await Directory.systemTemp.createTemp('readarc_chm_');
     final attempts = <Future<ProcessResult> Function()>[
       () => _runNativeTool('extract_chmLib', [sourceFile.path, tempDir!.path], timeout: const Duration(seconds: 30)),
-      () => _runNativeTool('7z', ['x', '-y', '-o${tempDir!.path}', sourceFile.path], timeout: const Duration(seconds: 30)),
-      () => _runNativeTool('7zz', ['x', '-y', '-o${tempDir!.path}', sourceFile.path], timeout: const Duration(seconds: 30)),
-      () => _runNativeTool('unar', ['-quiet', '-o', tempDir!.path, sourceFile.path], timeout: const Duration(seconds: 30)),
+      () => _runNativeTool('7z', [
+        'x',
+        '-y',
+        '-o${tempDir!.path}',
+        sourceFile.path,
+      ], timeout: const Duration(seconds: 30)),
+      () => _runNativeTool('7zz', [
+        'x',
+        '-y',
+        '-o${tempDir!.path}',
+        sourceFile.path,
+      ], timeout: const Duration(seconds: 30)),
+      () => _runNativeTool('unar', [
+        '-quiet',
+        '-o',
+        tempDir!.path,
+        sourceFile.path,
+      ], timeout: const Duration(seconds: 30)),
     ];
     for (final attempt in attempts) {
       try {
@@ -7569,7 +7382,7 @@ Future<List<File>> _tryExtractChmWithNativeTools(File sourceFile) async {
 Future<_Fb2Document> _parseDjvuDocumentFromFile(File sourceFile) async {
   final pageCount = await _readDjvuPageCount(sourceFile) ?? 0;
   return _makeFb2Document([
-    _Fb2Block.title('DJVU'),
+    const _Fb2Block.title('DJVU'),
     _Fb2Block.paragraph([
       _Fb2Inline(
         'DJVU-файл распознан встроенным ReadArc probe. Страниц: ${pageCount <= 0 ? 'не определено' : pageCount}. Внешние DjVuLibre/ddjvu/djvused больше не используются. Полный рендер страниц переводится на встроенный djvu-rs engine.',
@@ -7581,12 +7394,6 @@ Future<_Fb2Document> _parseDjvuDocumentFromFile(File sourceFile) async {
 Future<_Fb2Document?> _tryExtractDjvuText(File sourceFile) async {
   // No shell tools in production. Text extraction will be provided by the same
   // embedded djvu-rs engine as page rendering.
-  return null;
-}
-
-Future<_Fb2Document?> _tryRenderDjvuPagesWithNativeTools(File sourceFile) async {
-  // Deprecated in Sprint 33. Kept only so older call sites compile while the
-  // embedded format-engine module takes over.
   return null;
 }
 
@@ -7625,7 +7432,11 @@ Future<String> _resolveNativeTool(String executable) async {
   return executable;
 }
 
-Future<ProcessResult> _runNativeTool(String executable, List<String> arguments, {Duration timeout = const Duration(seconds: 20)}) async {
+Future<ProcessResult> _runNativeTool(
+  String executable,
+  List<String> arguments, {
+  Duration timeout = const Duration(seconds: 20),
+}) async {
   Process? process;
   final stdout = <int>[];
   final stderr = <int>[];
@@ -7634,10 +7445,13 @@ Future<ProcessResult> _runNativeTool(String executable, List<String> arguments, 
     process = await Process.start(resolvedExecutable, arguments, runInShell: Platform.isWindows);
     final stdoutDone = process.stdout.listen(stdout.addAll).asFuture<void>();
     final stderrDone = process.stderr.listen(stderr.addAll).asFuture<void>();
-    final exitCode = await process.exitCode.timeout(timeout, onTimeout: () {
-      process?.kill(ProcessSignal.sigkill);
-      throw TimeoutException('Native tool timeout: $executable', timeout);
-    });
+    final exitCode = await process.exitCode.timeout(
+      timeout,
+      onTimeout: () {
+        process?.kill(ProcessSignal.sigkill);
+        throw TimeoutException('Native tool timeout: $executable', timeout);
+      },
+    );
     await Future.wait([stdoutDone, stderrDone]).timeout(const Duration(seconds: 2), onTimeout: () => const []);
     return ProcessResult(
       process.pid,
@@ -7659,7 +7473,11 @@ Future<List<File>> _collectReadableDocumentFiles(Directory root) async {
   await for (final entity in root.list(recursive: true, followLinks: false)) {
     if (entity is! File) continue;
     final lower = entity.path.toLowerCase();
-    if (lower.endsWith('.html') || lower.endsWith('.htm') || lower.endsWith('.xhtml') || lower.endsWith('.hhc') || lower.endsWith('.hhk')) {
+    if (lower.endsWith('.html') ||
+        lower.endsWith('.htm') ||
+        lower.endsWith('.xhtml') ||
+        lower.endsWith('.hhc') ||
+        lower.endsWith('.hhk')) {
       files.add(entity);
     }
   }
@@ -7671,6 +7489,7 @@ Future<List<File>> _collectReadableDocumentFiles(Directory root) async {
       if (name.contains('toc') || name.contains('contents')) return 1;
       return 2;
     }
+
     final r = rank(an).compareTo(rank(bn));
     return r != 0 ? r : an.compareTo(bn);
   });
@@ -7696,7 +7515,10 @@ _Fb2Document _parseExtractedHtmlDocument(List<File> files, {required String form
         .replaceAll(RegExp(r'<script\b[^>]*>.*?</script>', caseSensitive: false, dotAll: true), ' ')
         .replaceAll(RegExp(r'<style\b[^>]*>.*?</style>', caseSensitive: false, dotAll: true), ' ');
     if (title.trim().isNotEmpty) blocks.add(_Fb2Block.title(_decodeXmlEntities(title).trim()));
-    for (final img in RegExp("""<img\\b[^>]*\\bsrc\\s*=\\s*[\'\"]([^\'\"]+)[\'\"][^>]*>""", caseSensitive: false).allMatches(clean)) {
+    for (final img in RegExp(
+      r'''<img\b[^>]*\bsrc\s*=\s*['"]([^'"]+)['"][^>]*>''',
+      caseSensitive: false,
+    ).allMatches(clean)) {
       final image = _readImageNearHtml(file, img.group(1) ?? '');
       if (image != null && imageBudgetBytes > 0) {
         imageBudgetBytes -= image.length;
@@ -7729,7 +7551,9 @@ _Fb2Document _parseExtractedHtmlDocument(List<File> files, {required String form
     }
   }
   if (blocks.isEmpty) {
-    return _makeFb2Document([_Fb2Block.paragraph([_Fb2Inline('Не удалось извлечь HTML-главы из $formatLabel.')])]);
+    return _makeFb2Document([
+      _Fb2Block.paragraph([_Fb2Inline('Не удалось извлечь HTML-главы из $formatLabel.')]),
+    ]);
   }
   return _makeFb2Document(blocks);
 }
@@ -7910,10 +7734,7 @@ String _extractFb2Text(String xmlText) {
   text = text.replaceAll(RegExp(r'<(p|v|subtitle|title)\b[^>]*>', caseSensitive: false), '');
   text = text.replaceAll(RegExp(r'<[^>]+>', dotAll: true), '');
   text = _decodeXmlEntities(text);
-  text = text
-      .split('\n')
-      .map((line) => line.replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trimRight())
-      .join('\n');
+  text = text.split('\n').map((line) => line.replaceAll(RegExp(r'[ \t\u00A0]+'), ' ').trimRight()).join('\n');
   text = text.replaceAll(RegExp(r'\n{4,}'), '\n\n\n').trim();
   return text.isEmpty ? 'Не удалось извлечь текст из FB2.' : text;
 }
@@ -7949,22 +7770,134 @@ String _decodeXmlEntities(String text) {
 
 String _decodeWindows1251(List<int> bytes) {
   const table = <int>[
-    0x0402, 0x0403, 0x201A, 0x0453, 0x201E, 0x2026, 0x2020, 0x2021,
-    0x20AC, 0x2030, 0x0409, 0x2039, 0x040A, 0x040C, 0x040B, 0x040F,
-    0x0452, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
-    0x0000, 0x2122, 0x0459, 0x203A, 0x045A, 0x045C, 0x045B, 0x045F,
-    0x00A0, 0x040E, 0x045E, 0x0408, 0x00A4, 0x0490, 0x00A6, 0x00A7,
-    0x0401, 0x00A9, 0x0404, 0x00AB, 0x00AC, 0x00AD, 0x00AE, 0x0407,
-    0x00B0, 0x00B1, 0x0406, 0x0456, 0x0491, 0x00B5, 0x00B6, 0x00B7,
-    0x0451, 0x2116, 0x0454, 0x00BB, 0x0458, 0x0405, 0x0455, 0x0457,
-    0x0410, 0x0411, 0x0412, 0x0413, 0x0414, 0x0415, 0x0416, 0x0417,
-    0x0418, 0x0419, 0x041A, 0x041B, 0x041C, 0x041D, 0x041E, 0x041F,
-    0x0420, 0x0421, 0x0422, 0x0423, 0x0424, 0x0425, 0x0426, 0x0427,
-    0x0428, 0x0429, 0x042A, 0x042B, 0x042C, 0x042D, 0x042E, 0x042F,
-    0x0430, 0x0431, 0x0432, 0x0433, 0x0434, 0x0435, 0x0436, 0x0437,
-    0x0438, 0x0439, 0x043A, 0x043B, 0x043C, 0x043D, 0x043E, 0x043F,
-    0x0440, 0x0441, 0x0442, 0x0443, 0x0444, 0x0445, 0x0446, 0x0447,
-    0x0448, 0x0449, 0x044A, 0x044B, 0x044C, 0x044D, 0x044E, 0x044F,
+    0x0402,
+    0x0403,
+    0x201A,
+    0x0453,
+    0x201E,
+    0x2026,
+    0x2020,
+    0x2021,
+    0x20AC,
+    0x2030,
+    0x0409,
+    0x2039,
+    0x040A,
+    0x040C,
+    0x040B,
+    0x040F,
+    0x0452,
+    0x2018,
+    0x2019,
+    0x201C,
+    0x201D,
+    0x2022,
+    0x2013,
+    0x2014,
+    0x0000,
+    0x2122,
+    0x0459,
+    0x203A,
+    0x045A,
+    0x045C,
+    0x045B,
+    0x045F,
+    0x00A0,
+    0x040E,
+    0x045E,
+    0x0408,
+    0x00A4,
+    0x0490,
+    0x00A6,
+    0x00A7,
+    0x0401,
+    0x00A9,
+    0x0404,
+    0x00AB,
+    0x00AC,
+    0x00AD,
+    0x00AE,
+    0x0407,
+    0x00B0,
+    0x00B1,
+    0x0406,
+    0x0456,
+    0x0491,
+    0x00B5,
+    0x00B6,
+    0x00B7,
+    0x0451,
+    0x2116,
+    0x0454,
+    0x00BB,
+    0x0458,
+    0x0405,
+    0x0455,
+    0x0457,
+    0x0410,
+    0x0411,
+    0x0412,
+    0x0413,
+    0x0414,
+    0x0415,
+    0x0416,
+    0x0417,
+    0x0418,
+    0x0419,
+    0x041A,
+    0x041B,
+    0x041C,
+    0x041D,
+    0x041E,
+    0x041F,
+    0x0420,
+    0x0421,
+    0x0422,
+    0x0423,
+    0x0424,
+    0x0425,
+    0x0426,
+    0x0427,
+    0x0428,
+    0x0429,
+    0x042A,
+    0x042B,
+    0x042C,
+    0x042D,
+    0x042E,
+    0x042F,
+    0x0430,
+    0x0431,
+    0x0432,
+    0x0433,
+    0x0434,
+    0x0435,
+    0x0436,
+    0x0437,
+    0x0438,
+    0x0439,
+    0x043A,
+    0x043B,
+    0x043C,
+    0x043D,
+    0x043E,
+    0x043F,
+    0x0440,
+    0x0441,
+    0x0442,
+    0x0443,
+    0x0444,
+    0x0445,
+    0x0446,
+    0x0447,
+    0x0448,
+    0x0449,
+    0x044A,
+    0x044B,
+    0x044C,
+    0x044D,
+    0x044E,
+    0x044F,
   ];
 
   final buffer = StringBuffer();
@@ -8010,47 +7943,6 @@ class _UnsupportedReaderPlaceholder extends StatelessWidget {
   }
 }
 
-
-class _ConversionNeededReaderScreen extends StatelessWidget {
-  const _ConversionNeededReaderScreen({required this.book, required this.formatLabel, required this.adapterName});
-
-  final BookRecord book;
-  final String formatLabel;
-  final String adapterName;
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text(book.title, maxLines: 1, overflow: TextOverflow.ellipsis)),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(28),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.auto_fix_high_outlined, size: 56),
-              const SizedBox(height: 16),
-              Text(
-                '$formatLabel-файл сохранён и синхронизируется как оригинал.',
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 12),
-              Text(
-                'Встроенный просмотр $formatLabel требует локального адаптера $adapterName. '
-                'Пока ReadArc не будет показывать бинарные “кракозябры” как текст. '
-                'Следующий production-шаг для этого формата — подключить нативный конвертер/renderer.',
-                textAlign: TextAlign.center,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-
 String _formatLocalDateTimeSeconds(DateTime value) {
   final local = value.toLocal();
   String two(int number) => number.toString().padLeft(2, '0');
@@ -8058,11 +7950,7 @@ String _formatLocalDateTimeSeconds(DateTime value) {
 }
 
 class SyncScreen extends StatefulWidget {
-  const SyncScreen({
-    super.key,
-    required this.storage,
-    required this.sync,
-  });
+  const SyncScreen({super.key, required this.storage, required this.sync});
 
   final StorageService storage;
   final SyncService sync;
@@ -8128,14 +8016,8 @@ class _SyncScreenState extends State<SyncScreen> {
           onSubmitted: (value) => Navigator.of(context).pop(value),
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Отмена'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('Сохранить'),
-          ),
+          TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Отмена')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(controller.text), child: const Text('Сохранить')),
         ],
       ),
     );
@@ -8149,14 +8031,11 @@ class _SyncScreenState extends State<SyncScreen> {
       if (!mounted) return;
       _deviceNameController.text = manifest.deviceName;
       setState(() => _manifest = manifest);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Название устройства сохранено')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Название устройства сохранено')));
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не удалось изменить название устройства: $error')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Не удалось изменить название устройства: $error')));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -8179,14 +8058,8 @@ class _SyncScreenState extends State<SyncScreen> {
           onSubmitted: (value) => Navigator.of(context).pop(value),
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Отмена'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('Сохранить'),
-          ),
+          TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Отмена')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(controller.text), child: const Text('Сохранить')),
         ],
       ),
     );
@@ -8200,14 +8073,10 @@ class _SyncScreenState extends State<SyncScreen> {
       if (!mounted) return;
       _accountController.text = manifest.accountId;
       setState(() => _manifest = manifest);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Аккаунт сохранён')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Аккаунт сохранён')));
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не удалось изменить аккаунт: $error')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось изменить аккаунт: $error')));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -8224,14 +8093,10 @@ class _SyncScreenState extends State<SyncScreen> {
         _settings = settings;
         _pairingInvite = invite;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Код подключения создан')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Код подключения создан')));
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не удалось создать код: $error')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось создать код: $error')));
     } finally {
       if (mounted) setState(() => _pairingBusy = false);
     }
@@ -8253,9 +8118,7 @@ class _SyncScreenState extends State<SyncScreen> {
       return invite;
     } catch (error) {
       if (!mounted) return null;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не удалось создать QR-код: $error')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось создать QR-код: $error')));
       return null;
     } finally {
       if (mounted) setState(() => _pairingBusy = false);
@@ -8272,12 +8135,7 @@ class _SyncScreenState extends State<SyncScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            QrImageView(
-              data: invite.code,
-              version: QrVersions.auto,
-              size: 260,
-              backgroundColor: Colors.white,
-            ),
+            QrImageView(data: invite.code, version: QrVersions.auto, size: 260, backgroundColor: Colors.white),
             const SizedBox(height: 12),
             Text('Код: ${invite.displayCode}'),
             const SizedBox(height: 4),
@@ -8294,12 +8152,7 @@ class _SyncScreenState extends State<SyncScreen> {
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Закрыть'),
-          ),
-        ],
+        actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Закрыть'))],
       ),
     );
   }
@@ -8318,14 +8171,12 @@ class _SyncScreenState extends State<SyncScreen> {
 
   Future<void> _scanPairingQrCode() async {
     if (!(Platform.isAndroid || Platform.isIOS)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Сканирование QR-кода доступно на мобильных устройствах.')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Сканирование QR-кода доступно на мобильных устройствах.')));
       return;
     }
-    final scanned = await Navigator.of(context).push<String>(
-      MaterialPageRoute(builder: (_) => const _PairingQrScannerScreen()),
-    );
+    final scanned = await Navigator.of(context)
+        .push<String>(MaterialPageRoute(builder: (_) => const _PairingQrScannerScreen()));
     if (scanned == null || scanned.trim().isEmpty || !mounted) return;
     _pairingInputController.text = _pairingCodeFromScannedValue(scanned);
     await _claimPairingInvite();
@@ -8341,28 +8192,21 @@ class _SyncScreenState extends State<SyncScreen> {
       );
       await _load();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Подключено к аккаунту ${result.ownerDeviceName}')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Подключено к аккаунту ${result.ownerDeviceName}')));
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не удалось подключиться по коду: $error')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось подключиться по коду: $error')));
     } finally {
       if (mounted) setState(() => _pairingBusy = false);
     }
   }
 
-
   Future<void> _copyAccountId() async {
     await Clipboard.setData(ClipboardData(text: _accountController.text.trim()));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Аккаунт скопирован')),
-    );
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Аккаунт скопирован')));
   }
-
 
   Future<void> _revokeTrustedDevice(TrustedDeviceRecord device) async {
     final manifest = _manifest;
@@ -8375,14 +8219,8 @@ class _SyncScreenState extends State<SyncScreen> {
           'Устройство «${device.name}» потеряет право участвовать в синхронизации этого аккаунта. Его события и передачи файлов будут отклоняться другими устройствами.',
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Отмена'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Отозвать доступ'),
-          ),
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Отмена')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Отозвать доступ')),
         ],
       ),
     );
@@ -8394,9 +8232,7 @@ class _SyncScreenState extends State<SyncScreen> {
       setState(() => _manifest = updated);
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не удалось отозвать доступ: $error')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось отозвать доступ: $error')));
     }
   }
 
@@ -8405,14 +8241,10 @@ class _SyncScreenState extends State<SyncScreen> {
       final updated = await widget.storage.pruneDeletedTrustedDevices();
       if (!mounted) return;
       setState(() => _manifest = updated);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Список устройств очищен')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Список устройств очищен')));
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Не удалось очистить список: $error')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось очистить список: $error')));
     }
   }
 
@@ -8443,9 +8275,7 @@ class _SyncScreenState extends State<SyncScreen> {
                         Expanded(
                           child: Text(
                             manifest.deviceName,
-                            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                ),
+                            style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w700),
                           ),
                         ),
                         const SizedBox(width: 12),
@@ -8482,9 +8312,7 @@ class _SyncScreenState extends State<SyncScreen> {
                     ],
                     TextField(
                       controller: _pairingInputController,
-                      decoration: const InputDecoration(
-                        labelText: 'Введите код приглашения',
-                      ),
+                      decoration: const InputDecoration(labelText: 'Введите код приглашения'),
                       keyboardType: TextInputType.number,
                       onSubmitted: (_) {
                         if (!_pairingBusy) unawaited(_claimPairingInvite());
@@ -8496,11 +8324,7 @@ class _SyncScreenState extends State<SyncScreen> {
                       child: FilledButton.icon(
                         onPressed: _pairingBusy ? null : _claimPairingInvite,
                         icon: _pairingBusy
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(strokeWidth: 2),
-                              )
+                            ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
                             : const Icon(Icons.login_rounded),
                         label: const Text('Подключиться по коду'),
                       ),
@@ -8553,10 +8377,8 @@ class _SyncScreenState extends State<SyncScreen> {
                             Center(
                               child: Text(
                                 _pairingInvite!.displayCode,
-                                style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                                      fontWeight: FontWeight.w800,
-                                      letterSpacing: 6,
-                                    ),
+                                style: Theme.of(context).textTheme.displaySmall
+                                    ?.copyWith(fontWeight: FontWeight.w800, letterSpacing: 6),
                               ),
                             ),
                             const SizedBox(height: 10),
@@ -8564,9 +8386,7 @@ class _SyncScreenState extends State<SyncScreen> {
                               child: Text('Действует до: ${_formatLocalDateTimeSeconds(_pairingInvite!.expiresAt)}'),
                             ),
                             const SizedBox(height: 10),
-                            const Center(
-                              child: Text('Введите код на подключаемом устройстве.'),
-                            ),
+                            const Center(child: Text('Введите код на подключаемом устройстве.')),
                           ],
                         ),
                       ),
@@ -8577,9 +8397,11 @@ class _SyncScreenState extends State<SyncScreen> {
               Card(
                 child: ExpansionTile(
                   title: const Text('Доверенные устройства'),
-                  subtitle: Text(manifest.activeTrustedDevices.isEmpty
-                      ? 'Пока только текущее устройство'
-                      : 'Доверенных: ${manifest.activeTrustedDevices.length}${revokedTrustedDevices > 0 ? ', отозвано: $revokedTrustedDevices' : ''}'),
+                  subtitle: Text(
+                    manifest.activeTrustedDevices.isEmpty
+                        ? 'Пока только текущее устройство'
+                        : 'Доверенных: ${manifest.activeTrustedDevices.length}${revokedTrustedDevices > 0 ? ', отозвано: $revokedTrustedDevices' : ''}',
+                  ),
                   childrenPadding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
                   children: [
                     Align(
@@ -8608,21 +8430,22 @@ class _SyncScreenState extends State<SyncScreen> {
                           ),
                           const SizedBox(height: 12),
                           SelectableText('Идентификатор устройства: ${manifest.deviceId}'),
-                          SelectableText("Ключ устройства: ${manifest.currentDeviceTrust?.effectiveFingerprint ?? 'не создан'}"),
+                          SelectableText(
+                            "Ключ устройства: ${manifest.currentDeviceTrust?.effectiveFingerprint ?? 'не создан'}",
+                          ),
                         ],
                       ),
                     ),
                     const Divider(height: 28),
                     if (manifest.activeTrustedDevices.isEmpty)
-                      const Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text('Пока только текущее устройство'),
-                      )
+                      const Align(alignment: Alignment.centerLeft, child: Text('Пока только текущее устройство'))
                     else
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text('Доступ можно отозвать у любого другого устройства. Повторное подключение возможно по новому QR-коду владельца аккаунта.'),
+                          const Text(
+                            'Доступ можно отозвать у любого другого устройства. Повторное подключение возможно по новому QR-коду владельца аккаунта.',
+                          ),
                           const SizedBox(height: 8),
                           ...manifest.activeTrustedDevices.map((device) {
                             final isCurrent = device.deviceId == manifest.deviceId;
@@ -8648,14 +8471,18 @@ class _SyncScreenState extends State<SyncScreen> {
                             const Divider(height: 24),
                             const Text('Отозванные устройства'),
                             const SizedBox(height: 8),
-                            ...manifest.trustedDevices.where((device) => device.isRevoked).map((device) => ListTile(
-                                  contentPadding: EdgeInsets.zero,
-                                  leading: const Icon(Icons.block_rounded),
-                                  title: Text(device.name),
-                                  subtitle: Text(
-                                    '${device.deviceId}\nКлюч: ${device.effectiveFingerprint}\nОтозвано: ${device.deletedAt?.toLocal() ?? ''}',
+                            ...manifest.trustedDevices
+                                .where((device) => device.isRevoked)
+                                .map(
+                                  (device) => ListTile(
+                                    contentPadding: EdgeInsets.zero,
+                                    leading: const Icon(Icons.block_rounded),
+                                    title: Text(device.name),
+                                    subtitle: Text(
+                                      '${device.deviceId}\nКлюч: ${device.effectiveFingerprint}\nОтозвано: ${device.deletedAt?.toLocal() ?? ''}',
+                                    ),
                                   ),
-                                )),
+                                ),
                           ],
                           const SizedBox(height: 8),
                           OutlinedButton.icon(
@@ -8673,16 +8500,13 @@ class _SyncScreenState extends State<SyncScreen> {
                   initiallyExpanded: _logExpanded,
                   onExpansionChanged: (value) => setState(() => _logExpanded = value),
                   title: const Text('Журнал событий'),
-                  subtitle: Text(syncState.logLines.isEmpty
-                      ? 'Пока нет событий'
-                      : 'Событий: ${syncState.logLines.length}'),
+                  subtitle: Text(
+                    syncState.logLines.isEmpty ? 'Пока нет событий' : 'Событий: ${syncState.logLines.length}',
+                  ),
                   childrenPadding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
                   children: [
                     if (syncState.logLines.isEmpty)
-                      const Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text('Пока нет событий'),
-                      )
+                      const Align(alignment: Alignment.centerLeft, child: Text('Пока нет событий'))
                     else
                       Align(
                         alignment: Alignment.centerLeft,
@@ -8702,8 +8526,6 @@ class _SyncScreenState extends State<SyncScreen> {
   }
 }
 
-
-
 class _PairingQrScannerScreen extends StatefulWidget {
   const _PairingQrScannerScreen();
 
@@ -8719,18 +8541,21 @@ class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
 
   void _onQRViewCreated(QRViewController controller) {
     _controller = controller;
-    _subscription = controller.scannedDataStream.listen((scan) {
-      if (_handled) return;
-      final value = scan.code;
-      if (value == null || value.trim().isEmpty) return;
-      _handled = true;
-      unawaited(_subscription?.cancel());
-      _subscription = null;
-      unawaited(controller.pauseCamera());
-      if (mounted) Navigator.of(context).pop(value.trim());
-    }, onError: (Object error, StackTrace stackTrace) {
-      debugPrint('ReadArc QR scanner stream error: $error\n$stackTrace');
-    });
+    _subscription = controller.scannedDataStream.listen(
+      (scan) {
+        if (_handled) return;
+        final value = scan.code;
+        if (value == null || value.trim().isEmpty) return;
+        _handled = true;
+        unawaited(_subscription?.cancel());
+        _subscription = null;
+        unawaited(controller.pauseCamera());
+        if (mounted) Navigator.of(context).pop(value.trim());
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        debugPrint('ReadArc QR scanner stream error: $error\n$stackTrace');
+      },
+    );
   }
 
   @override
@@ -8747,7 +8572,6 @@ class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
   @override
   void dispose() {
     unawaited(_subscription?.cancel());
-    _controller?.dispose();
     super.dispose();
   }
 
@@ -8778,7 +8602,7 @@ class _PairingQrScannerScreenState extends State<_PairingQrScannerScreen> {
                   bottom: 24,
                   child: DecoratedBox(
                     decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.48),
+                      color: Colors.black.withValues(alpha: 0.48),
                       borderRadius: BorderRadius.circular(18),
                     ),
                     child: const Padding(

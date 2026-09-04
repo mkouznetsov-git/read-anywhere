@@ -17,11 +17,17 @@ else
   VERSION="${READARC_VERSION:-$BASE_VERSION-snapshot.$BUILD_NUMBER}"
 fi
 BUILD_DEBUG_ARTIFACTS="${BUILD_DEBUG_ARTIFACTS:-false}"
+REQUIRE_RELEASE_SIGNING="${READARC_REQUIRE_RELEASE_SIGNING:-false}"
+REQUIRE_NATIVE_ENGINES="${READARC_REQUIRE_NATIVE_ENGINES:-false}"
 
 export READARC_PLATFORMS="android"
 "$ROOT_DIR/scripts/prepare_flutter_platforms.sh"
 
 cd "$APP_DIR"
+if [[ "$REQUIRE_RELEASE_SIGNING" == "true" && ! -f android/key.properties ]]; then
+  echo "ERROR: release publishing requires android/key.properties from protected CI secrets." >&2
+  exit 1
+fi
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 
@@ -29,9 +35,15 @@ mkdir -p "$DIST_DIR"
 # If it is missing, Flutter packages still build; DJVU pages will show an in-app diagnostic
 # instead of using external tools.
 if "$ROOT_DIR/scripts/build_native_engines.sh" android; then
-  mkdir -p android/app/src/main/jniLibs/arm64-v8a
-  cp "$ROOT_DIR/native/readarc_engines/dist/android/arm64-v8a/libreadarc_djvu_engine.so"     android/app/src/main/jniLibs/arm64-v8a/libreadarc_djvu_engine.so
+  for abi in armeabi-v7a arm64-v8a x86_64; do
+    mkdir -p "android/app/src/main/jniLibs/$abi"
+    cp "$ROOT_DIR/native/readarc_engines/dist/android/$abi/libreadarc_djvu_engine.so" "android/app/src/main/jniLibs/$abi/libreadarc_djvu_engine.so"
+  done
 else
+  if [[ "$REQUIRE_NATIVE_ENGINES" == "true" ]]; then
+    echo "ERROR: verified packages require every embedded Android engine." >&2
+    exit 1
+  fi
   echo "Embedded DJVU Android engine was not bundled. Continuing build without external converters." >&2
 fi
 

@@ -46,7 +46,6 @@ class PairingInvite {
   bool get isNearExpiry => DateTime.now().toUtc().add(const Duration(seconds: 20)).isAfter(expiresAt);
 }
 
-
 class PairingClaimResult {
   const PairingClaimResult({
     required this.accountId,
@@ -89,8 +88,7 @@ class _ParsedPairingInput {
       (ownerDeviceId?.isNotEmpty ?? false) &&
       (accountEncryptionKey?.isNotEmpty ?? false);
 
-  bool get embeddedInviteExpired =>
-      expiresAt != null && DateTime.now().toUtc().isAfter(expiresAt!);
+  bool get embeddedInviteExpired => expiresAt != null && DateTime.now().toUtc().isAfter(expiresAt!);
 }
 
 class FileTransferSnapshot {
@@ -249,11 +247,9 @@ class SyncService {
     _lastRelayUrl = relayUrl;
     _reconnectAttempt = 0;
     _appendRelayUnavailableLogOnce();
-    _setState(state.value.copyWith(
-      connected: false,
-      relayUrl: relayUrl,
-      statusText: 'Relay недоступен. Переподключаемся...',
-    ));
+    _setState(
+      state.value.copyWith(connected: false, relayUrl: relayUrl, statusText: 'Relay недоступен. Переподключаемся...'),
+    );
     _scheduleReconnect(immediate: true);
   }
 
@@ -263,51 +259,39 @@ class SyncService {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     await disconnect(manual: false);
-    _setState(
-      state.value.copyWith(
-        connected: false,
-        statusText: 'Подключение...',
-        relayUrl: relayUrl,
-      ),
-    );
+    _setState(state.value.copyWith(connected: false, statusText: 'Подключение...', relayUrl: relayUrl));
 
     final manifest = await _storage.loadManifest();
     if (manifest.isCurrentDeviceRevoked) {
-      _setState(state.value.copyWith(
-        connected: false,
-        statusText: 'Доступ этого устройства отозван',
-        relayUrl: relayUrl,
-      ));
+      _setState(
+        state.value.copyWith(connected: false, statusText: 'Доступ этого устройства отозван', relayUrl: relayUrl),
+      );
       throw StateError('Доступ этого устройства к аккаунту отозван');
     }
     await _probeRelayHealth(relayUrl, timeout: const Duration(seconds: 5));
     final uri = Uri.parse(relayUrl.trim());
-    final client = RelayClient(
-      relayUri: uri,
-      accountId: manifest.accountId,
-      deviceId: manifest.deviceId,
-    );
+    final client = RelayClient(relayUri: uri, accountId: manifest.accountId, deviceId: manifest.deviceId);
     _client = client;
     _incomingSubscription = client.incoming
         .asyncMap((envelope) async {
           await _handleIncomingEnvelope(envelope);
         })
         .listen(
-      (_) {},
-      onError: (error) {
-        unawaited(_handleRelayDisconnected(error));
-      },
-    );
+          (_) {},
+          onError: (error) {
+            unawaited(_handleRelayDisconnected(error));
+          },
+        );
     _binarySubscription = client.binaryIncoming
         .asyncMap((message) async {
           await _handleIncomingBinaryFrame(message);
         })
         .listen(
-      (_) {},
-      onError: (error) {
-        unawaited(_handleRelayDisconnected(error));
-      },
-    );
+          (_) {},
+          onError: (error) {
+            unawaited(_handleRelayDisconnected(error));
+          },
+        );
 
     try {
       await client.connect();
@@ -323,9 +307,7 @@ class SyncService {
     _healthMisses = 0;
     _relayUnavailableLogged = false;
     _appendLog('Подключено к $relayUrl');
-    _setState(
-      state.value.copyWith(connected: true, statusText: 'Подключено'),
-    );
+    _setState(state.value.copyWith(connected: true, statusText: 'Подключено'));
     _startHealthMonitor(relayUrl);
     _startMetadataRefreshLoop(client);
     unawaited(_ensureDirectFileServer());
@@ -356,11 +338,13 @@ class SyncService {
     if (manual && state.value.connected) {
       _appendLog('Отключено');
     }
-    _setState(state.value.copyWith(
-      connected: false,
-      statusText: manual ? 'Не подключено' : 'Relay недоступен. Переподключаемся...',
-      onlinePeerDeviceIds: const [],
-    ));
+    _setState(
+      state.value.copyWith(
+        connected: false,
+        statusText: manual ? 'Не подключено' : 'Relay недоступен. Переподключаемся...',
+        onlinePeerDeviceIds: const [],
+      ),
+    );
   }
 
   Future<void> _handleRelayDisconnected(Object error) async {
@@ -376,11 +360,13 @@ class SyncService {
     if (relayUrl == null || relayUrl.trim().isEmpty) return;
     _reconnectTimer?.cancel();
     final seconds = immediate ? 0 : _reconnectDelaySeconds(_reconnectAttempt);
-    _setState(state.value.copyWith(
-      connected: false,
-      statusText: seconds <= 0 ? 'Relay недоступен. Переподключаемся...' : 'Relay недоступен. Повтор через ${seconds}с',
-      relayUrl: relayUrl,
-    ));
+    _setState(
+      state.value.copyWith(
+        connected: false,
+        statusText: seconds <= 0 ? 'Relay недоступен. Переподключаемся...' : 'Relay недоступен. Повтор через $secondsс',
+        relayUrl: relayUrl,
+      ),
+    );
     _reconnectTimer = Timer(Duration(seconds: seconds), () {
       unawaited(_attemptReconnect(relayUrl));
     });
@@ -467,16 +453,14 @@ class SyncService {
   }
 
   void _scheduleStartupMetadataRefresh(RelayClient client) {
-    for (final delay in const [
-      Duration(milliseconds: 600),
-      Duration(seconds: 2),
-      Duration(seconds: 5),
-    ]) {
-      unawaited(Future<void>.delayed(delay, () async {
-        if (_client != client || !state.value.connected) return;
-        await pullOfflineQueue(reason: 'startup_retry_${delay.inMilliseconds}ms');
-        await refreshMetadata(reason: 'startup_retry_${delay.inMilliseconds}ms');
-      }));
+    for (final delay in const [Duration(milliseconds: 600), Duration(seconds: 2), Duration(seconds: 5)]) {
+      unawaited(
+        Future<void>.delayed(delay, () async {
+          if (_client != client || !state.value.connected) return;
+          await pullOfflineQueue(reason: 'startup_retry_${delay.inMilliseconds}ms');
+          await refreshMetadata(reason: 'startup_retry_${delay.inMilliseconds}ms');
+        }),
+      );
     }
   }
 
@@ -501,9 +485,7 @@ class SyncService {
         'type': 'offline_queue_pull',
         'accountId': client.accountId,
         'deviceId': client.deviceId,
-        'payload': {
-          'reason': reason,
-        },
+        'payload': {'reason': reason},
       });
       return true;
     } catch (error) {
@@ -521,10 +503,7 @@ class SyncService {
       type: 'library_snapshot',
       accountId: manifest.accountId,
       deviceId: manifest.deviceId,
-      payload: {
-        'reason': reason,
-        'manifest': manifest.toSyncJson(),
-      },
+      payload: {'reason': reason, 'manifest': manifest.toSyncJson()},
     );
 
     final sent = await _sendEnvelope(envelope, logLabel: 'Отправлен E2E snapshot: $reason');
@@ -546,10 +525,12 @@ class SyncService {
 
   void _scheduleSnapshotBroadcastRetries({required String reason}) {
     for (final delay in const [Duration(seconds: 2), Duration(seconds: 8)]) {
-      unawaited(Future<void>.delayed(delay, () async {
-        if (!state.value.connected || _manualDisconnect) return;
-        await broadcastLibrarySnapshot(reason: '${reason}_retry_${delay.inSeconds}s');
-      }));
+      unawaited(
+        Future<void>.delayed(delay, () async {
+          if (!state.value.connected || _manualDisconnect) return;
+          await broadcastLibrarySnapshot(reason: '${reason}_retry_${delay.inSeconds}s');
+        }),
+      );
     }
   }
 
@@ -560,10 +541,7 @@ class SyncService {
         type: 'library_snapshot_requested',
         accountId: manifest.accountId,
         deviceId: manifest.deviceId,
-        payload: {
-          'reason': reason,
-          'requestingDeviceId': manifest.deviceId,
-        },
+        payload: {'reason': reason, 'requestingDeviceId': manifest.deviceId},
       ),
       logLabel: 'Запрошен snapshot: $reason',
     );
@@ -597,10 +575,7 @@ class SyncService {
     final expiresAtSeconds = (response['expiresAt'] as num?)?.toDouble();
     final expiresAt = expiresAtSeconds == null
         ? DateTime.now().toUtc().add(ttl)
-        : DateTime.fromMillisecondsSinceEpoch(
-            (expiresAtSeconds * 1000).round(),
-            isUtc: true,
-          );
+        : DateTime.fromMillisecondsSinceEpoch((expiresAtSeconds * 1000).round(), isUtc: true);
     // QR and manual entry now carry only the short one-time code. The relay
     // stores the full invite payload for a few minutes and returns it from
     // /pairing/claim, so users do not have to scan/type long unreadable links.
@@ -616,10 +591,7 @@ class SyncService {
     );
   }
 
-  Future<PairingClaimResult> claimPairingInvite({
-    required String input,
-    required SyncSettings fallbackSettings,
-  }) async {
+  Future<PairingClaimResult> claimPairingInvite({required String input, required SyncSettings fallbackSettings}) async {
     final parsed = _parsePairingInput(input);
     final effectiveSettings = _settingsForClaimedRelayUrl(
       parsed.relayUrl ?? fallbackSettings.effectiveRelayUrl,
@@ -705,8 +677,8 @@ class SyncService {
       scheme: base.scheme == 'ws'
           ? 'http'
           : base.scheme == 'wss'
-              ? 'https'
-              : base.scheme,
+          ? 'https'
+          : base.scheme,
       path: '$basePath$cleanEndpoint'.replaceAll(RegExp(r'/{2,}'), '/'),
       query: '',
     );
@@ -773,7 +745,7 @@ class SyncService {
 
   String _normalizePairingCode(String raw) => raw.replaceAll(RegExp(r'[^0-9]'), '');
 
-  SyncSettings _settingsForClaimedRelayUrl(String _relayUrl, SyncSettings fallback) {
+  SyncSettings _settingsForClaimedRelayUrl(String relayUrl, SyncSettings fallback) {
     // Sprint 25: all client connections use the official ReadArc relay.
     // Older QR links may still carry a custom/Tailscale relay parameter; keep
     // accepting the link but ignore that endpoint for the actual connection.
@@ -822,45 +794,48 @@ class SyncService {
     // reconnecting. Send the same idempotent request a few times until an offer
     // is received, then fail with a clear reason instead of hanging silently.
     Future<bool> sendRequest({String? label}) => _sendEnvelope(
-          SyncEnvelope(
-            type: 'book_file_requested',
-            accountId: manifest.accountId,
-            deviceId: manifest.deviceId,
-            payload: {
-              'transferId': transferId,
-              'bookId': book.id,
-              'requestingDeviceId': manifest.deviceId,
-              'fileName': book.fileName,
-              'expectedSha256': book.contentSha256,
-              'expectedSizeBytes': book.sizeBytes,
-              'preferredChunkSize': _defaultChunkSize,
-              'binaryTransfer': true,
-            },
-          ),
-          logLabel: label,
-        );
+      SyncEnvelope(
+        type: 'book_file_requested',
+        accountId: manifest.accountId,
+        deviceId: manifest.deviceId,
+        payload: {
+          'transferId': transferId,
+          'bookId': book.id,
+          'requestingDeviceId': manifest.deviceId,
+          'fileName': book.fileName,
+          'expectedSha256': book.contentSha256,
+          'expectedSizeBytes': book.sizeBytes,
+          'preferredChunkSize': _defaultChunkSize,
+          'binaryTransfer': true,
+        },
+      ),
+      logLabel: label,
+    );
 
     for (final delay in const [Duration(seconds: 5), Duration(seconds: 12)]) {
-      unawaited(Future<void>.delayed(delay, () async {
-        final current = _downloadsByTransferId[transferId];
-        if (current == null || current.sourceDeviceId != null) return;
-        _setDownloadSnapshot(
-          state.value.downloadForBook(current.bookId)!.copyWith(
-                statusText: 'Повторяем поиск источника...',
-                active: true,
-              ),
-        );
-        await sendRequest();
-      }));
+      unawaited(
+        Future<void>.delayed(delay, () async {
+          final current = _downloadsByTransferId[transferId];
+          if (current == null || current.sourceDeviceId != null) return;
+          _setDownloadSnapshot(
+            state.value
+                .downloadForBook(current.bookId)!
+                .copyWith(statusText: 'Повторяем поиск источника...', active: true),
+          );
+          await sendRequest();
+        }),
+      );
     }
 
-    unawaited(Future<void>.delayed(_downloadOfferTimeout, () async {
-      final current = _downloadsByTransferId[transferId];
-      if (current == null) return;
-      if (current.sourceDeviceId == null) {
-        await _failDownload(current, 'Источник не найден: устройство с книгой не ответило');
-      }
-    }));
+    unawaited(
+      Future<void>.delayed(_downloadOfferTimeout, () async {
+        final current = _downloadsByTransferId[transferId];
+        if (current == null) return;
+        if (current.sourceDeviceId == null) {
+          await _failDownload(current, 'Источник не найден: устройство с книгой не ответило');
+        }
+      }),
+    );
 
     return sendRequest(label: 'Запрошен файл: ${book.title}');
   }
@@ -934,9 +909,7 @@ class SyncService {
         'type': 'offline_queue_ack',
         'accountId': envelope.accountId,
         'deviceId': client.deviceId,
-        'payload': {
-          'cursor': cursor,
-        },
+        'payload': {'cursor': cursor},
       });
     } catch (error) {
       _appendLog('Не удалось подтвердить offline queue: $error');
@@ -971,10 +944,7 @@ class SyncService {
     }
 
     if (envelope.type == 'peer_left') {
-      final peers = state.value.onlinePeerDeviceIds
-          .where((id) => id != envelope.deviceId)
-          .toList()
-        ..sort();
+      final peers = state.value.onlinePeerDeviceIds.where((id) => id != envelope.deviceId).toList()..sort();
       _setState(state.value.copyWith(onlinePeerDeviceIds: peers));
       _appendLog('Отключилось другое устройство: ${envelope.deviceId}');
       return;
@@ -1139,10 +1109,7 @@ class SyncService {
     await broadcastLibrarySnapshot(reason: 'pairing_claimed_reauthorized_device');
   }
 
-  Future<void> _handleLibrarySnapshotRequested(
-    SyncEnvelope envelope,
-    LibraryManifest local,
-  ) async {
+  Future<void> _handleLibrarySnapshotRequested(SyncEnvelope envelope, LibraryManifest local) async {
     final requester = envelope.payload['requestingDeviceId'] as String?;
     if (requester == local.deviceId) return;
     _appendLog('Получен запрос snapshot от ${envelope.deviceId}');
@@ -1171,10 +1138,7 @@ class SyncService {
     return remoteVisible == 0 || remoteDeleted >= localVisible || localDownloaded > 0;
   }
 
-  Future<void> _handleLibrarySnapshot(
-    SyncEnvelope envelope,
-    LibraryManifest local,
-  ) async {
+  Future<void> _handleLibrarySnapshot(SyncEnvelope envelope, LibraryManifest local) async {
     final payloadManifest = envelope.payload['manifest'];
     if (payloadManifest is! Map) {
       _appendLog('Некорректный snapshot');
@@ -1206,24 +1170,14 @@ class SyncService {
     if (merged.isCurrentDeviceRevoked) {
       _appendLog('Доступ этого устройства отозван. Синхронизация остановлена.');
       await disconnect(manual: true);
-      _setState(state.value.copyWith(
-        connected: false,
-        statusText: 'Доступ этого устройства отозван',
-      ));
+      _setState(state.value.copyWith(connected: false, statusText: 'Доступ этого устройства отозван'));
       return;
     }
-    _appendLog(
-      'Принят snapshot от ${remote.deviceName} — книг: ${remote.books.length}',
-    );
-    _setState(
-      state.value.copyWith(receivedEvents: state.value.receivedEvents + 1),
-    );
+    _appendLog('Принят snapshot от ${remote.deviceName} — книг: ${remote.books.length}');
+    _setState(state.value.copyWith(receivedEvents: state.value.receivedEvents + 1));
   }
 
-  Future<void> _handleBookFileRequested(
-    SyncEnvelope envelope,
-    LibraryManifest local,
-  ) async {
+  Future<void> _handleBookFileRequested(SyncEnvelope envelope, LibraryManifest local) async {
     final payload = envelope.payload;
     final requestingDeviceId = payload['requestingDeviceId'] as String?;
     if (requestingDeviceId == null || requestingDeviceId == local.deviceId) return;
@@ -1290,10 +1244,7 @@ class SyncService {
     _appendLog('Предложен файл: ${book.title} → $requestingDeviceId');
   }
 
-  Future<void> _handleBookFileOffer(
-    SyncEnvelope envelope,
-    LibraryManifest local,
-  ) async {
+  Future<void> _handleBookFileOffer(SyncEnvelope envelope, LibraryManifest local) async {
     final payload = envelope.payload;
     if (payload['requestingDeviceId'] != local.deviceId) return;
     final transferId = payload['transferId'] as String?;
@@ -1344,7 +1295,9 @@ class SyncService {
         ? 'Продолжаем с ${_formatBytes(resumeBytes)}...'
         : 'Источник найден, начинаем скачивание...';
     _setDownloadSnapshot(
-      state.value.downloadForBook(session.bookId)!.copyWith(
+      state.value
+          .downloadForBook(session.bookId)!
+          .copyWith(
             statusText: resumeText,
             peerDeviceId: sourceDeviceId,
             transferredBytes: resumeBytes,
@@ -1363,11 +1316,9 @@ class SyncService {
       if (directOk) return;
       final existing = state.value.downloadForBook(session.bookId);
       if (existing != null) {
-        _setDownloadSnapshot(existing.copyWith(
-          statusText: 'Direct/LAN недоступен, используем relay...',
-          active: true,
-          clearError: true,
-        ));
+        _setDownloadSnapshot(
+          existing.copyWith(statusText: 'Direct/LAN недоступен, используем relay...', active: true, clearError: true),
+        );
       }
     }
 
@@ -1391,10 +1342,7 @@ class SyncService {
     _appendLog('Принят источник файла: $sourceDeviceId');
   }
 
-  Future<void> _handleBookFileAccept(
-    SyncEnvelope envelope,
-    LibraryManifest local,
-  ) async {
+  Future<void> _handleBookFileAccept(SyncEnvelope envelope, LibraryManifest local) async {
     final payload = envelope.payload;
     if (payload['sourceDeviceId'] != local.deviceId) return;
     final transferId = payload['transferId'] as String?;
@@ -1465,7 +1413,13 @@ class SyncService {
     try {
       size = await file.length();
     } catch (_) {
-      await _handleSourceFileUnavailable(local, transferId, bookId, requestingDeviceId, 'Не удалось прочитать локальный файл');
+      await _handleSourceFileUnavailable(
+        local,
+        transferId,
+        bookId,
+        requestingDeviceId,
+        'Не удалось прочитать локальный файл',
+      );
       return;
     }
     final safeChunkSize = chunkSize.clamp(256 * 1024, _defaultChunkSize).toInt();
@@ -1496,7 +1450,13 @@ class SyncService {
       raf = await file.open(mode: FileMode.read);
       await raf.setPosition(startOffset);
     } catch (_) {
-      await _handleSourceFileUnavailable(local, transferId, bookId, requestingDeviceId, 'Не удалось открыть файл для отправки');
+      await _handleSourceFileUnavailable(
+        local,
+        transferId,
+        bookId,
+        requestingDeviceId,
+        'Не удалось открыть файл для отправки',
+      );
       return;
     }
     var chunkIndex = safeStartChunkIndex;
@@ -1511,7 +1471,13 @@ class SyncService {
         }
         if (!await file.exists()) {
           failed = true;
-          await _handleSourceFileUnavailable(local, transferId, bookId, requestingDeviceId, 'Файл был удалён во время передачи');
+          await _handleSourceFileUnavailable(
+            local,
+            transferId,
+            bookId,
+            requestingDeviceId,
+            'Файл был удалён во время передачи',
+          );
           break;
         }
         final data = await raf.read(safeChunkSize);
@@ -1558,7 +1524,13 @@ class SyncService {
             _uploadAckWaiters.remove(ackKey);
             if (attempt == 3) {
               failed = true;
-              await _sendFileError(local, transferId, bookId, requestingDeviceId, 'Не удалось отправить chunk $chunkIndex');
+              await _sendFileError(
+                local,
+                transferId,
+                bookId,
+                requestingDeviceId,
+                'Не удалось отправить chunk $chunkIndex',
+              );
               break;
             }
             continue;
@@ -1571,14 +1543,18 @@ class SyncService {
             if (attempt < 3) {
               _updateTransferByKey(
                 uploadKey,
-                state.value.fileTransfers[uploadKey]!.copyWith(
-                      statusText: 'Повтор chunk $chunkIndex ($attempt/3)...',
-                    ),
+                state.value.fileTransfers[uploadKey]!.copyWith(statusText: 'Повтор chunk $chunkIndex ($attempt/3)...'),
               );
               await Future<void>.delayed(const Duration(milliseconds: 350));
             } else {
               failed = true;
-              await _sendFileError(local, transferId, bookId, requestingDeviceId, 'Получатель не подтвердил chunk $chunkIndex');
+              await _sendFileError(
+                local,
+                transferId,
+                bookId,
+                requestingDeviceId,
+                'Получатель не подтвердил chunk $chunkIndex',
+              );
             }
           }
         }
@@ -1589,10 +1565,10 @@ class SyncService {
         _updateTransferByKey(
           uploadKey,
           state.value.fileTransfers[uploadKey]!.copyWith(
-                progressPercent: progress.clamp(0, 100).toDouble(),
-                transferredBytes: sentBytes,
-                statusText: 'Отправка: ${progress.clamp(0, 100).toStringAsFixed(1)}% • ${mbps.toStringAsFixed(1)} MB/s',
-              ),
+            progressPercent: progress.clamp(0, 100).toDouble(),
+            transferredBytes: sentBytes,
+            statusText: 'Отправка: ${progress.clamp(0, 100).toStringAsFixed(1)}% • ${mbps.toStringAsFixed(1)} MB/s',
+          ),
         );
         chunkIndex += 1;
         if (chunkIndex % 4 == 0) {
@@ -1604,15 +1580,15 @@ class SyncService {
       _updateTransferByKey(
         uploadKey,
         existingTransfer.copyWith(
-              progressPercent: (wasCancelled || failed) ? existingTransfer.progressPercent : 100,
-              transferredBytes: (wasCancelled || failed) ? existingTransfer.transferredBytes : size,
-              statusText: wasCancelled
-                  ? 'Отправка отменена'
-                  : failed
-                      ? 'Отправка прервана'
-                      : 'Файл отправлен',
-              active: false,
-            ),
+          progressPercent: (wasCancelled || failed) ? existingTransfer.progressPercent : 100,
+          transferredBytes: (wasCancelled || failed) ? existingTransfer.transferredBytes : size,
+          statusText: wasCancelled
+              ? 'Отправка отменена'
+              : failed
+              ? 'Отправка прервана'
+              : 'Файл отправлен',
+          active: false,
+        ),
       );
       if (!wasCancelled && !failed) {
         _appendLog('Файл отправлен: ${book.title}');
@@ -1620,18 +1596,13 @@ class SyncService {
     } catch (error) {
       _updateTransferByKey(
         uploadKey,
-        state.value.fileTransfers[uploadKey]!.copyWith(
-              statusText: 'Ошибка отправки',
-              active: false,
-              error: '$error',
-            ),
+        state.value.fileTransfers[uploadKey]!.copyWith(statusText: 'Ошибка отправки', active: false, error: '$error'),
       );
       await _sendFileError(local, transferId, bookId, requestingDeviceId, 'Ошибка отправки: $error');
     } finally {
       await raf.close();
     }
   }
-
 
   Future<bool> _sendBinaryFileChunk({
     required LibraryManifest local,
@@ -1701,11 +1672,7 @@ class SyncService {
     }
   }
 
-  Future<void> _handleBookFileBinaryChunk(
-    Map<String, dynamic> payload,
-    List<int> data,
-    LibraryManifest local,
-  ) async {
+  Future<void> _handleBookFileBinaryChunk(Map<String, dynamic> payload, List<int> data, LibraryManifest local) async {
     final transferId = payload['transferId'] as String?;
     if (transferId == null) return;
     final session = _downloadsByTransferId[transferId];
@@ -1743,7 +1710,9 @@ class SyncService {
       final elapsed = DateTime.now().difference(session.startedAt).inMilliseconds.clamp(1, 1 << 31);
       final mbps = (session.receivedBytes / (1024 * 1024)) / (elapsed / 1000.0);
       _setDownloadSnapshot(
-        state.value.downloadForBook(session.bookId)!.copyWith(
+        state.value
+            .downloadForBook(session.bookId)!
+            .copyWith(
               statusText: 'Скачивание: ${progress.clamp(0, 100).toStringAsFixed(1)}% • ${mbps.toStringAsFixed(1)} MB/s',
               progressPercent: progress.clamp(0, 100).toDouble(),
               transferredBytes: session.receivedBytes,
@@ -1783,10 +1752,7 @@ class SyncService {
     );
   }
 
-  Future<void> _handleBookFileChunk(
-    SyncEnvelope envelope,
-    LibraryManifest local,
-  ) async {
+  Future<void> _handleBookFileChunk(SyncEnvelope envelope, LibraryManifest local) async {
     final payload = envelope.payload;
     if (payload['requestingDeviceId'] != local.deviceId) return;
     final transferId = payload['transferId'] as String?;
@@ -1825,7 +1791,9 @@ class SyncService {
       final elapsed = DateTime.now().difference(session.startedAt).inMilliseconds.clamp(1, 1 << 31);
       final mbps = (session.receivedBytes / (1024 * 1024)) / (elapsed / 1000.0);
       _setDownloadSnapshot(
-        state.value.downloadForBook(session.bookId)!.copyWith(
+        state.value
+            .downloadForBook(session.bookId)!
+            .copyWith(
               statusText: 'Скачивание: ${progress.clamp(0, 100).toStringAsFixed(1)}% • ${mbps.toStringAsFixed(1)} MB/s',
               progressPercent: progress.clamp(0, 100).toDouble(),
               transferredBytes: session.receivedBytes,
@@ -1855,10 +1823,7 @@ class SyncService {
     }
 
     _setDownloadSnapshot(
-      state.value.downloadForBook(session.bookId)!.copyWith(
-            statusText: 'Проверяем SHA-256...',
-            active: true,
-          ),
+      state.value.downloadForBook(session.bookId)!.copyWith(statusText: 'Проверяем SHA-256...', active: true),
     );
 
     final actualSha = (await sha256.bind(tempFile.openRead()).first).toString();
@@ -1876,10 +1841,7 @@ class SyncService {
     if (await destination.exists()) await destination.delete();
     await tempFile.rename(destination.path);
 
-    final manifest = await _storage.markBookDownloaded(
-      bookId: session.bookId,
-      localPath: destination.path,
-    );
+    final manifest = await _storage.markBookDownloaded(bookId: session.bookId, localPath: destination.path);
     _manifestChanges.add(manifest);
     _downloadsByTransferId.remove(session.transferId);
 
@@ -1888,11 +1850,7 @@ class SyncService {
     await broadcastLibrarySnapshot(reason: 'book_file_downloaded');
   }
 
-
-  Future<void> _handleBookFileChunkAck(
-    SyncEnvelope envelope,
-    LibraryManifest local,
-  ) async {
+  Future<void> _handleBookFileChunkAck(SyncEnvelope envelope, LibraryManifest local) async {
     final payload = envelope.payload;
     if (payload['sourceDeviceId'] != local.deviceId) return;
     final transferId = payload['transferId'] as String?;
@@ -1915,10 +1873,7 @@ class SyncService {
     });
   }
 
-  Future<void> _handleBookFileError(
-    SyncEnvelope envelope,
-    LibraryManifest local,
-  ) async {
+  Future<void> _handleBookFileError(SyncEnvelope envelope, LibraryManifest local) async {
     final payload = envelope.payload;
     if (payload['requestingDeviceId'] != local.deviceId) return;
     final transferId = payload['transferId'] as String?;
@@ -1928,11 +1883,7 @@ class SyncService {
     await _failDownload(session, payload['message'] as String? ?? 'Ошибка передачи файла');
   }
 
-  Future<void> _failDownload(
-    _DownloadSession session,
-    String message, {
-    bool deletePartial = false,
-  }) async {
+  Future<void> _failDownload(_DownloadSession session, String message, {bool deletePartial = false}) async {
     session.watchdog?.cancel();
     if (deletePartial) {
       await _deletePartial(session);
@@ -1953,10 +1904,7 @@ class SyncService {
     _appendLog('Ошибка скачивания ${session.fileName}: $message');
   }
 
-  Future<void> _handleBookFileCancelled(
-    SyncEnvelope envelope,
-    LibraryManifest local,
-  ) async {
+  Future<void> _handleBookFileCancelled(SyncEnvelope envelope, LibraryManifest local) async {
     final payload = envelope.payload;
     if (payload['sourceDeviceId'] != local.deviceId) return;
     final transferId = payload['transferId'] as String?;
@@ -1965,13 +1913,7 @@ class SyncService {
     final uploadKey = 'upload:$transferId';
     final existing = state.value.fileTransfers[uploadKey];
     if (existing != null) {
-      _updateTransferByKey(
-        uploadKey,
-        existing.copyWith(
-          statusText: 'Получатель отменил скачивание',
-          active: false,
-        ),
-      );
+      _updateTransferByKey(uploadKey, existing.copyWith(statusText: 'Получатель отменил скачивание', active: false));
     }
   }
 
@@ -1989,7 +1931,6 @@ class SyncService {
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
     return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
-
 
   Future<void> _ensureDirectFileServer() async {
     if (_directFileServer != null) return;
@@ -2027,10 +1968,7 @@ class SyncService {
         expiresAt: DateTime.now().toUtc().add(const Duration(minutes: 15)),
       );
       _directShares.removeWhere((_, share) => share.expiresAt.isBefore(DateTime.now().toUtc()));
-      final interfaces = await NetworkInterface.list(
-        type: InternetAddressType.IPv4,
-        includeLoopback: false,
-      );
+      final interfaces = await NetworkInterface.list(type: InternetAddressType.IPv4, includeLoopback: false);
       final urls = <String>[];
       for (final interface in interfaces) {
         for (final address in interface.addresses) {
@@ -2119,7 +2057,15 @@ class SyncService {
   }
 
   int _directHostRank(String host) {
-    if (host.startsWith('192.168.') || host.startsWith('10.') || host.startsWith('172.16.') || host.startsWith('172.17.') || host.startsWith('172.18.') || host.startsWith('172.19.') || host.startsWith('172.2') || host.startsWith('172.30.') || host.startsWith('172.31.')) {
+    if (host.startsWith('192.168.') ||
+        host.startsWith('10.') ||
+        host.startsWith('172.16.') ||
+        host.startsWith('172.17.') ||
+        host.startsWith('172.18.') ||
+        host.startsWith('172.19.') ||
+        host.startsWith('172.2') ||
+        host.startsWith('172.30.') ||
+        host.startsWith('172.31.')) {
       return 0;
     }
     final parts = host.split('.').map(int.tryParse).toList();
@@ -2133,23 +2079,29 @@ class SyncService {
     if (candidates.isEmpty) return null;
     final snap = state.value.downloadForBook(bookId);
     if (snap != null) {
-      _setDownloadSnapshot(snap.copyWith(
-        statusText: 'Быстро проверяем Direct/LAN (${candidates.length})...',
-        active: true,
-        clearError: true,
-      ));
+      _setDownloadSnapshot(
+        snap.copyWith(
+          statusText: 'Быстро проверяем Direct/LAN (${candidates.length})...',
+          active: true,
+          clearError: true,
+        ),
+      );
     }
 
     final probing = candidates.take(12).toList(growable: false);
     final completer = Completer<Uri?>();
     var pending = probing.length;
     for (final uri in probing) {
-      unawaited(_probeDirectUrl(uri).then((ok) {
-        if (ok && !completer.isCompleted) completer.complete(uri);
-      }).whenComplete(() {
-        pending -= 1;
-        if (pending <= 0 && !completer.isCompleted) completer.complete(null);
-      }));
+      unawaited(
+        _probeDirectUrl(uri)
+            .then((ok) {
+              if (ok && !completer.isCompleted) completer.complete(uri);
+            })
+            .whenComplete(() {
+              pending -= 1;
+              if (pending <= 0 && !completer.isCompleted) completer.complete(null);
+            }),
+      );
     }
     return completer.future.timeout(const Duration(seconds: 4), onTimeout: () => null);
   }
@@ -2182,10 +2134,7 @@ class SyncService {
       return false;
     }
 
-    final ordered = <Uri>[
-      selected,
-      ...candidates.where((candidate) => candidate != selected),
-    ];
+    final ordered = <Uri>[selected, ...candidates.where((candidate) => candidate != selected)];
     for (final uri in ordered.take(3)) {
       final ok = await _downloadFromDirectUri(session, uri, tempFile);
       if (ok) return true;
@@ -2198,11 +2147,7 @@ class SyncService {
   Future<bool> _downloadFromDirectUri(_DownloadSession session, Uri uri, File tempFile) async {
     final existing = state.value.downloadForBook(session.bookId);
     if (existing != null) {
-      _setDownloadSnapshot(existing.copyWith(
-        statusText: 'Direct/LAN: соединяемся...',
-        active: true,
-        clearError: true,
-      ));
+      _setDownloadSnapshot(existing.copyWith(statusText: 'Direct/LAN: соединяемся...', active: true, clearError: true));
     }
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
     IOSink? sink;
@@ -2243,13 +2188,16 @@ class SyncService {
           final mbps = ((session.receivedBytes - resumeBytes) / (1024 * 1024)) / (elapsed / 1000.0);
           final snap = state.value.downloadForBook(session.bookId);
           if (snap != null) {
-            _setDownloadSnapshot(snap.copyWith(
-              statusText: 'Direct/LAN: ${progress.clamp(0, 100).toStringAsFixed(1)}% • ${mbps.toStringAsFixed(1)} MB/s',
-              progressPercent: progress.clamp(0, 100).toDouble(),
-              transferredBytes: session.receivedBytes,
-              totalBytes: session.expectedBytes,
-              active: true,
-            ));
+            _setDownloadSnapshot(
+              snap.copyWith(
+                statusText:
+                    'Direct/LAN: ${progress.clamp(0, 100).toStringAsFixed(1)}% • ${mbps.toStringAsFixed(1)} MB/s',
+                progressPercent: progress.clamp(0, 100).toDouble(),
+                transferredBytes: session.receivedBytes,
+                totalBytes: session.expectedBytes,
+                active: true,
+              ),
+            );
           }
         }
       }
@@ -2269,11 +2217,12 @@ class SyncService {
       debugPrint('Direct/LAN download failed from $uri: $error');
       return false;
     } finally {
-      try { await sink?.close(); } catch (_) {}
+      try {
+        await sink?.close();
+      } catch (_) {}
       client.close(force: true);
     }
   }
-
 
   Future<void> _sendFileError(
     LibraryManifest local,
@@ -2316,10 +2265,7 @@ class SyncService {
       if (local.isCurrentDeviceRevoked) {
         _appendLog('Не отправлено ${envelope.type}: доступ этого устройства отозван');
         await disconnect(manual: true);
-        _setState(state.value.copyWith(
-          connected: false,
-          statusText: 'Доступ этого устройства отозван',
-        ));
+        _setState(state.value.copyWith(connected: false, statusText: 'Доступ этого устройства отозван'));
         return false;
       }
       final encryptedPayload = await ReadArcE2eCrypto.encryptPayload(
@@ -2330,13 +2276,15 @@ class SyncService {
         deviceId: envelope.deviceId,
         createdAt: envelope.createdAt,
       );
-      client.send(SyncEnvelope(
-        type: envelope.type,
-        accountId: envelope.accountId,
-        deviceId: envelope.deviceId,
-        createdAt: envelope.createdAt,
-        payload: encryptedPayload,
-      ));
+      client.send(
+        SyncEnvelope(
+          type: envelope.type,
+          accountId: envelope.accountId,
+          deviceId: envelope.deviceId,
+          createdAt: envelope.createdAt,
+          payload: encryptedPayload,
+        ),
+      );
       if (logLabel != null && logLabel.isNotEmpty) {
         _appendLog(logLabel);
       }
@@ -2412,7 +2360,6 @@ class _DownloadSession {
   Timer? watchdog;
   final DateTime startedAt = DateTime.now();
 }
-
 
 class _DirectFileShare {
   const _DirectFileShare({

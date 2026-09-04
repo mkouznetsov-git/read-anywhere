@@ -29,8 +29,8 @@ build_macos() {
   local arm_src="$ROOT_DIR/native/readarc_engines/djvu/target/aarch64-apple-darwin/release/libreadarc_djvu_engine.dylib"
   local universal="$DIST_ROOT/macos/libreadarc_djvu_engine.dylib"
 
-  cargo build --release --manifest-path "$ENGINE_MANIFEST" --target x86_64-apple-darwin
-  cargo build --release --manifest-path "$ENGINE_MANIFEST" --target aarch64-apple-darwin
+  cargo build --release --locked --manifest-path "$ENGINE_MANIFEST" --target x86_64-apple-darwin
+  cargo build --release --locked --manifest-path "$ENGINE_MANIFEST" --target aarch64-apple-darwin
 
   if [[ -f "$x64_src" && -f "$arm_src" && "$(command -v lipo || true)" != "" ]]; then
     lipo -create -output "$universal" "$x64_src" "$arm_src"
@@ -47,7 +47,7 @@ build_macos() {
 }
 
 build_android() {
-  echo "Building embedded DJVU engine for Android arm64-v8a..."
+  echo "Building embedded DJVU engine for supported Android ABIs..."
   if ! command -v cargo-ndk >/dev/null 2>&1; then
     echo "cargo-ndk not found; install with: cargo install cargo-ndk --locked" >&2
     return 2
@@ -56,14 +56,18 @@ build_android() {
   (
     cd "$ROOT_DIR/native/readarc_engines/djvu"
     cargo ndk \
+      -t armeabi-v7a \
       -t arm64-v8a \
+      -t x86_64 \
       -o "$DIST_ROOT/android" \
-      build --release
+      build --release --locked
   )
-  if [[ ! -f "$DIST_ROOT/android/arm64-v8a/libreadarc_djvu_engine.so" ]]; then
-    echo "Android arm64 DJVU engine was not produced." >&2
-    return 1
-  fi
+  for abi in armeabi-v7a arm64-v8a x86_64; do
+    if [[ ! -f "$DIST_ROOT/android/$abi/libreadarc_djvu_engine.so" ]]; then
+      echo "Android DJVU engine was not produced for $abi." >&2
+      return 1
+    fi
+  done
 }
 
 case "$TARGET_PLATFORM" in
