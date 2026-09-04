@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main, master]
   push:
-    branches: [main, master, 'sprint/**']
+    branches: [main, master]
     tags: ['v*']
   workflow_dispatch:
     inputs:
