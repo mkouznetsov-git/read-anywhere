@@ -37,6 +37,8 @@ void main() {
       expect(debugManifest, contains('android:usesCleartextTraffic="true"'));
       expect(debugManifest, contains('xmlns:tools="http://schemas.android.com/tools"'));
       expect(debugManifest, contains('tools:replace="android:usesCleartextTraffic"'));
+      expect(pubspec, contains('file_picker: 10.3.10'));
+      expect(pubspec, isNot(contains('dependency_overrides:')));
       expect(pubspec, contains('qr_code_scanner_plus:'));
     });
 

@@ -11,7 +11,7 @@ dependencies:
     sdk: flutter
   crypto: 3.0.7
   cryptography: 2.9.0
-  file_picker: 8.3.7
+  file_picker: 10.3.10
   path: 1.9.1
   path_provider: 2.1.6
   uuid: 4.6.0
@@ -30,12 +30,6 @@ dev_dependencies:
   integration_test:
     sdk: flutter
   flutter_lints: 4.0.0
-
-# file_picker 8.3.7 compiles its Android library against API 34. Version 2.0.35
-# of this transitive plugin pulls AndroidX metadata that requires API 36, which
-# makes that otherwise compatible file_picker release fail its own AAR check.
-dependency_overrides:
-  flutter_plugin_android_lifecycle: 2.0.34
 
 flutter:
   uses-material-design: true
