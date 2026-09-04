@@ -38,7 +38,9 @@ if [[ "$PLATFORMS" == *android* ]]; then
   grep -q 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml
   grep -q 'android.permission.CAMERA' android/app/src/main/AndroidManifest.xml
   grep -q 'android:usesCleartextTraffic="false"' android/app/src/main/AndroidManifest.xml
-  if find android/app -maxdepth 1 -type f \( -name '*.jks' -o -name '*.keystore' \) -print -quit | grep -q .; then
+  if [[ -n "$(git -C "$ROOT_DIR" ls-files -- \
+    'apps/flutter_client/android/app/*.jks' \
+    'apps/flutter_client/android/app/*.keystore')" ]]; then
     echo "ERROR: Android signing keys must not be committed under android/app." >&2
     exit 1
   fi
