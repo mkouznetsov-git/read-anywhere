@@ -31,6 +31,7 @@ void main() {
       final manifest = _read('android/app/src/main/AndroidManifest.xml');
       final debugManifest = _read('android/app/src/debug/AndroidManifest.xml');
       final pubspec = _read('pubspec.yaml');
+      final platformValidator = _read('../../scripts/prepare_flutter_platforms.sh');
       expect(manifest, contains('android.permission.CAMERA'));
       expect(manifest, contains('android.permission.INTERNET'));
       expect(manifest, contains('android:usesCleartextTraffic="false"'));
@@ -40,6 +41,8 @@ void main() {
       expect(pubspec, contains('file_picker: 10.3.10'));
       expect(pubspec, isNot(contains('dependency_overrides:')));
       expect(pubspec, contains('qr_code_scanner_plus:'));
+      expect(platformValidator, contains('git -C "\$ROOT_DIR" ls-files'));
+      expect(platformValidator, isNot(contains('find android/app')));
     });
 
     test('pairing UI remains six-digit-code based', () {
