@@ -123,7 +123,10 @@ class TrustedDeviceRecord {
 }
 
 class LibraryManifest {
+  static const currentSchemaVersion = 2;
+
   LibraryManifest({
+    this.schemaVersion = currentSchemaVersion,
     required this.accountId,
     required this.deviceId,
     this.deviceName = 'Моё устройство',
@@ -138,6 +141,7 @@ class LibraryManifest {
        trustedDevices = trustedDevices ?? [];
 
   final String accountId;
+  final int schemaVersion;
   final String deviceId;
   final String deviceName;
   final String accountEncryptionKey;
@@ -167,6 +171,7 @@ class LibraryManifest {
       });
 
   LibraryManifest copyWith({
+    int? schemaVersion,
     String? accountId,
     String? deviceId,
     String? deviceName,
@@ -178,6 +183,7 @@ class LibraryManifest {
     List<TrustedDeviceRecord>? trustedDevices,
   }) {
     return LibraryManifest(
+      schemaVersion: schemaVersion ?? this.schemaVersion,
       accountId: accountId ?? this.accountId,
       deviceId: deviceId ?? this.deviceId,
       deviceName: deviceName ?? this.deviceName,
@@ -197,12 +203,11 @@ class LibraryManifest {
   Map<String, dynamic> toSyncJson() => _toJson(includeLocalPaths: false);
 
   Map<String, dynamic> _toJson({required bool includeLocalPaths}) => {
+    'schemaVersion': schemaVersion,
     'accountId': accountId,
     'deviceId': deviceId,
     'deviceName': deviceName,
-    if (includeLocalPaths) 'accountEncryptionKey': accountEncryptionKey,
     'deviceSigningPublicKey': deviceSigningPublicKey,
-    if (includeLocalPaths) 'deviceSigningPrivateKey': deviceSigningPrivateKey,
     'crypto': {'payload': 'readarc-e2e-v2'},
     'updatedAt': updatedAt.toIso8601String(),
     'trustedDevices': trustedDevices.map((d) => d.toJson()).toList(),
@@ -210,6 +215,7 @@ class LibraryManifest {
   };
 
   factory LibraryManifest.fromJson(Map<String, dynamic> json) => LibraryManifest(
+    schemaVersion: (json['schemaVersion'] as num?)?.toInt() ?? 1,
     accountId: json['accountId'] as String? ?? 'local-account',
     deviceId: json['deviceId'] as String? ?? 'local-device',
     deviceName: json['deviceName'] as String? ?? 'Моё устройство',

@@ -1165,9 +1165,9 @@ class SyncService {
       await requestLibrarySnapshot(reason: 'local_first_empty_merge_guard');
       return;
     }
-    await _storage.saveManifest(merged);
-    _manifestChanges.add(await _storage.loadManifest());
-    if (merged.isCurrentDeviceRevoked) {
+    final saved = await _storage.mutateManifest((current) => mergeManifests(current, remote));
+    _manifestChanges.add(saved);
+    if (saved.isCurrentDeviceRevoked) {
       _appendLog('Доступ этого устройства отозван. Синхронизация остановлена.');
       await disconnect(manual: true);
       _setState(state.value.copyWith(connected: false, statusText: 'Доступ этого устройства отозван'));
