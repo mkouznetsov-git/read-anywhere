@@ -1,5 +1,9 @@
 import 'book.dart';
 
+import 'package:uuid/uuid.dart';
+
+const _syncUuid = Uuid();
+
 class TrustedDeviceRecord {
   TrustedDeviceRecord({
     required this.deviceId,
@@ -123,7 +127,7 @@ class TrustedDeviceRecord {
 }
 
 class LibraryManifest {
-  static const currentSchemaVersion = 2;
+  static const currentSchemaVersion = 3;
 
   LibraryManifest({
     this.schemaVersion = currentSchemaVersion,
@@ -136,9 +140,12 @@ class LibraryManifest {
     DateTime? updatedAt,
     List<BookRecord>? books,
     List<TrustedDeviceRecord>? trustedDevices,
+    this.logicalClock = 0,
+    List<String>? appliedOperationIds,
   }) : updatedAt = updatedAt ?? DateTime.now().toUtc(),
        books = books ?? [],
-       trustedDevices = trustedDevices ?? [];
+       trustedDevices = trustedDevices ?? [],
+       appliedOperationIds = appliedOperationIds ?? [];
 
   final String accountId;
   final int schemaVersion;
@@ -150,6 +157,8 @@ class LibraryManifest {
   final DateTime updatedAt;
   final List<BookRecord> books;
   final List<TrustedDeviceRecord> trustedDevices;
+  final int logicalClock;
+  final List<String> appliedOperationIds;
 
   List<BookRecord> get visibleBooks => sortBooksForLibrary(books);
 
@@ -181,6 +190,8 @@ class LibraryManifest {
     DateTime? updatedAt,
     List<BookRecord>? books,
     List<TrustedDeviceRecord>? trustedDevices,
+    int? logicalClock,
+    List<String>? appliedOperationIds,
   }) {
     return LibraryManifest(
       schemaVersion: schemaVersion ?? this.schemaVersion,
@@ -193,6 +204,8 @@ class LibraryManifest {
       updatedAt: updatedAt ?? DateTime.now().toUtc(),
       books: books ?? this.books,
       trustedDevices: trustedDevices ?? this.trustedDevices,
+      logicalClock: logicalClock ?? this.logicalClock,
+      appliedOperationIds: appliedOperationIds ?? this.appliedOperationIds,
     );
   }
 
@@ -212,6 +225,8 @@ class LibraryManifest {
     'updatedAt': updatedAt.toIso8601String(),
     'trustedDevices': trustedDevices.map((d) => d.toJson()).toList(),
     'books': books.map((b) => b.toJson(includeLocalPath: includeLocalPaths)).toList(),
+    'logicalClock': logicalClock,
+    'appliedOperationIds': appliedOperationIds,
   };
 
   factory LibraryManifest.fromJson(Map<String, dynamic> json) => LibraryManifest(
@@ -228,10 +243,15 @@ class LibraryManifest {
         .map((item) => TrustedDeviceRecord.fromJson(Map<String, dynamic>.from(item)))
         .toList(),
     books: ((json['books'] as List?) ?? []).map((item) => BookRecord.fromJson(item as Map<String, dynamic>)).toList(),
+    logicalClock: (json['logicalClock'] as num?)?.toInt() ?? 0,
+    appliedOperationIds: ((json['appliedOperationIds'] as List?) ?? const []).map((item) => item.toString()).toList(),
   );
 }
 
 class SyncEnvelope {
+  static const currentProtocolVersion = 3;
+  static const minimumProtocolVersion = 2;
+
   SyncEnvelope({
     required this.type,
     required this.accountId,
@@ -239,7 +259,10 @@ class SyncEnvelope {
     required this.payload,
     DateTime? createdAt,
     this.relayQueueSeq,
-  }) : createdAt = createdAt ?? DateTime.now().toUtc();
+    this.protocolVersion = currentProtocolVersion,
+    String? operationId,
+  }) : createdAt = createdAt ?? DateTime.now().toUtc(),
+       operationId = operationId ?? _syncUuid.v4();
 
   final String type;
   final String accountId;
@@ -247,6 +270,8 @@ class SyncEnvelope {
   final Map<String, dynamic> payload;
   final DateTime createdAt;
   final int? relayQueueSeq;
+  final int protocolVersion;
+  final String operationId;
 
   Map<String, dynamic> toJson() => {
     'type': type,
@@ -255,6 +280,8 @@ class SyncEnvelope {
     'createdAt': createdAt.toIso8601String(),
     'payload': payload,
     if (relayQueueSeq != null) 'relayQueueSeq': relayQueueSeq,
+    'protocolVersion': protocolVersion,
+    'operationId': operationId,
   };
 
   factory SyncEnvelope.fromJson(Map<String, dynamic> json) => SyncEnvelope(
@@ -264,5 +291,7 @@ class SyncEnvelope {
     createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ?? DateTime.now().toUtc(),
     payload: Map<String, dynamic>.from(json['payload'] as Map),
     relayQueueSeq: (json['relayQueueSeq'] as num?)?.toInt(),
+    protocolVersion: (json['protocolVersion'] as num?)?.toInt() ?? minimumProtocolVersion,
+    operationId: json['operationId']?.toString() ?? 'legacy-${json['deviceId']}-${json['type']}-${json['createdAt']}',
   );
 }

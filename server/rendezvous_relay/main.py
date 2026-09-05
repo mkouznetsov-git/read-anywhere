@@ -13,7 +13,9 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.websockets import WebSocketState
 
-app = FastAPI(title="ReadArc Rendezvous Relay", version="0.3.2")
+from relay_store import RelayStore
+
+app = FastAPI(title="ReadArc Rendezvous Relay", version="0.4.0")
 
 # The relay never stores books or decrypted metadata. It keeps online websocket
 # rooms in RAM, caches the latest encrypted metadata snapshot in RAM, and since
@@ -25,10 +27,6 @@ _pairing_codes: Dict[str, dict] = {}
 # Sprint 27: durable offline queue for encrypted metadata events.
 # The relay stores only already encrypted envelopes and never sees plaintext
 # library data. Binary file chunks are never persisted here.
-_offline_queue: DefaultDict[str, List[dict]] = defaultdict(list)
-_offline_cursors: DefaultDict[str, Dict[str, int]] = defaultdict(dict)
-_offline_next_seq: DefaultDict[str, int] = defaultdict(int)
-
 _lock = asyncio.Lock()
 MAX_MESSAGE_BYTES = 1024 * 1024 * 16  # text metadata/control frames
 MAX_BINARY_MESSAGE_BYTES = 1024 * 1024 * 4  # encrypted binary file chunks
@@ -37,16 +35,23 @@ MAX_OFFLINE_EVENT_BYTES = MAX_CACHED_SNAPSHOT_BYTES
 MAX_OFFLINE_EVENTS_PER_ACCOUNT = 1000
 OFFLINE_QUEUE_TTL_SECONDS = int(os.environ.get("READARC_OFFLINE_QUEUE_TTL_SECONDS", str(30 * 24 * 60 * 60)))
 READARC_RELAY_DATA_DIR = Path(os.environ.get("READARC_RELAY_DATA_DIR", "/data"))
-OFFLINE_QUEUE_STORE = READARC_RELAY_DATA_DIR / "offline_queue.json"
+OFFLINE_QUEUE_STORE = READARC_RELAY_DATA_DIR / "offline_queue.sqlite3"
 PAIRING_TTL_SECONDS = 5 * 60
 QUEUEABLE_METADATA_TYPES = {
     "library_snapshot",
 }
+MIN_PROTOCOL_VERSION = 2
+CURRENT_PROTOCOL_VERSION = 3
+_relay_store = RelayStore(
+    OFFLINE_QUEUE_STORE,
+    max_events=MAX_OFFLINE_EVENTS_PER_ACCOUNT,
+    ttl_seconds=OFFLINE_QUEUE_TTL_SECONDS,
+)
 
 
 @app.on_event("startup")
 async def _startup() -> None:
-    _load_offline_queue_store()
+    _relay_store.initialize()
 
 
 @app.get("/")
@@ -76,21 +81,22 @@ async def debug_state(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": "not found"}, status_code=404)
     await _cleanup_expired_pairing_codes()
     async with _lock:
+        store_stats = _relay_store.account_stats()
         rooms = {
             account_id: {
                 "devices": sorted(device_ids.values()),
                 "cached_snapshots": len(_snapshot_cache.get(account_id, {})),
-                "offline_queue_events": len(_offline_queue.get(account_id, [])),
-                "offline_queue_next_seq": _offline_next_seq.get(account_id, 0),
+                "offline_queue_events": store_stats.get(account_id, {}).get("events", 0),
+                "offline_queue_next_seq": store_stats.get(account_id, {}).get("next_seq", 0),
             }
             for account_id, device_ids in _rooms.items()
         }
-        for account_id, queued in _offline_queue.items():
+        for account_id, stats in store_stats.items():
             rooms.setdefault(account_id, {
                 "devices": [],
                 "cached_snapshots": len(_snapshot_cache.get(account_id, {})),
-                "offline_queue_events": len(queued),
-                "offline_queue_next_seq": _offline_next_seq.get(account_id, 0),
+                "offline_queue_events": stats["events"],
+                "offline_queue_next_seq": stats["next_seq"],
             })
         active_pairing_codes = len(_pairing_codes)
     return JSONResponse({"ok": True, "rooms": rooms, "pairing_codes": active_pairing_codes})
@@ -255,6 +261,21 @@ async def websocket_endpoint(websocket: WebSocket, account_id: str, device_id: s
                     })
                     continue
 
+                protocol_version = decoded.get("protocolVersion", MIN_PROTOCOL_VERSION)
+                if not _is_int_like(protocol_version) or not (
+                    MIN_PROTOCOL_VERSION <= int(protocol_version) <= CURRENT_PROTOCOL_VERSION
+                ):
+                    await websocket.send_json({
+                        "type": "error",
+                        "code": "unsupported_protocol_version",
+                        "message": (
+                            f"Unsupported sync protocol version {protocol_version}; "
+                            f"supported range is {MIN_PROTOCOL_VERSION}-{CURRENT_PROTOCOL_VERSION}"
+                        ),
+                        "supportedProtocolVersions": [MIN_PROTOCOL_VERSION, CURRENT_PROTOCOL_VERSION],
+                    })
+                    continue
+
                 if message_type == "offline_queue_ack":
                     await _ack_offline_queue(account_id, device_id, decoded)
                     continue
@@ -305,65 +326,6 @@ async def websocket_endpoint(websocket: WebSocket, account_id: str, device_id: s
         })
 
 
-def _load_offline_queue_store() -> None:
-    if not OFFLINE_QUEUE_STORE.exists():
-        return
-    try:
-        decoded = json.loads(OFFLINE_QUEUE_STORE.read_text(encoding="utf-8"))
-        if not isinstance(decoded, dict):
-            return
-        accounts = decoded.get("accounts", {})
-        if not isinstance(accounts, dict):
-            return
-        for account_id, account_payload in accounts.items():
-            if not isinstance(account_payload, dict):
-                continue
-            queue = account_payload.get("queue", [])
-            cursors = account_payload.get("cursors", {})
-            next_seq = account_payload.get("nextSeq", 0)
-            if isinstance(queue, list):
-                _offline_queue[str(account_id)] = [item for item in queue if isinstance(item, dict)]
-            if isinstance(cursors, dict):
-                _offline_cursors[str(account_id)] = {
-                    str(device_id): int(cursor)
-                    for device_id, cursor in cursors.items()
-                    if _is_int_like(cursor)
-                }
-            if _is_int_like(next_seq):
-                _offline_next_seq[str(account_id)] = int(next_seq)
-            else:
-                _offline_next_seq[str(account_id)] = max(
-                    [int(item.get("seq", 0)) for item in _offline_queue.get(str(account_id), []) if _is_int_like(item.get("seq", 0))] or [0]
-                )
-        now = time.time()
-        for account_id in list(_offline_queue.keys()):
-            _prune_offline_queue_locked(account_id, now=now)
-    except Exception as exc:
-        print(f"ReadArc relay: could not load offline queue store: {exc}")
-
-
-def _save_offline_queue_store_locked() -> None:
-    try:
-        READARC_RELAY_DATA_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "version": 1,
-            "savedAt": time.time(),
-            "accounts": {
-                account_id: {
-                    "nextSeq": _offline_next_seq.get(account_id, 0),
-                    "cursors": _offline_cursors.get(account_id, {}),
-                    "queue": _offline_queue.get(account_id, []),
-                }
-                for account_id in sorted(set(_offline_queue.keys()) | set(_offline_cursors.keys()) | set(_offline_next_seq.keys()))
-            },
-        }
-        tmp = OFFLINE_QUEUE_STORE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-        tmp.replace(OFFLINE_QUEUE_STORE)
-    except Exception as exc:
-        print(f"ReadArc relay: could not save offline queue store: {exc}")
-
-
 def _is_int_like(value: Any) -> bool:
     try:
         int(value)
@@ -389,53 +351,12 @@ def _is_queueable_metadata_envelope(decoded: dict) -> bool:
 
 
 async def _append_offline_queue_message(account_id: str, decoded: dict) -> str:
-    now = time.time()
     async with _lock:
-        _offline_next_seq[account_id] = _offline_next_seq.get(account_id, 0) + 1
-        seq = _offline_next_seq[account_id]
-        enriched = dict(decoded)
-        enriched["relayQueueSeq"] = seq
-        enriched["relayQueuedAt"] = now
-        raw = json.dumps(enriched, ensure_ascii=False, separators=(",", ":"))
-        _offline_queue[account_id].append({
-            "seq": seq,
-            "createdAt": now,
-            "expiresAt": now + OFFLINE_QUEUE_TTL_SECONDS,
-            "deviceId": str(decoded.get("deviceId") or ""),
-            "type": str(decoded.get("type") or ""),
-            "raw": raw,
-        })
-        _prune_offline_queue_locked(account_id, now=now)
-        _save_offline_queue_store_locked()
-        return raw
-
-
-def _prune_offline_queue_locked(account_id: str, *, now: float | None = None) -> None:
-    now = now or time.time()
-    queue = [
-        item
-        for item in _offline_queue.get(account_id, [])
-        if float(item.get("expiresAt", 0) or 0) >= now
-    ]
-    if len(queue) > MAX_OFFLINE_EVENTS_PER_ACCOUNT:
-        queue = queue[-MAX_OFFLINE_EVENTS_PER_ACCOUNT:]
-    _offline_queue[account_id] = queue
-    if queue:
-        min_seq = int(queue[0].get("seq", 0) or 0)
-        cursors = _offline_cursors.get(account_id, {})
-        for device_id, cursor in list(cursors.items()):
-            if cursor < min_seq - 1:
-                cursors[device_id] = min_seq - 1
+        return _relay_store.append(account_id, decoded)
 
 
 def _offline_queue_messages_for_device_locked(account_id: str, device_id: str) -> List[str]:
-    _prune_offline_queue_locked(account_id)
-    cursor = int(_offline_cursors.get(account_id, {}).get(device_id, 0) or 0)
-    return [
-        str(item.get("raw") or "")
-        for item in _offline_queue.get(account_id, [])
-        if int(item.get("seq", 0) or 0) > cursor and str(item.get("deviceId") or "") != device_id and item.get("raw")
-    ]
+    return _relay_store.messages_for_device(account_id, device_id)
 
 
 async def _send_offline_queue_to_device(account_id: str, device_id: str, target: WebSocket) -> None:
@@ -452,11 +373,7 @@ async def _ack_offline_queue(account_id: str, device_id: str, decoded: dict) -> 
         return
     cursor_int = max(0, int(cursor))
     async with _lock:
-        current = int(_offline_cursors[account_id].get(device_id, 0) or 0)
-        if cursor_int > current:
-            _offline_cursors[account_id][device_id] = cursor_int
-            _prune_offline_queue_locked(account_id)
-            _save_offline_queue_store_locked()
+        _relay_store.acknowledge(account_id, device_id, cursor_int)
 
 
 async def _generate_pairing_code() -> str:

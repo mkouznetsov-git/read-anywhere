@@ -1,5 +1,9 @@
 # Архитектура ReadArc
 
+## Sync reliability boundary (Sprint 47)
+
+`SyncService` остаётся фасадом UI над `ConnectionManager`, `MetadataSyncEngine`, `PairingService`, `FileTransferManager` и `DirectTransferServer`. Sync protocol v3 использует отдельные Lamport revisions для metadata, прогресса и закладок, а также durable `operationId`. Relay хранит непрозрачную зашифрованную очередь событий в SQLite; локальный `LibraryRepository` остаётся транзакционной границей source of truth.
+
 ## Главный принцип
 
 ReadArc — local-first приложение. Каждое устройство хранит собственную копию метаданных аккаунта, прогресса, закладок и выбранных книг. Нет центральной базы с библиотекой и нет облачного хранения файлов книг.

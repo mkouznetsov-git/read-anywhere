@@ -66,6 +66,9 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Install pinned relay test dependencies
+        run: python3 -m pip install --disable-pip-version-check -r server/rendezvous_relay/requirements-test.txt
+
       - name: Run strict quality gate
         run: bash ./scripts/quality_gate.sh
 

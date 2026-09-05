@@ -17,7 +17,11 @@ while IFS= read -r script; do
 done < <(find scripts -maxdepth 1 -type f -name '*.sh' -print | sort)
 
 echo "-- Relay syntax"
-python3 -c 'from pathlib import Path; p = Path("server/rendezvous_relay/main.py"); compile(p.read_text(), str(p), "exec")'
+python3 -m py_compile server/rendezvous_relay/main.py server/rendezvous_relay/relay_store.py
+
+echo "-- Relay unit and real two-client integration tests"
+PYTHONPATH="$ROOT_DIR/server/rendezvous_relay" \
+  python3 -m unittest discover -s server/rendezvous_relay/tests -v 2>&1 | tee "$RESULTS_DIR/relay-test.log"
 
 echo "-- Legacy naming guard"
 ACTIVE_PATHS=(
