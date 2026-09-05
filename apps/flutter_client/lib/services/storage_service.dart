@@ -16,9 +16,9 @@ import '../models/sync_revision.dart';
 import 'library_repository.dart';
 
 class StorageService {
-  StorageService({LibraryRepository? repository, LibrarySecretStore? secretStore})
-    : _repositoryOverride = repository,
-      _secretStore = secretStore;
+  StorageService({LibraryRepository? repository, LibrarySecretStore? secretStore}) : this._(repository, secretStore);
+
+  StorageService._(this._repositoryOverride, this._secretStore);
 
   final _uuid = const Uuid();
   LibraryRepository? _repositoryOverride;

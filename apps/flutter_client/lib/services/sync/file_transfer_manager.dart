@@ -55,7 +55,9 @@ class PreparedFileTransfer {
 
 /// Persists transfer intent so a new SyncService can resume the same `.part` file.
 class FileTransferManager {
-  FileTransferManager({required Future<Directory> Function() appDirectory}) : _appDirectory = appDirectory;
+  FileTransferManager({required Future<Directory> Function() appDirectory}) : this._(appDirectory);
+
+  FileTransferManager._(this._appDirectory);
 
   final Future<Directory> Function() _appDirectory;
 
