@@ -239,6 +239,7 @@ class SyncService {
   bool _manualDisconnect = true;
   bool _reconnectInProgress = false;
   bool _relayUnavailableLogged = false;
+  bool _disposed = false;
   int _reconnectAttempt = 0;
   int _healthMisses = 0;
   String? _lastRelayUrl;
@@ -249,6 +250,7 @@ class SyncService {
   /// succeed. This is used on app startup when autoConnect=true and the
   /// Personal Hub/relay is still offline.
   void startAutoReconnect({required String relayUrl}) {
+    if (_disposed) return;
     if (relayUrl.trim().isEmpty || _manualDisconnect == false && _lastRelayUrl == relayUrl && _reconnectTimer != null) {
       return;
     }
@@ -263,6 +265,7 @@ class SyncService {
   }
 
   Future<void> connect({required String relayUrl}) async {
+    if (_disposed) throw StateError('SyncService уже остановлен');
     _manualDisconnect = false;
     _lastRelayUrl = relayUrl;
     _reconnectTimer?.cancel();
@@ -449,7 +452,7 @@ class SyncService {
     for (final delay in const [Duration(milliseconds: 600), Duration(seconds: 2), Duration(seconds: 5)]) {
       unawaited(
         Future<void>.delayed(delay, () async {
-          if (_client != client || !state.value.connected) return;
+          if (_disposed || _client != client || !state.value.connected) return;
           await pullOfflineQueue(reason: 'startup_retry_${delay.inMilliseconds}ms');
           await refreshMetadata(reason: 'startup_retry_${delay.inMilliseconds}ms');
         }),
@@ -523,7 +526,7 @@ class SyncService {
     for (final delay in const [Duration(seconds: 2), Duration(seconds: 8)]) {
       unawaited(
         Future<void>.delayed(delay, () async {
-          if (!state.value.connected || _manualDisconnect) return;
+          if (_disposed || !state.value.connected || _manualDisconnect) return;
           await broadcastLibrarySnapshot(reason: '${reason}_retry_${delay.inSeconds}s');
         }),
       );
@@ -1083,7 +1086,7 @@ class SyncService {
       role: 'device',
       publicKey: acceptedDevicePublicKey,
     );
-    _manifestChanges.add(updated);
+    _emitManifest(updated);
     _appendLog('Устройство снова доверено через QR: $acceptedDeviceName');
     await broadcastLibrarySnapshot(reason: 'pairing_claimed_reauthorized_device');
   }
@@ -1126,7 +1129,7 @@ class SyncService {
     if (saved.trustedDevices.any((device) => device.isRevoked)) {
       _directTransferServer.revokeAllShares();
     }
-    _manifestChanges.add(saved);
+    _emitManifest(saved);
     if (saved.isCurrentDeviceRevoked) {
       _appendLog('Доступ этого устройства отозван. Синхронизация остановлена.');
       await disconnect(manual: true);
@@ -1182,7 +1185,7 @@ class SyncService {
       _appendLog('Файл больше не доступен на этом устройстве: ${book.title}');
       try {
         final updated = await _storage.removeLocalBookCopy(book.id);
-        _manifestChanges.add(updated);
+        _emitManifest(updated);
         await broadcastLibrarySnapshot(reason: 'file_missing_on_source');
       } catch (_) {
         // Best effort: transfer must still be terminated for the requester.
@@ -1354,7 +1357,7 @@ class SyncService {
   ) async {
     try {
       final updated = await _storage.removeLocalBookCopy(bookId);
-      _manifestChanges.add(updated);
+      _emitManifest(updated);
       await broadcastLibrarySnapshot(reason: 'file_unavailable_on_source');
     } catch (_) {
       // The transfer error is more important than local manifest cleanup here.
@@ -1821,7 +1824,7 @@ class SyncService {
     await _fileTransferManager.markCompleted(session.bookId);
 
     final manifest = await _storage.markBookDownloaded(bookId: session.bookId, localPath: destination.path);
-    _manifestChanges.add(manifest);
+    _emitManifest(manifest);
     _downloadsByTransferId.remove(session.transferId);
 
     _clearTransferForBook(session.bookId);
@@ -2203,16 +2206,29 @@ class SyncService {
   }
 
   void _appendLog(String line) {
+    if (_disposed) return;
     final timestamp = DateTime.now().toLocal().toIso8601String().substring(11, 19);
     final updated = ['[$timestamp] $line', ...state.value.logLines];
     _setState(state.value.copyWith(logLines: updated.take(30).toList()));
   }
 
   void _setState(SyncStateSnapshot snapshot) {
+    if (_disposed) return;
     state.value = snapshot;
   }
 
+  void _emitManifest(LibraryManifest manifest) {
+    if (_disposed || _manifestChanges.isClosed) return;
+    _manifestChanges.add(manifest);
+  }
+
   Future<void> dispose() async {
+    if (_disposed) return;
+    _disposed = true;
+    for (final session in _downloadsByTransferId.values) {
+      session.watchdog?.cancel();
+    }
+    _downloadsByTransferId.clear();
     await disconnect(manual: true);
     _reconnectTimer?.cancel();
     await _directTransferServer.dispose();
