@@ -1,1199 +1,14 @@
-import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
-import 'dart:math' as math;
-
-import 'package:crypto/crypto.dart';
-import 'package:flutter/foundation.dart';
-import 'package:path/path.dart' as p;
-import 'package:uuid/uuid.dart';
-
-import '../../models/book.dart';
-import '../../models/manifest.dart';
-import '../../models/sync_settings.dart';
-import '../storage_service.dart';
-import 'e2e_crypto.dart';
-import 'merge.dart';
-import 'relay_client.dart';
-
-const _uuid = Uuid();
-const _defaultChunkSize = 1024 * 1024; // Binary chunks: 1 MiB keeps Tailscale/Android stable and reduces ACK overhead.
-const _downloadOfferTimeout = Duration(seconds: 24);
-const _downloadIdleTimeout = Duration(seconds: 28);
-const _directStreamIdleTimeout = Duration(seconds: 18);
-
-class PairingInvite {
-  const PairingInvite({
-    required this.code,
-    required this.relayUrl,
-    required this.expiresAt,
-    required this.inviteLink,
-    required this.ownerDeviceName,
-    required this.accountEncryptionKey,
-  });
-
-  final String code;
-  final String relayUrl;
-  final DateTime expiresAt;
-  final String inviteLink;
-  final String ownerDeviceName;
-  final String accountEncryptionKey;
-
-  String get displayCode => code;
-
-  bool get isExpired => DateTime.now().toUtc().isAfter(expiresAt);
-
-  bool get isNearExpiry => DateTime.now().toUtc().add(const Duration(seconds: 20)).isAfter(expiresAt);
-}
-
-class PairingClaimResult {
-  const PairingClaimResult({
-    required this.accountId,
-    required this.relayUrl,
-    required this.ownerDeviceId,
-    required this.ownerDeviceName,
-    required this.accountEncryptionKey,
-  });
-
-  final String accountId;
-  final String relayUrl;
-  final String ownerDeviceId;
-  final String ownerDeviceName;
-  final String accountEncryptionKey;
-}
-
-class _ParsedPairingInput {
-  const _ParsedPairingInput({
-    required this.code,
-    this.relayUrl,
-    this.accountEncryptionKey,
-    this.ownerDeviceName,
-    this.ownerDevicePublicKey,
-    this.accountId,
-    this.ownerDeviceId,
-    this.expiresAt,
-  });
-
-  final String code;
-  final String? relayUrl;
-  final String? accountEncryptionKey;
-  final String? ownerDeviceName;
-  final String? ownerDevicePublicKey;
-  final String? accountId;
-  final String? ownerDeviceId;
-  final DateTime? expiresAt;
-
-  bool get hasEmbeddedAccountInvite =>
-      (accountId?.isNotEmpty ?? false) &&
-      (ownerDeviceId?.isNotEmpty ?? false) &&
-      (accountEncryptionKey?.isNotEmpty ?? false);
-
-  bool get embeddedInviteExpired => expiresAt != null && DateTime.now().toUtc().isAfter(expiresAt!);
-}
-
-class FileTransferSnapshot {
-  const FileTransferSnapshot({
-    required this.transferId,
-    required this.bookId,
-    required this.direction,
-    required this.statusText,
-    this.fileName = '',
-    this.peerDeviceId = '',
-    this.progressPercent = 0,
-    this.transferredBytes = 0,
-    this.totalBytes = 0,
-    this.active = false,
-    this.error,
-  });
-
-  final String transferId;
-  final String bookId;
-  final String direction; // download | upload
-  final String statusText;
-  final String fileName;
-  final String peerDeviceId;
-  final double progressPercent;
-  final int transferredBytes;
-  final int totalBytes;
-  final bool active;
-  final String? error;
-
-  bool get hasError => error != null && error!.isNotEmpty;
-
-  FileTransferSnapshot copyWith({
-    String? statusText,
-    String? fileName,
-    String? peerDeviceId,
-    double? progressPercent,
-    int? transferredBytes,
-    int? totalBytes,
-    bool? active,
-    String? error,
-    bool clearError = false,
-  }) {
-    return FileTransferSnapshot(
-      transferId: transferId,
-      bookId: bookId,
-      direction: direction,
-      statusText: statusText ?? this.statusText,
-      fileName: fileName ?? this.fileName,
-      peerDeviceId: peerDeviceId ?? this.peerDeviceId,
-      progressPercent: progressPercent ?? this.progressPercent,
-      transferredBytes: transferredBytes ?? this.transferredBytes,
-      totalBytes: totalBytes ?? this.totalBytes,
-      active: active ?? this.active,
-      error: clearError ? null : error ?? this.error,
-    );
-  }
-}
-
-class SyncStateSnapshot {
-  const SyncStateSnapshot({
-    required this.connected,
-    required this.statusText,
-    this.relayUrl,
-    this.sentEvents = 0,
-    this.receivedEvents = 0,
-    this.logLines = const [],
-    this.fileTransfers = const {},
-    this.onlinePeerDeviceIds = const [],
-  });
-
-  final bool connected;
-  final String statusText;
-  final String? relayUrl;
-  final int sentEvents;
-  final int receivedEvents;
-  final List<String> logLines;
-  final Map<String, FileTransferSnapshot> fileTransfers;
-  final List<String> onlinePeerDeviceIds;
-
-  SyncStateSnapshot copyWith({
-    bool? connected,
-    String? statusText,
-    String? relayUrl,
-    int? sentEvents,
-    int? receivedEvents,
-    List<String>? logLines,
-    Map<String, FileTransferSnapshot>? fileTransfers,
-    List<String>? onlinePeerDeviceIds,
-  }) {
-    return SyncStateSnapshot(
-      connected: connected ?? this.connected,
-      statusText: statusText ?? this.statusText,
-      relayUrl: relayUrl ?? this.relayUrl,
-      sentEvents: sentEvents ?? this.sentEvents,
-      receivedEvents: receivedEvents ?? this.receivedEvents,
-      logLines: logLines ?? this.logLines,
-      fileTransfers: fileTransfers ?? this.fileTransfers,
-      onlinePeerDeviceIds: onlinePeerDeviceIds ?? this.onlinePeerDeviceIds,
-    );
-  }
-
-  FileTransferSnapshot? downloadForBook(String bookId) => fileTransfers[bookId];
-
-  bool hasOnlineStorageFor(BookRecord book) {
-    final online = onlinePeerDeviceIds.toSet();
-    return book.availableOnDeviceIds.any(online.contains);
-  }
-}
-
-class SyncService {
-  SyncService(this._storage);
-
-  final StorageService _storage;
-  final state = ValueNotifier<SyncStateSnapshot>(
-    const SyncStateSnapshot(connected: false, statusText: 'ĞĞµ Ğ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾'),
-  );
-
-  RelayClient? _client;
-  StreamSubscription<void>? _incomingSubscription;
-  StreamSubscription<void>? _binarySubscription;
-  final _manifestChanges = StreamController<LibraryManifest>.broadcast();
-  final _downloadsByTransferId = <String, _DownloadSession>{};
-  final _uploadAckWaiters = <String, Completer<void>>{};
-  final _uploadLocks = <String>{};
-  final _cancelledTransfers = <String>{};
-  final _seenSecureEventIds = <String, DateTime>{};
-  // Sprint 27: relay can keep encrypted metadata events for offline devices.
-  // Keep replay protection aligned with the relay TTL while still rejecting
-  // duplicate eventIds inside the active window.
-  static const _replayWindow = Duration(days: 30);
-
-  Timer? _reconnectTimer;
-  Timer? _healthTimer;
-  Timer? _metadataRefreshTimer;
-  bool _manualDisconnect = true;
-  bool _reconnectInProgress = false;
-  bool _relayUnavailableLogged = false;
-  int _reconnectAttempt = 0;
-  int _healthMisses = 0;
-  String? _lastRelayUrl;
-
-  HttpServer? _directFileServer;
-  int? _directFileServerPort;
-  final _directShares = <String, _DirectFileShare>{};
-
-  Stream<LibraryManifest> get manifestChanges => _manifestChanges.stream;
-
-  /// Start persistent reconnect loop without requiring the first connection to
-  /// succeed. This is used on app startup when autoConnect=true and the
-  /// Personal Hub/relay is still offline.
-  void startAutoReconnect({required String relayUrl}) {
-    if (relayUrl.trim().isEmpty || _manualDisconnect == false && _lastRelayUrl == relayUrl && _reconnectTimer != null) {
-      return;
-    }
-    _manualDisconnect = false;
-    _lastRelayUrl = relayUrl;
-    _reconnectAttempt = 0;
-    _appendRelayUnavailableLogOnce();
-    _setState(
-      state.value.copyWith(connected: false, relayUrl: relayUrl, statusText: 'Relay Ğ½ĞµĞ´Ğ¾ÑÑ‚ÑƒĞ¿ĞµĞ½. ĞŸĞµÑ€ĞµĞ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡Ğ°ĞµĞ¼ÑÑ...'),
-    );
-    _scheduleReconnect(immediate: true);
-  }
-
-  Future<void> connect({required String relayUrl}) async {
-    _manualDisconnect = false;
-    _lastRelayUrl = relayUrl;
-    _reconnectTimer?.cancel();
-    _reconnectTimer = null;
-    await disconnect(manual: false);
-    _setState(state.value.copyWith(connected: false, statusText: 'ĞŸĞ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¸Ğµ...', relayUrl: relayUrl));
-
-    final manifest = await _storage.loadManifest();
-    if (manifest.isCurrentDeviceRevoked) {
-      _setState(
-        state.value.copyWith(connected: false, statusText: 'Ğ”Ğ¾ÑÑ‚ÑƒĞ¿ ÑÑ‚Ğ¾Ğ³Ğ¾ ÑƒÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğ° Ğ¾Ñ‚Ğ¾Ğ·Ğ²Ğ°Ğ½', relayUrl: relayUrl),
-      );
-      throw StateError('Ğ”Ğ¾ÑÑ‚ÑƒĞ¿ ÑÑ‚Ğ¾Ğ³Ğ¾ ÑƒÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğ° Ğº Ğ°ĞºĞºĞ°ÑƒĞ½Ñ‚Ñƒ Ğ¾Ñ‚Ğ¾Ğ·Ğ²Ğ°Ğ½');
-    }
-    await _probeRelayHealth(relayUrl, timeout: const Duration(seconds: 5));
-    final uri = Uri.parse(relayUrl.trim());
-    final client = RelayClient(relayUri: uri, accountId: manifest.accountId, deviceId: manifest.deviceId);
-    _client = client;
-    _incomingSubscription = client.incoming
-        .asyncMap((envelope) async {
-          await _handleIncomingEnvelope(envelope);
-        })
-        .listen(
-          (_) {},
-          onError: (error) {
-            unawaited(_handleRelayDisconnected(error));
-          },
-        );
-    _binarySubscription = client.binaryIncoming
-        .asyncMap((message) async {
-          await _handleIncomingBinaryFrame(message);
-        })
-        .listen(
-          (_) {},
-          onError: (error) {
-            unawaited(_handleRelayDisconnected(error));
-          },
-        );
-
-    try {
-      await client.connect();
-    } catch (error) {
-      await disconnect(manual: false);
-      if (!_reconnectInProgress) {
-        _appendRelayUnavailableLogOnce();
-        _scheduleReconnect();
-      }
-      rethrow;
-    }
-    _reconnectAttempt = 0;
-    _healthMisses = 0;
-    _relayUnavailableLogged = false;
-    _appendLog('ĞŸĞ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾ Ğº $relayUrl');
-    _setState(state.value.copyWith(connected: true, statusText: 'ĞŸĞ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾'));
-    _startHealthMonitor(relayUrl);
-    _startMetadataRefreshLoop(client);
-    unawaited(_ensureDirectFileServer());
-
-    await pullOfflineQueue(reason: 'connected');
-    await refreshMetadata(reason: 'connected');
-    _scheduleStartupMetadataRefresh(client);
-  }
-
-  Future<void> disconnect({bool manual = true}) async {
-    _healthTimer?.cancel();
-    _healthTimer = null;
-    _metadataRefreshTimer?.cancel();
-    _metadataRefreshTimer = null;
-    if (manual) _healthMisses = 0;
-    if (manual) {
-      _manualDisconnect = true;
-      _reconnectTimer?.cancel();
-      _reconnectTimer = null;
-    }
-    await _incomingSubscription?.cancel();
-    _incomingSubscription = null;
-    await _binarySubscription?.cancel();
-    _binarySubscription = null;
-    final client = _client;
-    _client = null;
-    await client?.dispose();
-    if (manual && state.value.connected) {
-      _appendLog('ĞÑ‚ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾');
-    }
-    _setState(
-      state.value.copyWith(
-        connected: false,
-        statusText: manual ? 'ĞĞµ Ğ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾' : 'Relay Ğ½ĞµĞ´Ğ¾ÑÑ‚ÑƒĞ¿ĞµĞ½. ĞŸĞµÑ€ĞµĞ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡Ğ°ĞµĞ¼ÑÑ...',
-        onlinePeerDeviceIds: const [],
-      ),
-    );
-  }
-
-  Future<void> _handleRelayDisconnected(Object error) async {
-    if (_manualDisconnect) return;
-    await disconnect(manual: false);
-    _appendRelayUnavailableLogOnce();
-    _scheduleReconnect();
-  }
-
-  void _scheduleReconnect({bool immediate = false}) {
-    if (_manualDisconnect || _reconnectInProgress) return;
-    final relayUrl = _lastRelayUrl;
-    if (relayUrl == null || relayUrl.trim().isEmpty) return;
-    _reconnectTimer?.cancel();
-    final seconds = immediate ? 0 : _reconnectDelaySeconds(_reconnectAttempt);
-    _setState(
-      state.value.copyWith(
-        connected: false,
-        statusText: seconds <= 0 ? 'Relay Ğ½ĞµĞ´Ğ¾ÑÑ‚ÑƒĞ¿ĞµĞ½. ĞŸĞµÑ€ĞµĞ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡Ğ°ĞµĞ¼ÑÑ...' : 'Relay Ğ½ĞµĞ´Ğ¾ÑÑ‚ÑƒĞ¿ĞµĞ½. ĞŸĞ¾Ğ²Ñ‚Ğ¾Ñ€ Ñ‡ĞµÑ€ĞµĞ· $secondsÑ',
-        relayUrl: relayUrl,
-      ),
-    );
-    _reconnectTimer = Timer(Duration(seconds: seconds), () {
-      unawaited(_attemptReconnect(relayUrl));
-    });
-  }
-
-  int _reconnectDelaySeconds(int attempt) {
-    // Keep retry/health traffic modest, but detect recovery quickly.
-    // After the first two quick attempts we probe every 5 seconds.
-    const delays = [2, 2, 5, 5, 5, 5];
-    return delays[attempt.clamp(0, delays.length - 1).toInt()];
-  }
-
-  void _appendRelayUnavailableLogOnce() {
-    if (_relayUnavailableLogged) return;
-    _relayUnavailableLogged = true;
-    _appendLog('Relay Ğ½ĞµĞ´Ğ¾ÑÑ‚ÑƒĞ¿ĞµĞ½. ĞĞ²Ñ‚Ğ¾Ğ¿ĞµÑ€ĞµĞ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¸Ğµ Ğ²ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾.');
-  }
-
-  void _startHealthMonitor(String relayUrl) {
-    _healthTimer?.cancel();
-    _healthTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      unawaited(_checkRelayHealth(relayUrl));
-    });
-  }
-
-  Future<void> _checkRelayHealth(String relayUrl) async {
-    if (_manualDisconnect || !state.value.connected) return;
-    try {
-      await _probeRelayHealth(relayUrl, timeout: const Duration(seconds: 5));
-      if (_healthMisses != 0) {
-        _healthMisses = 0;
-        _setState(state.value.copyWith(statusText: 'ĞŸĞ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾'));
-      }
-    } catch (error) {
-      _healthMisses += 1;
-      // A single failed HTTP probe does not mean the websocket relay is down:
-      // mobile radios, DNS caches and captive network transitions can drop one
-      // request while the relay itself is healthy. Disconnect only after a few
-      // consecutive misses.
-      if (_healthMisses < 3) {
-        _setState(state.value.copyWith(statusText: 'ĞŸĞ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¾. ĞŸÑ€Ğ¾Ğ²ĞµÑ€ÑĞµĞ¼ relay...'));
-        return;
-      }
-      await _handleRelayDisconnected(error);
-    }
-  }
-
-  Future<void> _probeRelayHealth(String relayUrl, {required Duration timeout}) async {
-    final uri = _buildEndpointUri(relayUrl, '/health');
-    final client = HttpClient()..connectionTimeout = timeout;
-    try {
-      final request = await client.getUrl(uri).timeout(timeout);
-      final response = await request.close().timeout(timeout);
-      await response.drain().timeout(timeout);
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw StateError('HTTP ${response.statusCode}');
-      }
-    } finally {
-      client.close(force: true);
-    }
-  }
-
-  Future<void> _attemptReconnect(String relayUrl) async {
-    if (_manualDisconnect || _reconnectInProgress) return;
-    _reconnectInProgress = true;
-    try {
-      _reconnectAttempt += 1;
-      await connect(relayUrl: relayUrl);
-      _appendLog('ĞĞ²Ñ‚Ğ¾Ğ¿ĞµÑ€ĞµĞ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¸Ğµ Ğ²Ñ‹Ğ¿Ğ¾Ğ»Ğ½ĞµĞ½Ğ¾');
-    } catch (_) {
-      // ĞĞµ Ğ¿Ğ¸ÑˆĞµĞ¼ ĞºĞ°Ğ¶Ğ´ÑƒÑ Ğ½ĞµÑƒĞ´Ğ°Ñ‡Ğ½ÑƒÑ Ğ¿Ğ¾Ğ¿Ñ‹Ñ‚ĞºÑƒ Ğ² Ğ¶ÑƒÑ€Ğ½Ğ°Ğ»: Ğ¸Ğ½Ğ°Ñ‡Ğµ Ğ¾Ğ½ Ğ±Ñ‹ÑÑ‚Ñ€Ğ¾
-      // Ğ¿Ñ€ĞµĞ²Ñ€Ğ°Ñ‰Ğ°ĞµÑ‚ÑÑ Ğ² ÑˆÑƒĞ¼ Ğ¿Ñ€Ğ¸ Ğ²Ñ‹ĞºĞ»ÑÑ‡ĞµĞ½Ğ½Ğ¾Ğ¼ hub/relay. Ğ¢ĞµĞºÑƒÑ‰Ğ¸Ğ¹ ÑÑ‚Ğ°Ñ‚ÑƒÑ
-      // Ğ²Ğ¸Ğ´ĞµĞ½ Ğ¿Ğ¾ Ğ¸ĞºĞ¾Ğ½ĞºĞµ Ğ¸ ÑÑ‚Ñ€Ğ¾ĞºĞµ ÑĞ¾ÑÑ‚Ğ¾ÑĞ½Ğ¸Ñ.
-      _reconnectInProgress = false;
-      _scheduleReconnect();
-      return;
-    }
-    _reconnectInProgress = false;
-  }
-
-  Future<void> refreshMetadata({required String reason}) async {
-    await requestLibrarySnapshot(reason: '$reason/request');
-    await broadcastLibrarySnapshot(reason: '$reason/snapshot');
-  }
-
-  void _scheduleStartupMetadataRefresh(RelayClient client) {
-    for (final delay in const [Duration(milliseconds: 600), Duration(seconds: 2), Duration(seconds: 5)]) {
-      unawaited(
-        Future<void>.delayed(delay, () async {
-          if (_client != client || !state.value.connected) return;
-          await pullOfflineQueue(reason: 'startup_retry_${delay.inMilliseconds}ms');
-          await refreshMetadata(reason: 'startup_retry_${delay.inMilliseconds}ms');
-        }),
-      );
-    }
-  }
-
-  void _startMetadataRefreshLoop(RelayClient client) {
-    _metadataRefreshTimer?.cancel();
-    _metadataRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (_client != client || !state.value.connected || _manualDisconnect) return;
-      // Sprint 43 Sync v2: periodic health/queue maintenance must not spam peers
-      // with snapshot requests. Repeated requests can resurrect stale queued
-      // metadata from just-paired or empty devices and make the UI look as if the
-      // library was lost. Snapshot requests remain explicit: on connect, after
-      // pairing, and after a guarded/destructive snapshot is rejected.
-      unawaited(pullOfflineQueue(reason: 'periodic'));
-    });
-  }
-
-  Future<bool> pullOfflineQueue({required String reason}) async {
-    final client = _client;
-    if (client == null || !state.value.connected) return false;
-    try {
-      client.sendControl({
-        'type': 'offline_queue_pull',
-        'accountId': client.accountId,
-        'deviceId': client.deviceId,
-        'payload': {'reason': reason},
-      });
-      return true;
-    } catch (error) {
-      _appendLog('ĞĞµ ÑƒĞ´Ğ°Ğ»Ğ¾ÑÑŒ Ğ·Ğ°Ğ¿Ñ€Ğ¾ÑĞ¸Ñ‚ÑŒ offline queue: $error');
-      return false;
-    }
-  }
-
-  Future<bool> broadcastLibrarySnapshot({required String reason}) async {
-    final client = _client;
-    if (client == null || !state.value.connected) return false;
-
-    final manifest = await _storage.touchCurrentDevice();
-    final envelope = SyncEnvelope(
-      type: 'library_snapshot',
-      accountId: manifest.accountId,
-      deviceId: manifest.deviceId,
-      payload: {'reason': reason, 'manifest': manifest.toSyncJson()},
-    );
-
-    final sent = await _sendEnvelope(envelope, logLabel: 'ĞÑ‚Ğ¿Ñ€Ğ°Ğ²Ğ»ĞµĞ½ E2E snapshot: $reason');
-    if (_shouldRetrySnapshotBroadcast(reason)) {
-      _scheduleSnapshotBroadcastRetries(reason: reason);
-    }
-    return sent;
-  }
-
-  bool _shouldRetrySnapshotBroadcast(String reason) {
-    if (reason.contains('_retry_')) return false;
-    return reason.contains('book_imported') ||
-        reason.contains('local_copy_removed') ||
-        reason.contains('book_deleted') ||
-        reason.contains('trusted_device_revoked') ||
-        reason.contains('pairing_claimed') ||
-        reason.contains('device_name_changed');
-  }
-
-  void _scheduleSnapshotBroadcastRetries({required String reason}) {
-    for (final delay in const [Duration(seconds: 2), Duration(seconds: 8)]) {
-      unawaited(
-        Future<void>.delayed(delay, () async {
-          if (!state.value.connected || _manualDisconnect) return;
-          await broadcastLibrarySnapshot(reason: '${reason}_retry_${delay.inSeconds}s');
-        }),
-      );
-    }
-  }
-
-  Future<bool> requestLibrarySnapshot({required String reason}) async {
-    final manifest = await _storage.loadManifest();
-    return _sendEnvelope(
-      SyncEnvelope(
-        type: 'library_snapshot_requested',
-        accountId: manifest.accountId,
-        deviceId: manifest.deviceId,
-        payload: {'reason': reason, 'requestingDeviceId': manifest.deviceId},
-      ),
-      logLabel: 'Ğ—Ğ°Ğ¿Ñ€Ğ¾ÑˆĞµĞ½ snapshot: $reason',
-    );
-  }
-
-  Future<PairingInvite> createPairingInvite({
-    required SyncSettings settings,
-    Duration ttl = const Duration(minutes: 5),
-  }) async {
-    _validateEndpointForPairing(settings);
-    final manifest = await _storage.loadManifest();
-    final uri = _buildEndpointUri(settings.effectiveRelayUrl, '/pairing/start');
-    final response = await _postJson(uri, {
-      'accountId': manifest.accountId,
-      'ownerDeviceId': manifest.deviceId,
-      'ownerDeviceName': manifest.deviceName,
-      'ownerDevicePublicKey': manifest.deviceSigningPublicKey,
-      // The short-code pairing flow stores the one-time invite payload on the
-      // official relay until it is claimed or expires.
-      'accountEncryptionKey': manifest.accountEncryptionKey,
-      'relayUrl': settings.effectiveRelayUrl,
-      'expiresSeconds': ttl.inSeconds,
-    });
-    if (response['ok'] != true) {
-      throw StateError(response['message']?.toString() ?? 'Relay Ğ½Ğµ ÑĞ¾Ğ·Ğ´Ğ°Ğ» pairing-ĞºĞ¾Ğ´');
-    }
-    final code = _normalizePairingCode(response['code']?.toString() ?? '');
-    if (code.length != 6) {
-      throw StateError('Relay Ğ²ĞµÑ€Ğ½ÑƒĞ» Ğ½ĞµĞºĞ¾Ñ€Ñ€ĞµĞºÑ‚Ğ½Ñ‹Ğ¹ pairing-ĞºĞ¾Ğ´');
-    }
-    final expiresAtSeconds = (response['expiresAt'] as num?)?.toDouble();
-    final expiresAt = expiresAtSeconds == null
-        ? DateTime.now().toUtc().add(ttl)
-        : DateTime.fromMillisecondsSinceEpoch((expiresAtSeconds * 1000).round(), isUtc: true);
-    // QR and manual entry now carry only the short one-time code. The relay
-    // stores the full invite payload for a few minutes and returns it from
-    // /pairing/claim, so users do not have to scan/type long unreadable links.
-    final inviteLink = code;
-    _appendLog('Ğ¡Ğ¾Ğ·Ğ´Ğ°Ğ½ pairing-ĞºĞ¾Ğ´ $code');
-    return PairingInvite(
-      code: code,
-      relayUrl: settings.effectiveRelayUrl,
-      expiresAt: expiresAt,
-      inviteLink: inviteLink,
-      ownerDeviceName: manifest.deviceName,
-      accountEncryptionKey: manifest.accountEncryptionKey,
-    );
-  }
-
-  Future<PairingClaimResult> claimPairingInvite({required String input, required SyncSettings fallbackSettings}) async {
-    final parsed = _parsePairingInput(input);
-    final effectiveSettings = _settingsForClaimedRelayUrl(
-      parsed.relayUrl ?? fallbackSettings.effectiveRelayUrl,
-      fallbackSettings,
-    );
-    _validateEndpointForPairing(effectiveSettings);
-    final relayUrl = effectiveSettings.effectiveRelayUrl;
-
-    var local = await _storage.loadManifest();
-    if (local.isCurrentDeviceRevoked) {
-      local = await _storage.rotateCurrentDeviceIdentityForPairing();
-      _appendLog('Ğ¡Ğ¾Ğ·Ğ´Ğ°Ğ½Ğ° Ğ½Ğ¾Ğ²Ğ°Ñ Ğ¸Ğ´ĞµĞ½Ñ‚Ğ¸Ñ‡Ğ½Ğ¾ÑÑ‚ÑŒ ÑƒÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğ° Ğ´Ğ»Ñ Ğ¿Ğ¾Ğ²Ñ‚Ğ¾Ñ€Ğ½Ğ¾Ğ³Ğ¾ Ğ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¸Ñ Ğ¿Ğ¾ÑĞ»Ğµ Ğ¾Ñ‚Ğ·Ñ‹Ğ²Ğ° Ğ´Ğ¾ÑÑ‚ÑƒĞ¿Ğ°.');
-    }
-
-    final uri = _buildEndpointUri(relayUrl, '/pairing/claim');
-    Map<String, dynamic>? response;
-    Object? claimError;
-    try {
-      response = await _postJson(uri, {
-        'code': parsed.code,
-        'deviceId': local.deviceId,
-        'deviceName': local.deviceName,
-        'devicePublicKey': local.deviceSigningPublicKey,
-      });
-      if (response['ok'] != true) {
-        throw StateError(response['message']?.toString() ?? 'Pairing-ĞºĞ¾Ğ´ Ğ½Ğµ Ğ¿Ñ€Ğ¸Ğ½ÑÑ‚ relay');
-      }
-    } catch (error) {
-      claimError = error;
-      if (!parsed.hasEmbeddedAccountInvite || parsed.embeddedInviteExpired) {
-        rethrow;
-      }
-      _appendLog('Relay Ğ½Ğµ Ğ¿Ñ€Ğ¸Ğ½ÑĞ» ĞºĞ¾Ñ€Ğ¾Ñ‚ĞºĞ¸Ğ¹ ĞºĞ¾Ğ´: $error');
-    }
-
-    final accountId = response?['accountId']?.toString() ?? parsed.accountId ?? '';
-    final ownerDeviceId = response?['ownerDeviceId']?.toString() ?? parsed.ownerDeviceId ?? '';
-    final ownerDeviceName = response?['ownerDeviceName']?.toString() ?? parsed.ownerDeviceName ?? 'Ğ£ÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğ¾';
-    final ownerDevicePublicKey = response?['ownerDevicePublicKey']?.toString() ?? parsed.ownerDevicePublicKey ?? '';
-    final accountEncryptionKey = parsed.accountEncryptionKey ?? response?['accountEncryptionKey']?.toString() ?? '';
-    final returnedRelayUrl = relayUrl;
-    if (accountId.isEmpty || ownerDeviceId.isEmpty) {
-      throw StateError('Relay Ğ²ĞµÑ€Ğ½ÑƒĞ» Ğ½ĞµĞ¿Ğ¾Ğ»Ğ½Ñ‹Ğµ pairing-Ğ´Ğ°Ğ½Ğ½Ñ‹Ğµ${claimError == null ? '' : ': $claimError'}');
-    }
-    if (accountEncryptionKey.isEmpty) {
-      throw StateError('Ğ’ Ğ¿Ñ€Ğ¸Ğ³Ğ»Ğ°ÑˆĞµĞ½Ğ¸Ğ¸ Ğ½ĞµÑ‚ ĞºĞ»ÑÑ‡Ğ° ÑˆĞ¸Ñ„Ñ€Ğ¾Ğ²Ğ°Ğ½Ğ¸Ñ Ğ°ĞºĞºĞ°ÑƒĞ½Ñ‚Ğ°');
-    }
-
-    await disconnect(manual: false);
-    await _storage.saveSyncSettings(
-      _settingsForClaimedRelayUrl(returnedRelayUrl, fallbackSettings).copyWith(autoConnect: true),
-    );
-    await _storage.replaceAccountFromPairing(
-      accountId: accountId,
-      accountEncryptionKey: accountEncryptionKey,
-      ownerDeviceId: ownerDeviceId,
-      ownerDeviceName: ownerDeviceName,
-      ownerDevicePublicKey: ownerDevicePublicKey,
-    );
-    _appendLog('Pairing Ğ²Ñ‹Ğ¿Ğ¾Ğ»Ğ½ĞµĞ½. ĞĞºĞºĞ°ÑƒĞ½Ñ‚ Ğ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡Ñ‘Ğ½ Ğ°Ğ²Ñ‚Ğ¾Ğ¼Ğ°Ñ‚Ğ¸Ñ‡ĞµÑĞºĞ¸.');
-    await connect(relayUrl: relayUrl);
-    await refreshMetadata(reason: 'pairing_completed');
-    return PairingClaimResult(
-      accountId: accountId,
-      relayUrl: relayUrl,
-      ownerDeviceId: ownerDeviceId,
-      ownerDeviceName: ownerDeviceName,
-      accountEncryptionKey: accountEncryptionKey,
-    );
-  }
-
-  void _validateEndpointForPairing(SyncSettings settings) {
-    if (settings.usesOfficialPlaceholder) {
-      throw StateError('ĞÑ„Ğ¸Ñ†Ğ¸Ğ°Ğ»ÑŒĞ½Ñ‹Ğ¹ relay ReadArc Ğ½Ğµ Ğ½Ğ°ÑÑ‚Ñ€Ğ¾ĞµĞ½ Ğ² ÑÑ‚Ğ¾Ğ¹ ÑĞ±Ğ¾Ñ€ĞºĞµ.');
-    }
-  }
-
-  Uri _buildEndpointUri(String relayUrl, String endpointPath) {
-    final base = Uri.parse(relayUrl.trim());
-    final basePath = base.path.replaceAll(RegExp(r'/+$'), '');
-    final cleanEndpoint = endpointPath.startsWith('/') ? endpointPath : '/$endpointPath';
-    return base.replace(
-      scheme: base.scheme == 'ws'
-          ? 'http'
-          : base.scheme == 'wss'
-          ? 'https'
-          : base.scheme,
-      path: '$basePath$cleanEndpoint'.replaceAll(RegExp(r'/{2,}'), '/'),
-      query: '',
-    );
-  }
-
-  Future<Map<String, dynamic>> _postJson(Uri uri, Map<String, dynamic> body) async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
-    try {
-      final request = await client.postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode(body));
-      final response = await request.close().timeout(const Duration(seconds: 12));
-      final responseBody = await response.transform(utf8.decoder).join();
-      final decoded = responseBody.isEmpty ? <String, dynamic>{} : jsonDecode(responseBody);
-      if (decoded is! Map) {
-        throw StateError('Relay Ğ²ĞµÑ€Ğ½ÑƒĞ» Ğ½Ğµ JSON-Ğ¾Ğ±ÑŠĞµĞºÑ‚');
-      }
-      final result = Map<String, dynamic>.from(decoded);
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw StateError(result['message']?.toString() ?? 'HTTP ${response.statusCode}');
-      }
-      return result;
-    } finally {
-      client.close(force: true);
-    }
-  }
-
-  _ParsedPairingInput _parsePairingInput(String input) {
-    final raw = input.trim();
-    if (raw.isEmpty) {
-      throw ArgumentError('Ğ’Ğ²ĞµĞ´Ğ¸Ñ‚Ğµ pairing-ĞºĞ¾Ğ´ Ğ¸Ğ»Ğ¸ Ğ¿Ñ€Ğ¸Ğ³Ğ»Ğ°ÑˆĞµĞ½Ğ¸Ğµ');
-    }
-    if (raw.startsWith('readarc://')) {
-      final uri = Uri.parse(raw);
-      final code = _normalizePairingCode(uri.queryParameters['code'] ?? '');
-      final relay = uri.queryParameters['relay']?.trim();
-      final accountKey = uri.queryParameters['key']?.trim();
-      final ownerDeviceName = uri.queryParameters['deviceName']?.trim();
-      final ownerDevicePublicKey = uri.queryParameters['ownerDevicePublicKey']?.trim();
-      final accountId = uri.queryParameters['accountId']?.trim();
-      final ownerDeviceId = uri.queryParameters['ownerDeviceId']?.trim();
-      final expiresAtRaw = uri.queryParameters['expiresAt']?.trim();
-      final expiresAt = expiresAtRaw == null || expiresAtRaw.isEmpty ? null : DateTime.tryParse(expiresAtRaw)?.toUtc();
-      if (code.length != 6) {
-        throw ArgumentError('Ğ’ Ğ¿Ñ€Ğ¸Ğ³Ğ»Ğ°ÑˆĞµĞ½Ğ¸Ğ¸ Ğ½ĞµÑ‚ ĞºĞ¾Ñ€Ñ€ĞµĞºÑ‚Ğ½Ğ¾Ğ³Ğ¾ 6-Ğ·Ğ½Ğ°Ñ‡Ğ½Ğ¾Ğ³Ğ¾ ĞºĞ¾Ğ´Ğ°');
-      }
-      return _ParsedPairingInput(
-        code: code,
-        relayUrl: relay?.isEmpty == true ? null : relay,
-        accountEncryptionKey: accountKey?.isEmpty == true ? null : accountKey,
-        ownerDeviceName: ownerDeviceName?.isEmpty == true ? null : ownerDeviceName,
-        ownerDevicePublicKey: ownerDevicePublicKey?.isEmpty == true ? null : ownerDevicePublicKey,
-        accountId: accountId?.isEmpty == true ? null : accountId,
-        ownerDeviceId: ownerDeviceId?.isEmpty == true ? null : ownerDeviceId,
-        expiresAt: expiresAt,
-      );
-    }
-    final code = _normalizePairingCode(raw);
-    if (code.length != 6) {
-      throw ArgumentError('ĞšĞ¾Ğ´ Ğ¿Ñ€Ğ¸Ğ³Ğ»Ğ°ÑˆĞµĞ½Ğ¸Ñ Ğ´Ğ¾Ğ»Ğ¶ĞµĞ½ ÑĞ¾ÑÑ‚Ğ¾ÑÑ‚ÑŒ Ğ¸Ğ· 6 Ñ†Ğ¸Ñ„Ñ€');
-    }
-    return _ParsedPairingInput(code: code);
-  }
-
-  String _normalizePairingCode(String raw) => raw.replaceAll(RegExp(r'[^0-9]'), '');
-
-  SyncSettings _settingsForClaimedRelayUrl(String relayUrl, SyncSettings fallback) {
-    // Sprint 25: all client connections use the official ReadArc relay.
-    // Older QR links may still carry a custom/Tailscale relay parameter; keep
-    // accepting the link but ignore that endpoint for the actual connection.
-    return fallback.asOfficial(autoConnect: true);
-  }
-
-  Future<bool> requestBookFile(BookRecord book) async {
-    final client = _client;
-    if (client == null || !state.value.connected) {
-      _appendLog('ĞĞµĞ»ÑŒĞ·Ñ ÑĞºĞ°Ñ‡Ğ°Ñ‚ÑŒ ${book.title}: Ğ½ĞµÑ‚ Ğ¿Ğ¾Ğ´ĞºĞ»ÑÑ‡ĞµĞ½Ğ¸Ñ Ğº relay');
-      return false;
-    }
-    if (book.isDeleted) {
-      _appendLog('${book.title} ÑƒĞ´Ğ°Ğ»ĞµĞ½Ğ° Ğ¸Ğ· Ğ±Ğ¸Ğ±Ğ»Ğ¸Ğ¾Ñ‚ĞµĞºĞ¸');
-      return false;
-    }
-    if (book.isDownloaded) {
-      _appendLog('${book.title} ÑƒĞ¶Ğµ ÑĞºĞ°Ñ‡Ğ°Ğ½Ğ° Ğ½Ğ° ÑÑ‚Ğ¾Ğ¼ ÑƒÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğµ');
-      return false;
-    }
-
-    final manifest = await _storage.loadManifest();
-    final transferId = 'transfer-${_uuid.v4()}';
-    final session = _DownloadSession(
-      transferId: transferId,
-      bookId: book.id,
-      fileName: book.fileName,
-      format: book.format,
-      expectedSha256: book.contentSha256,
-      expectedBytes: book.sizeBytes,
-    );
-    _downloadsByTransferId[transferId] = session;
-    _setDownloadSnapshot(
-      FileTransferSnapshot(
-        transferId: transferId,
-        bookId: book.id,
-        direction: 'download',
-        fileName: book.fileName,
-        statusText: 'Ğ˜Ñ‰ĞµĞ¼ ÑƒÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğ¾ Ñ Ñ„Ğ°Ğ¹Ğ»Ğ¾Ğ¼...',
-        active: true,
-        totalBytes: book.sizeBytes,
-      ),
-    );
-
-    // Requests can be lost exactly while a mobile client or Tailscale Funnel is
-    // reconnecting. Send the same idempotent request a few times until an offer
-    // is received, then fail with a clear reason instead of hanging silently.
-    Future<bool> sendRequest({String? label}) => _sendEnvelope(
-      SyncEnvelope(
-        type: 'book_file_requested',
-        accountId: manifest.accountId,
-        deviceId: manifest.deviceId,
-        payload: {
-          'transferId': transferId,
-          'bookId': book.id,
-          'requestingDeviceId': manifest.deviceId,
-          'fileName': book.fileName,
-          'expectedSha256': book.contentSha256,
-          'expectedSizeBytes': book.sizeBytes,
-          'preferredChunkSize': _defaultChunkSize,
-          'binaryTransfer': true,
-        },
-      ),
-      logLabel: label,
-    );
-
-    for (final delay in const [Duration(seconds: 5), Duration(seconds: 12)]) {
-      unawaited(
-        Future<void>.delayed(delay, () async {
-          final current = _downloadsByTransferId[transferId];
-          if (current == null || current.sourceDeviceId != null) return;
-          _setDownloadSnapshot(
-            state.value
-                .downloadForBook(current.bookId)!
-                .copyWith(statusText: 'ĞŸĞ¾Ğ²Ñ‚Ğ¾Ñ€ÑĞµĞ¼ Ğ¿Ğ¾Ğ¸ÑĞº Ğ¸ÑÑ‚Ğ¾Ñ‡Ğ½Ğ¸ĞºĞ°...', active: true),
-          );
-          await sendRequest();
-        }),
-      );
-    }
-
-    unawaited(
-      Future<void>.delayed(_downloadOfferTimeout, () async {
-        final current = _downloadsByTransferId[transferId];
-        if (current == null) return;
-        if (current.sourceDeviceId == null) {
-          await _failDownload(current, 'Ğ˜ÑÑ‚Ğ¾Ñ‡Ğ½Ğ¸Ğº Ğ½Ğµ Ğ½Ğ°Ğ¹Ğ´ĞµĞ½: ÑƒÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğ¾ Ñ ĞºĞ½Ğ¸Ğ³Ğ¾Ğ¹ Ğ½Ğµ Ğ¾Ñ‚Ğ²ĞµÑ‚Ğ¸Ğ»Ğ¾');
-        }
-      }),
-    );
-
-    return sendRequest(label: 'Ğ—Ğ°Ğ¿Ñ€Ğ¾ÑˆĞµĞ½ Ñ„Ğ°Ğ¹Ğ»: ${book.title}');
-  }
-
-  Future<void> cancelBookFileDownload(String bookId) async {
-    _DownloadSession? session;
-    for (final candidate in _downloadsByTransferId.values) {
-      if (candidate.bookId == bookId) {
-        session = candidate;
-        break;
-      }
-    }
-    if (session == null) return;
-    final manifest = await _storage.loadManifest();
-    final sourceDeviceId = session.sourceDeviceId;
-    _downloadsByTransferId.remove(session.transferId);
-    await _deletePartial(session);
-    _setDownloadSnapshot(
-      FileTransferSnapshot(
-        transferId: session.transferId,
-        bookId: session.bookId,
-        direction: 'download',
-        fileName: session.fileName,
-        peerDeviceId: sourceDeviceId ?? '',
-        statusText: 'Ğ¡ĞºĞ°Ñ‡Ğ¸Ğ²Ğ°Ğ½Ğ¸Ğµ Ğ¾Ñ‚Ğ¼ĞµĞ½ĞµĞ½Ğ¾',
-        active: false,
-        progressPercent: 0,
-        totalBytes: session.expectedBytes,
-      ),
-    );
-    if (sourceDeviceId != null) {
-      await _sendEnvelope(
-        SyncEnvelope(
-          type: 'book_file_cancelled',
-          accountId: manifest.accountId,
-          deviceId: manifest.deviceId,
-          payload: {
-            'transferId': session.transferId,
-            'bookId': session.bookId,
-            'sourceDeviceId': sourceDeviceId,
-            'requestingDeviceId': manifest.deviceId,
-          },
-        ),
-      );
-    }
-    _appendLog('Ğ¡ĞºĞ°Ñ‡Ğ¸Ğ²Ğ°Ğ½Ğ¸Ğµ Ğ¾Ñ‚Ğ¼ĞµĞ½ĞµĞ½Ğ¾: ${session.fileName}');
-  }
-
-  Future<void> _handleIncomingEnvelope(SyncEnvelope envelope) async {
-    var handled = false;
-    try {
-      await _handleIncomingEnvelopeUnsafe(envelope);
-      handled = true;
-    } catch (error, stackTrace) {
-      // A malformed file-transfer event must never break metadata sync.
-      debugPrint('Sync event handling failed: $error\n$stackTrace');
-      _appendLog('ĞÑˆĞ¸Ğ±ĞºĞ° Ğ¾Ğ±Ñ€Ğ°Ğ±Ğ¾Ñ‚ĞºĞ¸ ${envelope.type}: $error');
-    } finally {
-      if (handled) {
-        _ackRelayQueueEnvelope(envelope);
-      }
-    }
-  }
-
-  void _ackRelayQueueEnvelope(SyncEnvelope envelope) {
-    final cursor = envelope.relayQueueSeq;
-    final client = _client;
-    if (cursor == null || client == null || !state.value.connected) return;
-    try {
-      client.sendControl({
-        'type': 'offline_queue_ack',
-        'accountId': envelope.accountId,
-        'deviceId': client.deviceId,
-        'payload': {'cursor': cursor},
-      });
-    } catch (error) {
-      _appendLog('ĞĞµ ÑƒĞ´Ğ°Ğ»Ğ¾ÑÑŒ Ğ¿Ğ¾Ğ´Ñ‚Ğ²ĞµÑ€Ğ´Ğ¸Ñ‚ÑŒ offline queue: $error');
-    }
-  }
-
-  Future<void> _handleIncomingEnvelopeUnsafe(SyncEnvelope envelope) async {
-    final local = await _storage.loadManifest();
-    if (envelope.accountId != local.accountId) {
-      _appendLog('ĞŸÑ€Ğ¾Ğ¿ÑƒÑ‰ĞµĞ½Ğ¾ ÑĞ¾Ğ±Ñ‹Ñ‚Ğ¸Ğµ Ğ´Ñ€ÑƒĞ³Ğ¾Ğ³Ğ¾ Ğ°ĞºĞºĞ°ÑƒĞ½Ñ‚Ğ°: ${envelope.accountId}');
-      return;
-    }
-    if (envelope.deviceId == local.deviceId) return;
-
-    if (envelope.type == 'peer_list') {
-      final peers = ((envelope.payload['peers'] as List?) ?? const [])
-          .map((item) => item.toString())
-          .where((id) => id != local.deviceId)
-          .toList();
-      _setState(state.value.copyWith(onlinePeerDeviceIds: peers));
-      _appendLog('Relay peers online: ${peers.length}');
-      await refreshMetadata(reason: 'peer_list');
-      return;
-    }
-
-    if (envelope.type == 'peer_joined') {
-      final peers = {...state.value.onlinePeerDeviceIds, envelope.deviceId}.toList()..sort();
-      _setState(state.value.copyWith(onlinePeerDeviceIds: peers));
-      _appendLog('ĞŸĞ¾Ğ´ĞºĞ»ÑÑ‡Ğ¸Ğ»Ğ¾ÑÑŒ Ğ´Ñ€ÑƒĞ³Ğ¾Ğµ ÑƒÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğ¾: ${envelope.deviceId}');
-      await refreshMetadata(reason: 'peer_joined');
-      return;
-    }
-
-    if (envelope.type == 'peer_left') {
-      final peers = state.value.onlinePeerDeviceIds.where((id) => id != envelope.deviceId).toList()..sort();
-      _setState(state.value.copyWith(onlinePeerDeviceIds: peers));
-      _appendLog('ĞÑ‚ĞºĞ»ÑÑ‡Ğ¸Ğ»Ğ¾ÑÑŒ Ğ´Ñ€ÑƒĞ³Ğ¾Ğµ ÑƒÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğ¾: ${envelope.deviceId}');
-      return;
-    }
-
-    if (envelope.type == 'pairing_claimed') {
-      await _handlePairingClaimed(envelope, local);
-      return;
-    }
-
-    if (envelope.type == 'error') {
-      _appendLog('Relay Ğ²ĞµÑ€Ğ½ÑƒĞ» Ğ¾ÑˆĞ¸Ğ±ĞºÑƒ: ${envelope.payload['message'] ?? envelope.payload}');
-      return;
-    }
-
-    if (_isRevokedDevice(local, envelope.deviceId)) {
-      _appendLog('ĞÑ‚ĞºĞ»Ğ¾Ğ½ĞµĞ½Ğ¾ ÑĞ¾Ğ±Ñ‹Ñ‚Ğ¸Ğµ Ğ¾Ñ‚ Ğ¾Ñ‚Ğ¾Ğ·Ğ²Ğ°Ğ½Ğ½Ğ¾Ğ³Ğ¾ ÑƒÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğ°: ${envelope.deviceId}');
-      return;
-    }
-
-    if (!_acceptSecureEnvelope(envelope)) {
-      return;
-    }
-
-    final decryptedPayload = await ReadArcE2eCrypto.decryptPayload(
-      encryptedPayload: envelope.payload,
-      accountEncryptionKey: local.accountEncryptionKey,
-      eventType: envelope.type,
-      accountId: envelope.accountId,
-      deviceId: envelope.deviceId,
-      createdAt: envelope.createdAt,
-    );
-    final decryptedEnvelope = SyncEnvelope(
-      type: envelope.type,
-      accountId: envelope.accountId,
-      deviceId: envelope.deviceId,
-      createdAt: envelope.createdAt,
-      payload: decryptedPayload,
-    );
-
-    if (!_acceptTrustedDevicePayload(local, decryptedEnvelope)) {
-      return;
-    }
-
-    switch (decryptedEnvelope.type) {
-      case 'library_snapshot_requested':
-        await _handleLibrarySnapshotRequested(decryptedEnvelope, local);
-        break;
-      case 'library_snapshot':
-        await _handleLibrarySnapshot(decryptedEnvelope, local);
-        break;
-      case 'book_file_requested':
-        await _handleBookFileRequested(decryptedEnvelope, local);
-        break;
-      case 'book_file_offer':
-        await _handleBookFileOffer(decryptedEnvelope, local);
-        break;
-      case 'book_file_accept':
-        unawaited(_handleBookFileAccept(decryptedEnvelope, local));
-        break;
-      case 'book_file_chunk':
-        await _handleBookFileChunk(decryptedEnvelope, local);
-        break;
-      case 'book_file_chunk_ack':
-        await _handleBookFileChunkAck(decryptedEnvelope, local);
-        break;
-      case 'book_file_error':
-        await _handleBookFileError(decryptedEnvelope, local);
-        break;
-      case 'book_file_cancelled':
-        await _handleBookFileCancelled(decryptedEnvelope, local);
-        break;
-      default:
-        _appendLog('ĞĞµĞ¸Ğ·Ğ²ĞµÑÑ‚Ğ½Ğ¾Ğµ ÑĞ¾Ğ±Ñ‹Ñ‚Ğ¸Ğµ: ${decryptedEnvelope.type}');
-    }
-  }
-
-  bool _acceptSecureEnvelope(SyncEnvelope envelope) {
-    final eventId = ReadArcE2eCrypto.encryptedEventId(envelope.payload);
-    if (eventId == null || eventId.isEmpty) {
-      // Legacy encrypted payload from older test builds. Accept during rollout.
-      return true;
-    }
-    final issuedAt = ReadArcE2eCrypto.encryptedIssuedAt(envelope.payload);
-    final now = DateTime.now().toUtc();
-    if (issuedAt == null) {
-      _appendLog('ĞÑ‚ĞºĞ»Ğ¾Ğ½ĞµĞ½Ğ¾ ÑĞ¾Ğ±Ñ‹Ñ‚Ğ¸Ğµ Ğ±ĞµĞ· issuedAt: ${envelope.type}');
-      return false;
-    }
-    if (issuedAt.isBefore(now.subtract(_replayWindow)) || issuedAt.isAfter(now.add(const Duration(minutes: 5)))) {
-      _appendLog('ĞÑ‚ĞºĞ»Ğ¾Ğ½ĞµĞ½Ğ¾ ÑƒÑÑ‚Ğ°Ñ€ĞµĞ²ÑˆĞµĞµ/Ğ±ÑƒĞ´ÑƒÑ‰ĞµĞµ ÑĞ¾Ğ±Ñ‹Ñ‚Ğ¸Ğµ: ${envelope.type}');
-      return false;
-    }
-    _seenSecureEventIds.removeWhere((_, seenAt) => seenAt.isBefore(now.subtract(_replayWindow)));
-    final replayKey = '${envelope.accountId}:${envelope.deviceId}:$eventId';
-    if (_seenSecureEventIds.containsKey(replayKey)) {
-      _appendLog('ĞÑ‚ĞºĞ»Ğ¾Ğ½Ñ‘Ğ½ Ğ¿Ğ¾Ğ²Ñ‚Ğ¾Ñ€ ÑĞ¾Ğ±Ñ‹Ñ‚Ğ¸Ñ: ${envelope.type}');
-      return false;
-    }
-    _seenSecureEventIds[replayKey] = now;
-    return true;
-  }
-
-  bool _isRevokedDevice(LibraryManifest local, String deviceId) {
-    for (final device in local.trustedDevices) {
-      if (device.deviceId == deviceId) return device.isRevoked;
-    }
-    return false;
-  }
-
-  bool _isActiveTrustedDevice(LibraryManifest local, String deviceId) {
-    for (final device in local.trustedDevices) {
-      if (device.deviceId == deviceId) return !device.isRevoked;
-    }
-    return false;
-  }
-
-  bool _acceptTrustedDevicePayload(LibraryManifest local, SyncEnvelope envelope) {
-    if (_isActiveTrustedDevice(local, envelope.deviceId)) return true;
-
-    // First event from a freshly paired device can be its library snapshot. It is
-    // already encrypted with the account key from the one-time QR invite. Accept
-    // only if the snapshot explicitly introduces the sender as a trusted device
-    // with a public key; all other unknown-device events are rejected.
-    if (envelope.type == 'library_snapshot') {
-      final payloadManifest = envelope.payload['manifest'];
-      if (payloadManifest is Map) {
-        final devices = (payloadManifest['trustedDevices'] as List?) ?? const [];
-        for (final item in devices.whereType<Map>()) {
-          final candidate = TrustedDeviceRecord.fromJson(Map<String, dynamic>.from(item));
-          if (candidate.deviceId == envelope.deviceId && !candidate.isRevoked && candidate.hasPublicKey) {
-            _appendLog('ĞŸÑ€Ğ¸Ğ½ÑÑ‚Ğ¾ Ğ¿ĞµÑ€Ğ²Ğ¾Ğµ Ğ´Ğ¾Ğ²ĞµÑ€ĞµĞ½Ğ½Ğ¾Ğµ ÑĞ¾Ğ±Ñ‹Ñ‚Ğ¸Ğµ Ğ¾Ñ‚ ${candidate.name}');
-            return true;
-          }
-        }
-      }
-    }
-
-    _appendLog('ĞÑ‚ĞºĞ»Ğ¾Ğ½ĞµĞ½Ğ¾ ÑĞ¾Ğ±Ñ‹Ñ‚Ğ¸Ğµ Ğ¾Ñ‚ Ğ½ĞµĞ´Ğ¾Ğ²ĞµÑ€ĞµĞ½Ğ½Ğ¾Ğ³Ğ¾ ÑƒÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğ°: ${envelope.deviceId}');
-    return false;
-  }
-
-  Future<void> _handlePairingClaimed(SyncEnvelope envelope, LibraryManifest local) async {
-    if (envelope.deviceId != 'relay') return;
-    final ownerDeviceId = envelope.payload['ownerDeviceId']?.toString() ?? '';
-    if (ownerDeviceId.isNotEmpty && ownerDeviceId != local.deviceId) return;
-
-    final acceptedDeviceId = envelope.payload['acceptedDeviceId']?.toString().trim() ?? '';
-    if (acceptedDeviceId.isEmpty || acceptedDeviceId == local.deviceId) return;
-
-    final acceptedDeviceName = envelope.payload['acceptedDeviceName']?.toString().trim() ?? 'Ğ£ÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğ¾';
-    final acceptedDevicePublicKey = envelope.payload['acceptedDevicePublicKey']?.toString().trim() ?? '';
-
-    final updated = await _storage.trustDevice(
-      deviceId: acceptedDeviceId,
-      name: acceptedDeviceName.isEmpty ? 'Ğ£ÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğ¾' : acceptedDeviceName,
-      role: 'device',
-      publicKey: acceptedDevicePublicKey,
-    );
-    _manifestChanges.add(updated);
-    _appendLog('Ğ£ÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğ¾ ÑĞ½Ğ¾Ğ²Ğ° Ğ´Ğ¾Ğ²ĞµÑ€ĞµĞ½Ğ¾ Ñ‡ĞµÑ€ĞµĞ· QR: $acceptedDeviceName');
-    await broadcastLibrarySnapshot(reason: 'pairing_claimed_reauthorized_device');
-  }
-
-  Future<void> _handleLibrarySnapshotRequested(SyncEnvelope envelope, LibraryManifest local) async {
-    final requester = envelope.payload['requestingDeviceId'] as String?;
-    if (requester == local.deviceId) return;
-    _appendLog('ĞŸĞ¾Ğ»ÑƒÑ‡ĞµĞ½ Ğ·Ğ°Ğ¿Ñ€Ğ¾Ñ snapshot Ğ¾Ñ‚ ${envelope.deviceId}');
-    await broadcastLibrarySnapshot(reason: 'requested_by_peer');
-  }
-
-  bool _looksLikeAccidentalEmptyLibrarySnapshot({
-    required LibraryManifest local,
-    required LibraryManifest remote,
-    required LibraryManifest merged,
-  }) {
-    final localVisible = local.visibleBooks.length;
-    if (localVisible == 0) return false;
-    if (merged.visibleBooks.isNotEmpty) return false;
-
-    final remoteVisible = remote.visibleBooks.length;
-    final remoteDeleted = remote.books.where((book) => book.isDeleted).length;
-    final localDownloaded = local.books.where((book) => book.isDownloaded).length;
-
-    // Data-safety guard: an online/offline queued snapshot, a just-paired empty
-    // device, or stale tombstones must never wipe the whole visible library on a
-    // device that still has books. A deliberate "delete every book" operation can
-    // be revisited later with an explicit generation/confirmation field; until
-    // then preserving the user's library is more important than applying a mass
-    // destructive snapshot silently.
-    return remoteVisible == 0 || remoteDeleted >= localVisible || localDownloaded > 0;
-  }
-
-  Future<void> _handleLibrarySnapshot(SyncEnvelope envelope, LibraryManifest local) async {
-    final payloadManifest = envelope.payload['manifest'];
-    if (payloadManifest is! Map) {
-      _appendLog('ĞĞµĞºĞ¾Ñ€Ñ€ĞµĞºÑ‚Ğ½Ñ‹Ğ¹ snapshot');
-      return;
-    }
-
-    final remote = LibraryManifest.fromJson(Map<String, dynamic>.from(payloadManifest));
-    if (remote.deviceId == local.deviceId) {
-      // Ignore echoes of our own snapshot. Relay offline queues can deliver a
-      // local snapshot back after reconnect; applying it is useless and can mask
-      // more recent local changes.
-      return;
-    }
-    final merged = mergeManifests(local, remote);
-    if (_looksLikeAccidentalEmptyLibrarySnapshot(local: local, remote: remote, merged: merged)) {
-      _appendLog('ĞÑ‚ĞºĞ»Ğ¾Ğ½Ñ‘Ğ½ snapshot, ĞºĞ¾Ñ‚Ğ¾Ñ€Ñ‹Ğ¹ ÑĞºÑ€Ñ‹Ğ²Ğ°Ğ» Ğ²ÑÑ Ğ»Ğ¾ĞºĞ°Ğ»ÑŒĞ½ÑƒÑ Ğ±Ğ¸Ğ±Ğ»Ğ¸Ğ¾Ñ‚ĞµĞºÑƒ. Ğ—Ğ°Ğ¿Ñ€Ğ¾ÑˆĞµĞ½Ğ° Ğ¿Ğ¾Ğ²Ñ‚Ğ¾Ñ€Ğ½Ğ°Ñ ÑĞ¸Ğ½Ñ…Ñ€Ğ¾Ğ½Ğ¸Ğ·Ğ°Ñ†Ğ¸Ñ.');
-      await requestLibrarySnapshot(reason: 'destructive_snapshot_guard');
-      return;
-    }
-    final currentVisible = local.visibleBooks.length;
-    final mergedVisible = merged.visibleBooks.length;
-    if (currentVisible > 0 && mergedVisible == 0) {
-      _appendLog('ĞÑ‚ĞºĞ»Ğ¾Ğ½Ñ‘Ğ½ snapshot: Ğ»Ğ¾ĞºĞ°Ğ»ÑŒĞ½Ğ°Ñ Ğ±Ğ¸Ğ±Ğ»Ğ¸Ğ¾Ñ‚ĞµĞºĞ° local-first Ğ½Ğµ Ğ¼Ğ¾Ğ¶ĞµÑ‚ Ğ±Ñ‹Ñ‚ÑŒ Ğ·Ğ°Ğ¼ĞµĞ½ĞµĞ½Ğ° Ğ¿ÑƒÑÑ‚Ñ‹Ğ¼ ÑĞ¾ÑÑ‚Ğ¾ÑĞ½Ğ¸ĞµĞ¼.');
-      await requestLibrarySnapshot(reason: 'local_first_empty_merge_guard');
-      return;
-    }
-    await _storage.saveManifest(merged);
-    _manifestChanges.add(await _storage.loadManifest());
-    if (merged.isCurrentDeviceRevoked) {
-      _appendLog('Ğ”Ğ¾ÑÑ‚ÑƒĞ¿ ÑÑ‚Ğ¾Ğ³Ğ¾ ÑƒÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğ° Ğ¾Ñ‚Ğ¾Ğ·Ğ²Ğ°Ğ½. Ğ¡Ğ¸Ğ½Ñ…Ñ€Ğ¾Ğ½Ğ¸Ğ·Ğ°Ñ†Ğ¸Ñ Ğ¾ÑÑ‚Ğ°Ğ½Ğ¾Ğ²Ğ»ĞµĞ½Ğ°.');
-      await disconnect(manual: true);
-      _setState(state.value.copyWith(connected: false, statusText: 'Ğ”Ğ¾ÑÑ‚ÑƒĞ¿ ÑÑ‚Ğ¾Ğ³Ğ¾ ÑƒÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğ° Ğ¾Ñ‚Ğ¾Ğ·Ğ²Ğ°Ğ½'));
-      return;
-    }
-    _appendLog('ĞŸÑ€Ğ¸Ğ½ÑÑ‚ snapshot Ğ¾Ñ‚ ${remote.deviceName} â€” ĞºĞ½Ğ¸Ğ³: ${remote.books.length}');
-    _setState(state.value.copyWith(receivedEvents: state.value.receivedEvents + 1));
-  }
-
-  Future<void> _handleBookFileRequested(SyncEnvelope envelope, LibraryManifest local) async {
-    final payload = envelope.payload;
-    final requestingDeviceId = payload['requestingDeviceId'] as String?;
-    if (requestingDeviceId == null || requestingDeviceId == local.deviceId) return;
-
-    final bookId = payload['bookId'] as String?;
-    final transferId = payload['transferId'] as String?;
-    if (bookId == null || transferId == null) return;
-
-    final book = _findBook(local, bookId);
-    if (book == null || book.localPath == null) return;
-    final file = File(book.localPath!);
-    if (!await file.exists()) {
-      _appendLog('Ğ¤Ğ°Ğ¹Ğ» Ğ±Ğ¾Ğ»ÑŒÑˆĞµ Ğ½Ğµ Ğ´Ğ¾ÑÑ‚ÑƒĞ¿ĞµĞ½ Ğ½Ğ° ÑÑ‚Ğ¾Ğ¼ ÑƒÑÑ‚Ñ€Ğ¾Ğ¹ÑÑ‚Ğ²Ğµ: ${book.title}');
-      try {
-        final updated = await _storage.removeLocalBookCopy(book.id);
-        _manifestChanges.add(updated);
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éíßMôñ:-jZ.¶›­–)Ş³V–×÷'BvF'C¦7–æ2s°¦–×÷'BvF'C¦6öçfW'Bs°¦–×÷'BvF'C¦–òs°¦–×÷'BvF'C¦ÖF‚r2ÖFƒ° ¦–×÷'Bw6¶vS¦7'—Fòö7'—FòæF'Bs°¦–×÷'Bw6¶vS¦fÇWGFW"öf÷VæFF–öâæF'Bs°¦–×÷'Bw6¶vS§F‚÷F‚æF'Br2°¦–×÷'Bw6¶vS§WV–B÷WV–BæF'Bs° ¦–×÷'BrââòââöÖöFVÇ2ö&öö²æF'Bs°¦–×÷'BrââòââöÖöFVÇ2öÖæ–fW7BæF'Bs°¦–×÷'BrââòââöÖöFVÇ2÷7–æ5÷6WGF–æw2æF'Bs°¦–×÷'Brââ÷7F÷&vU÷6W'f–6RæF'Bs°¦–×÷'BvS&Uö7'—FòæF'Bs°¦–×÷'BvÖW&vRæF'Bs°¦–×÷'Bw&VÆ•ö6Æ–VçBæF'Bs° ¦6öç7B÷WV–BÒWV–B‚“°¦6öç7BöFVfVÇD6‡Væµ6—¦RÒ#B¢#C²òò&–æ'’6‡Væ·3¢Ö”"¶VW2F–Ç66ÆRôæG&ö–B7F&ÆRæB&VGV6W24²÷fW&†VBà¦6öç7BöF÷væÆöDöffW%F–ÖV÷WBÒGW&F–öâ‡6V6öæG3¢#B“°¦6öç7BöF÷væÆöD–FÆUF–ÖV÷WBÒGW&F–öâ‡6V6öæG3¢#‚“°¦6öç7BöF—&V7E7G&VÔ–FÆUF–ÖV÷WBÒGW&F–öâ‡6V6öæG3¢‚“° ¦6Æ72—&–æt–çf—FR°¢6öç7B—&–æt–çf—FR‡°¢&WV—&VBF†—2æ6öFRÀ¢&WV—&VBF†—2ç&VÆ•W&ÂÀ¢&WV—&VBF†—2æW‡—&W4BÀ¢&WV—&VBF†—2æ–çf—FTÆ–æ²À¢&WV—&VBF†—2æ÷væW$FWf–6TæÖRÀ¢&WV—&VBF†—2æ66÷VçDVæ7'—F–öä¶W’À¢Ò“° ¢f–æÂ7G&–ær6öFS°¢f–æÂ7G&–ær&VÆ•W&Ã°¢f–æÂFFUF–ÖRW‡—&W4C°¢f–æÂ7G&–ær–çf—FTÆ–æ³°¢f–æÂ7G&–ær÷væW$FWf–6TæÖS°¢f–æÂ7G&–ær66÷VçDVæ7'—F–öä¶W“° ¢7G&–ærvWBF—7Æ”6öFRÓâ6öFS° ¢&ööÂvWB—4W‡—&VBÓâFFUF–ÖRææ÷r‚’çFõWF2‚’æ—4gFW"†W‡—&W4B“° ¢&ööÂvWB—4æV$W‡—'’ÓâFFUF–ÖRææ÷r‚’çFõWF2‚’æFB†6öç7BGW&F–öâ‡6V6öæG3¢#’’æ—4gFW"†W‡—&W4B“°§Ğ ¦6Æ72—&–æt6Æ–Õ&W7VÇB°¢6öç7B—&–æt6Æ–Õ&W7VÇB‡°¢&WV—&VBF†—2æ66÷VçD–BÀ¢&WV—&VBF†—2ç&VÆ•W&ÂÀ¢&WV—&VBF†—2æ÷væW$FWf–6T–BÀ¢&WV—&VBF†—2æ÷væW$FWf–6TæÖRÀ¢&WV—&VBF†—2æ66÷VçDVæ7'—F–öä¶W’À¢Ò“° ¢f–æÂ7G&–ær66÷VçD–C°¢f–æÂ7G&–ær&VÆ•W&Ã°¢f–æÂ7G&–ær÷væW$FWf–6T–C°¢f–æÂ7G&–ær÷væW$FWf–6TæÖS°¢f–æÂ7G&–ær66÷VçDVæ7'—F–öä¶W“°§Ğ ¦6Æ72õ'6VE—&–æt–çWB°¢6öç7Bõ'6VE—&–æt–çWB‡°¢&WV—&VBF†—2æ6öFRÀ¢F†—2ç&VÆ•W&ÂÀ¢F†—2æ66÷VçDVæ7'—F–öä¶W’À¢F†—2æ÷væW$FWf–6TæÖRÀ¢F†—2æ÷væW$FWf–6UV&Æ–4¶W’À¢F†—2æ66÷VçD–BÀ¢F†—2æ÷væW$FWf–6T–BÀ¢F†—2æW‡—&W4BÀ¢Ò“° ¢f–æÂ7G&–ær6öFS°¢f–æÂ7G&–æsò&VÆ•W&Ã°¢f–æÂ7G&–æsò66÷VçDVæ7'—F–öä¶W“°¢f–æÂ7G&–æsò÷væW$FWf–6TæÖS°¢f–æÂ7G&–æsò÷væW$FWf–6UV&Æ–4¶W“°¢f–æÂ7G&–æsò66÷VçD–C°¢f–æÂ7G&–æsò÷væW$FWf–6T–C°¢f–æÂFFUF–ÖSòW‡—&W4C° ¢&ööÂvWB†4VÖ&VFFVD66÷VçD–çf—FRÓà¢†66÷VçD–Còæ—4æ÷DV×G’óòfÇ6R’b`¢†÷væW$FWf–6T–Còæ—4æ÷DV×G’óòfÇ6R’b`¢†66÷VçDVæ7'—F–öä¶W“òæ—4æ÷DV×G’óòfÇ6R“° ¢&ööÂvWBVÖ&VFFVD–çf—FTW‡—&VBÓâW‡—&W4BÒçVÆÂbbFFUF–ÖRææ÷r‚’çFõWF2‚’æ—4gFW"†W‡—&W4B“°§Ğ ¦6Æ72f–ÆUG&ç6fW%6æ6†÷B°¢6öç7Bf–ÆUG&ç6fW%6æ6†÷B‡°¢&WV—&VBF†—2çG&ç6fW$–BÀ¢&WV—&VBF†—2æ&öö´–BÀ¢&WV—&VBF†—2æF—&V7F–öâÀ¢&WV—&VBF†—2ç7FGW5FW‡BÀ¢F†—2æf–ÆTæÖRÒrrÀ¢F†—2çVW$FWf–6T–BÒrrÀ¢F†—2ç&öw&W75W&6VçBÒÀ¢F†—2çG&ç6fW'&VD'—FW2ÒÀ¢F†—2çF÷FÄ'—FW2ÒÀ¢F†—2æ7F—fRÒfÇ6RÀ¢F†—2æW'&÷"À¢Ò“° ¢f–æÂ7G&–ærG&ç6fW$–C°¢f–æÂ7G&–ær&öö´–C°¢f–æÂ7G&–ærF—&V7F–öã²òòF÷væÆöBÂWÆö@¢f–æÂ7G&–ær7FGW5FW‡C°¢f–æÂ7G&–ærf–ÆTæÖS°¢f–æÂ7G&–ærVW$FWf–6T–C°¢f–æÂF÷V&ÆR&öw&W75W&6VçC°¢f–æÂ–çBG&ç6fW'&VD'—FW3°¢f–æÂ–çBF÷FÄ'—FW3°¢f–æÂ&ööÂ7F—fS°¢f–æÂ7G&–æsòW'&÷#° ¢&ööÂvWB†4W'&÷"ÓâW'&÷"ÒçVÆÂbbW'&÷"æ—4æ÷DV×G“° ¢f–ÆUG&ç6fW%6æ6†÷B6÷•v—F‚‡°¢7G&–æsò7FGW5FW‡BÀ¢7G&–æsòf–ÆTæÖRÀ¢7G&–æsòVW$FWf–6T–BÀ¢F÷V&ÆSò&öw&W75W&6VçBÀ¢–çCòG&ç6fW'&VD'—FW2À¢–çCòF÷FÄ'—FW2À¢&ööÃò7F—fRÀ¢7G&–æsòW'&÷"À¢&ööÂ6ÆV$W'&÷"ÒfÇ6RÀ¢Ò’°¢&WGW&âf–ÆUG&ç6fW%6æ6†÷B€¢G&ç6fW$–C¢G&ç6fW$–BÀ¢&öö´–C¢&öö´–BÀ¢F—&V7F–öã¢F—&V7F–öâÀ¢7FGW5FW‡C¢7FGW5FW‡BóòF†—2ç7FGW5FW‡BÀ¢f–ÆTæÖS¢f–ÆTæÖRóòF†—2æf–ÆTæÖRÀ¢VW$FWf–6T–C¢VW$FWf–6T–BóòF†—2çVW$FWf–6T–BÀ¢&öw&W75W&6VçC¢&öw&W75W&6VçBóòF†—2ç&öw&W75W&6VçBÀ¢G&ç6fW'&VD'—FW3¢G&ç6fW'&VD'—FW2óòF†—2çG&ç6fW'&VD'—FW2À¢F÷FÄ'—FW3¢F÷FÄ'—FW2óòF†—2çF÷FÄ'—FW2À¢7F—fS¢7F—fRóòF†—2æ7F—fRÀ¢W'&÷#¢6ÆV$W'&÷"òçVÆÂ¢W'&÷"óòF†—2æW'&÷"À¢“°¢Ğ§Ğ ¦6Æ727–æ57FFU6æ6†÷B°¢6öç7B7–æ57FFU6æ6†÷B‡°¢&WV—&VBF†—2æ6öææV7FVBÀ¢&WV—&VBF†—2ç7FGW5FW‡BÀ¢F†—2ç&VÆ•W&ÂÀ¢F†—2ç6VçDWfVçG2ÒÀ¢F†—2ç&V6V—fVDWfVçG2ÒÀ¢F†—2æÆötÆ–æW2Ò6öç7BµÒÀ¢F†—2æf–ÆUG&ç6fW'2Ò6öç7B·ÒÀ¢F†—2æöæÆ–æUVW$FWf–6T–G2Ò6öç7BµÒÀ¢Ò“° ¢f–æÂ&ööÂ6öææV7FVC°¢f–æÂ7G&–ær7FGW5FW‡C°¢f–æÂ7G&–æsò&VÆ•W&Ã°¢f–æÂ–çB6VçDWfVçG3°¢f–æÂ–çB&V6V—fVDWfVçG3°¢f–æÂÆ—7CÅ7G&–æsâÆötÆ–æW3°¢f–æÂÖÅ7G&–ærÂf–ÆUG&ç6fW%6æ6†÷Câf–ÆUG&ç6fW'3°¢f–æÂÆ—7CÅ7G&–æsâöæÆ–æUVW$FWf–6T–G3° ¢7–æ57FFU6æ6†÷B6÷•v—F‚‡°¢&ööÃò6öææV7FVBÀ¢7G&–æsò7FGW5FW‡BÀ¢7G&–æsò&VÆ•W&ÂÀ¢–çCò6VçDWfVçG2À¢–çCò&V6V—fVDWfVçG2À¢Æ—7CÅ7G&–æsãòÆötÆ–æW2À¢ÖÅ7G&–ærÂf–ÆUG&ç6fW%6æ6†÷Cãòf–ÆUG&ç6fW'2À¢Æ—7CÅ7G&–æsãòöæÆ–æUVW$FWf–6T–G2À¢Ò’°¢&WGW&â7–æ57FFU6æ6†÷B€¢6öææV7FVC¢6öææV7FVBóòF†—2æ6öææV7FVBÀ¢7FGW5FW‡C¢7FGW5FW‡BóòF†—2ç7FGW5FW‡BÀ¢&VÆ•W&Ã¢&VÆ•W&ÂóòF†—2ç&VÆ•W&ÂÀ¢6VçDWfVçG3¢6VçDWfVçG2óòF†—2ç6VçDWfVçG2À¢&V6V—fVDWfVçG3¢&V6V—fVDWfVçG2óòF†—2ç&V6V—fVDWfVçG2À¢ÆötÆ–æW3¢ÆötÆ–æW2óòF†—2æÆötÆ–æW2À¢f–ÆUG&ç6fW'3¢f–ÆUG&ç6fW'2óòF†—2æf–ÆUG&ç6fW'2À¢öæÆ–æUVW$FWf–6T–G3¢öæÆ–æUVW$FWf–6T–G2óòF†—2æöæÆ–æUVW$FWf–6T–G2À¢“°¢Ğ ¢f–ÆUG&ç6fW%6æ6†÷CòF÷væÆöDf÷$&öö²…7G&–ær&öö´–B’Óâf–ÆUG&ç6fW'5¶&öö´–EÓ° ¢&ööÂ†4öæÆ–æU7F÷&vTf÷"„&ööµ&V6÷&B&öö²’°¢f–æÂöæÆ–æRÒöæÆ–æUVW$FWf–6T–G2çFõ6WB‚“°¢&WGW&â&öö²æf–Æ&ÆTöäFWf–6T–G2æç’†öæÆ–æRæ6öçF–ç2“°¢Ğ§Ğ ¦6Æ727–æ56W'f–6R°¢7–æ56W'f–6R‡F†—2å÷7F÷&vR“° ¢f–æÂ7F÷&vU6W'f–6R÷7F÷&vS°¢f–æÂ7FFRÒfÇVTæ÷F–f–W#Å7–æ57FFU6æ6†÷Câ€¢6öç7B7–æ57FFU6æ6†÷B†6öææV7FVC¢fÇ6RÂ7FGW5FW‡C¢}	İRıíM­½í}]İâr’À¢“° ¢&VÆ”6Æ–VçCòö6Æ–VçC°¢7G&VÕ7V'67&—F–öãÇfö–Cãòö–æ6öÖ–æu7V'67&—F–öã°¢7G&VÕ7V'67&—F–öãÇfö–Cãòö&–æ'•7V'67&—F–öã°¢f–æÂöÖæ–fW7D6†ævW2Ò7G&VÔ6öçG&öÆÆW#ÄÆ–'&'”Öæ–fW7Câæ'&öF67B‚“°¢f–æÂöF÷væÆöG4'•G&ç6fW$–BÒÅ7G&–ærÂôF÷væÆöE6W76–öãç·Ó°¢f–æÂ÷WÆöD6µv—FW'2ÒÅ7G&–ærÂ6ö×ÆWFW#Çfö–Cãç·Ó°¢f–æÂ÷WÆöDÆö6·2ÒÅ7G&–æsç·Ó°¢f–æÂö6æ6VÆÆVEG&ç6fW'2ÒÅ7G&–æsç·Ó°¢f–æÂ÷6VVå6V7W&TWfVçD–G2ÒÅ7G&–ærÂFFUF–ÖSç·Ó°¢òò7&–çB#s¢&VÆ’6â¶VWVæ7'—FVBÖWFFFWfVçG2f÷"öffÆ–æRFWf–6W2à¢òò¶VW&WÆ’&÷FV7F–öâÆ–væVBv—F‚F†R&VÆ’EDÂv†–ÆR7F–ÆÂ&V¦V7F–æp¢òòGWÆ–6FRWfVçD–G2–ç6–FRF†R7F—fRv–æF÷rà¢7FF–26öç7B÷&WÆ•v–æF÷rÒGW&F–öâ†F—3¢3“° ¢F–ÖW#ò÷&V6öææV7EF–ÖW#°¢F–ÖW#òö†VÇF…F–ÖW#°¢F–ÖW#òöÖWFFF&Vg&W6…F–ÖW#°¢&ööÂöÖçVÄF—66öææV7BÒG'VS°¢&ööÂ÷&V6öææV7D–å&öw&W72ÒfÇ6S°¢&ööÂ÷&VÆ•Væf–Æ&ÆTÆövvVBÒfÇ6S°¢–çB÷&V6öææV7DGFV×BÒ°¢–çBö†VÇF„Ö—76W2Ò°¢7G&–æsòöÆ7E&VÆ•W&Ã° ¢‡GG6W'fW#òöF—&V7Df–ÆU6W'fW#°¢–çCòöF—&V7Df–ÆU6W'fW%÷'C°¢f–æÂöF—&V7E6†&W2ÒÅ7G&–ærÂôF—&V7Df–ÆU6†&Sç·Ó° ¢7G&VÓÄÆ–'&'”Öæ–fW7CâvWBÖæ–fW7D6†ævW2ÓâöÖæ–fW7D6†ævW2ç7G&VÓ° ¢òòò7F'BW'6—7FVçB&V6öææV7BÆö÷v—F†÷WB&WV—&–ærF†Rf—'7B6öææV7F–öâFğ¢òòò7V66VVBâF†—2—2W6VBöâ7F'GWv†VâWFô6öææV7C×G'VRæBF†P¢òòòW'6öæÂ‡V"÷&VÆ’—27F–ÆÂöffÆ–æRà¢fö–B7F'DWFõ&V6öææV7B‡·&WV—&VB7G&–ær&VÆ•W&ÇÒ’°¢–b‡&VÆ•W&ÂçG&–Ò‚’æ—4V×G’ÇÂöÖçVÄF—66öææV7BÓÒfÇ6RbböÆ7E&VÆ•W&ÂÓÒ&VÆ•W&Âbb÷&V6öææV7EF–ÖW"ÒçVÆÂ’°¢&WGW&ã°¢Ğ¢öÖçVÄF—66öææV7BÒfÇ6S°¢öÆ7E&VÆ•W&ÂÒ&VÆ•W&Ã°¢÷&V6öææV7DGFV×BÒ°¢öVæE&VÆ•Væf–Æ&ÆTÆötöæ6R‚“°¢÷6WE7FFR€¢7FFRçfÇVRæ6÷•v—F‚†6öææV7FVC¢fÇ6RÂ&VÆ•W&Ã¢&VÆ•W&ÂÂ7FGW5FW‡C¢u&VÆ’İ]Mí-=ı]Òâ	ı]]ıíM­½í}]Íòâââr’À¢“°¢÷66†VGVÆU&V6öææV7B†–ÖÖVF–FS¢G'VR“°¢Ğ ¢gWGW&SÇfö–Câ6öææV7B‡·&WV—&VB7G&–ær&VÆ•W&ÇÒ’7–æ2°¢öÖçVÄF—66öææV7BÒfÇ6S°¢öÆ7E&VÆ•W&ÂÒ&VÆ•W&Ã°¢÷&V6öææV7EF–ÖW#òæ6æ6VÂ‚“°¢÷&V6öææV7EF–ÖW"ÒçVÆÃ°¢v—BF—66öææV7B†ÖçVÃ¢fÇ6R“°¢÷6WE7FFR‡7FFRçfÇVRæ6÷•v—F‚†6öææV7FVC¢fÇ6RÂ7FGW5FW‡C¢}	ıíM­½í}]İRââârÂ&VÆ•W&Ã¢&VÆ•W&Â’“° ¢f–æÂÖæ–fW7BÒv—B÷7F÷&vRæÆöDÖæ–fW7B‚“°¢–b†Öæ–fW7Bæ—47W'&VçDFWf–6U&Wfö¶VB’°¢÷6WE7FFR€¢7FFRçfÇVRæ6÷•v—F‚†6öææV7FVC¢fÇ6RÂ7FGW5FW‡C¢}	Mí-=òİ-í=â=-í--í-í}-ÒrÂ&VÆ•W&Ã¢&VÆ•W&Â’À¢“°¢F‡&÷r7FFTW'&÷"‚}	Mí-=òİ-í=â=-í--¢­­=İ-2í-í}-Òr“°¢Ğ¢v—B÷&ö&U&VÆ”†VÇF‚‡&VÆ•W&ÂÂF–ÖV÷WC¢6öç7BGW&F–öâ‡6V6öæG3¢R’“°¢f–æÂW&’ÒW&’ç'6R‡&VÆ•W&ÂçG&–Ò‚’“°¢f–æÂ6Æ–VçBÒ&VÆ”6Æ–VçB‡&VÆ•W&“¢W&’Â66÷VçD–C¢Öæ–fW7Bæ66÷VçD–BÂFWf–6T–C¢Öæ–fW7BæFWf–6T–B“°¢ö6Æ–VçBÒ6Æ–VçC°¢ö–æ6öÖ–æu7V'67&—F–öâÒ6Æ–VçBæ–æ6öÖ–æp¢æ7–æ4Ö‚†VçfVÆ÷R’7–æ2°¢v—Bö†æFÆT–æ6öÖ–ætVçfVÆ÷R†VçfVÆ÷R“°¢Ò¢æÆ—7FVâ€¢…ò’·ÒÀ¢öäW'&÷#¢†W'&÷"’°¢Væv—FVB…ö†æFÆU&VÆ”F—66öææV7FVB†W'&÷"’“°¢ÒÀ¢“°¢ö&–æ'•7V'67&—F–öâÒ6Æ–VçBæ&–æ'”–æ6öÖ–æp¢æ7–æ4Ö‚†ÖW76vR’7–æ2°¢v—Bö†æFÆT–æ6öÖ–æt&–æ'”g&ÖR†ÖW76vR“°¢Ò¢æÆ—7FVâ€¢…ò’·ÒÀ¢öäW'&÷#¢†W'&÷"’°¢Væv—FVB…ö†æFÆU&VÆ”F—66öææV7FVB†W'&÷"’“°¢ÒÀ¢“° ¢G'’°¢v—B6Æ–VçBæ6öææV7B‚“°¢Ò6F6‚†W'&÷"’°¢v—BF—66öææV7B†ÖçVÃ¢fÇ6R“°¢–b‚÷&V6öææV7D–å&öw&W72’°¢öVæE&VÆ•Væf–Æ&ÆTÆötöæ6R‚“°¢÷66†VGVÆU&V6öææV7B‚“°¢Ğ¢&WF‡&÷s°¢Ğ¢÷&V6öææV7DGFV×BÒ°¢ö†VÇF„Ö—76W2Ò°¢÷&VÆ•Væf–Æ&ÆTÆövvVBÒfÇ6S°¢öVæDÆör‚}	ıíM­½í}]İâ¢G&VÆ•W&Âr“°¢÷6WE7FFR‡7FFRçfÇVRæ6÷•v—F‚†6öææV7FVC¢G'VRÂ7FGW5FW‡C¢}	ıíM­½í}]İâr’“°¢÷7F'D†VÇF„Ööæ—F÷"‡&VÆ•W&Â“°¢÷7F'DÖWFFF&Vg&W6„Æö÷†6Æ–VçB“°¢Væv—FVB…öVç7W&TF—&V7Df–ÆU6W'fW"‚’“° ¢v—BVÆÄöffÆ–æUVWVR‡&V6öã¢v6öææV7FVBr“°¢v—B&Vg&W6„ÖWFFF‡&V6öã¢v6öææV7FVBr“°¢÷66†VGVÆU7F'GWÖWFFF&Vg&W6‚†6Æ–VçB“°¢Ğ ¢gWGW&SÇfö–CâF—66öææV7B‡¶&ööÂÖçVÂÒG'VWÒ’7–æ2°¢ö†VÇF…F–ÖW#òæ6æ6VÂ‚“°¢ö†VÇF…F–ÖW"ÒçVÆÃ°¢öÖWFFF&Vg&W6…F–ÖW#òæ6æ6VÂ‚“°¢öÖWFFF&Vg&W6…F–ÖW"ÒçVÆÃ°¢–b†ÖçVÂ’ö†VÇF„Ö—76W2Ò°¢–b†ÖçVÂ’°¢öÖçVÄF—66öææV7BÒG'VS°¢÷&V6öææV7EF–ÖW#òæ6æ6VÂ‚“°¢÷&V6öææV7EF–ÖW"ÒçVÆÃ°¢Ğ¢v—Bö–æ6öÖ–æu7V'67&—F–öãòæ6æ6VÂ‚“°¢ö–æ6öÖ–æu7V'67&—F–öâÒçVÆÃ°¢v—Bö&–æ'•7V'67&—F–öãòæ6æ6VÂ‚“°¢ö&–æ'•7V'67&—F–öâÒçVÆÃ°¢f–æÂ6Æ–VçBÒö6Æ–VçC°¢ö6Æ–VçBÒçVÆÃ°¢v—B6Æ–VçCòæF—7÷6R‚“°¢–b†ÖçVÂbb7FFRçfÇVRæ6öææV7FVB’°¢öVæDÆör‚}	í-­½í}]İâr“°¢Ğ¢÷6WE7FFR€¢7FFRçfÇVRæ6÷•v—F‚€¢6öææV7FVC¢fÇ6RÀ¢7FGW5FW‡C¢ÖçVÂò}	İRıíM­½í}]İâr¢u&VÆ’İ]Mí-=ı]Òâ	ı]]ıíM­½í}]ÍòââârÀ¢öæÆ–æUVW$FWf–6T–G3¢6öç7BµÒÀ¢’À¢“°¢Ğ ¢gWGW&SÇfö–Câö†æFÆU&VÆ”F—66öææV7FVB„ö&¦V7BW'&÷"’7–æ2°¢–b…öÖçVÄF—66öææV7B’&WGW&ã°¢v—BF—66öææV7B†ÖçVÃ¢fÇ6R“°¢öVæE&VÆ•Væf–Æ&ÆTÆötöæ6R‚“°¢÷66†VGVÆU&V6öææV7B‚“°¢Ğ ¢fö–B÷66†VGVÆU&V6öææV7B‡¶&ööÂ–ÖÖVF–FRÒfÇ6WÒ’°¢–b…öÖçVÄF—66öææV7BÇÂ÷&V6öææV7D–å&öw&W72’&WGW&ã°¢f–æÂ&VÆ•W&ÂÒöÆ7E&VÆ•W&Ã°¢–b‡&VÆ•W&ÂÓÒçVÆÂÇÂ&VÆ•W&ÂçG&–Ò‚’æ—4V×G’’&WGW&ã°¢÷&V6öææV7EF–ÖW#òæ6æ6VÂ‚“°¢f–æÂ6V6öæG2Ò–ÖÖVF–FRò¢÷&V6öææV7DFVÆ•6V6öæG2…÷&V6öææV7DGFV×B“°¢÷6WE7FFR€¢7FFRçfÇVRæ6÷•v—F‚€¢6öææV7FVC¢fÇ6RÀ¢7FGW5FW‡C¢6V6öæG2ÃÒòu&VÆ’İ]Mí-=ı]Òâ	ı]]ıíM­½í}]Íòâââr¢u&VÆ’İ]Mí-=ı]Òâ	ıí--í}]]rG6V6öæG=rÀ¢&VÆ•W&Ã¢&VÆ•W&ÂÀ¢’À¢“°¢÷&V6öææV7EF–ÖW"ÒF–ÖW"„GW&F–öâ‡6V6öæG3¢6V6öæG2’Â‚’°¢Væv—FVB…öGFV×E&V6öææV7B‡&VÆ•W&Â’“°¢Ò“°¢Ğ ¢–çB÷&V6öææV7DFVÆ•6V6öæG2†–çBGFV×B’°¢òò¶VW&WG'’ö†VÇF‚G&ff–2ÖöFW7BÂ'WBFWFV7B&V6÷fW'’V–6¶Ç’à¢òògFW"F†Rf—'7BGvòV–6²GFV×G2vR&ö&RWfW'’R6V6öæG2à¢6öç7BFVÆ—2Ò³"Â"ÂRÂRÂRÂUÓ°¢&WGW&âFVÆ—5¶GFV×Bæ6Æ×ƒÂFVÆ—2æÆVæwF‚Ò’çFô–çB‚•Ó°¢Ğ ¢fö–BöVæE&VÆ•Væf–Æ&ÆTÆötöæ6R‚’°¢–b…÷&VÆ•Væf–Æ&ÆTÆövvVB’&WGW&ã°¢÷&VÆ•Væf–Æ&ÆTÆövvVBÒG'VS°¢öVæDÆör‚u&VÆ’İ]Mí-=ı]Òâ	--íı]]ıíM­½í}]İR-­½í}]İââr“°¢Ğ ¢fö–B÷7F'D†VÇF„Ööæ—F÷"…7G&–ær&VÆ•W&Â’°¢ö†VÇF…F–ÖW#òæ6æ6VÂ‚“°¢ö†VÇF…F–ÖW"ÒF–ÖW"çW&–öF–2†6öç7BGW&F–öâ‡6V6öæG3¢R’Â…ò’°¢Væv—FVB…ö6†V6µ&VÆ”†VÇF‚‡&VÆ•W&Â’“°¢Ò“°¢Ğ ¢gWGW&SÇfö–Câö6†V6µ&VÆ”†VÇF‚…7G&–ær&VÆ•W&Â’7–æ2°¢–b…öÖçVÄF—66öææV7BÇÂ7FFRçfÇVRæ6öææV7FVB’&WGW&ã°¢G'’°¢v—B÷&ö&U&VÆ”†VÇF‚‡&VÆ•W&ÂÂF–ÖV÷WC¢6öç7BGW&F–öâ‡6V6öæG3¢R’“°¢–b…ö†VÇF„Ö—76W2Ò’°¢ö†VÇF„Ö—76W2Ò°¢÷6WE7FFR‡7FFRçfÇVRæ6÷•v—F‚‡7FGW5FW‡C¢}	ıíM­½í}]İâr’“°¢Ğ¢Ò6F6‚†W'&÷"’°¢ö†VÇF„Ö—76W2³Ò°¢òò6–ævÆRf–ÆVB…EE&ö&RFöW2æ÷BÖVâF†RvV'6ö6¶WB&VÆ’—2F÷vã ¢òòÖö&–ÆR&F–÷2ÂDå266†W2æB6F—fRæWGv÷&²G&ç6—F–öç26âG&÷öæP¢òò&WVW7Bv†–ÆRF†R&VÆ’—G6VÆb—2†VÇF‡’âF—66öææV7BöæÇ’gFW"fWp¢òò6öç6V7WF—fRÖ—76W2à¢–b…ö†VÇF„Ö—76W2Â2’°¢÷6WE7FFR‡7FFRçfÇVRæ6÷•v—F‚‡7FGW5FW‡C¢}	ıíM­½í}]İââ	ıí-]ı]Â&VÆ’âââr’“°¢&WGW&ã°¢Ğ¢v—Bö†æFÆU&VÆ”F—66öææV7FVB†W'&÷"“°¢Ğ¢Ğ ¢gWGW&SÇfö–Câ÷&ö&U&VÆ”†VÇF‚…7G&–ær&VÆ•W&ÂÂ·&WV—&VBGW&F–öâF–ÖV÷WGÒ’7–æ2°¢f–æÂW&’Òö'V–ÆDVæGö–çEW&’‡&VÆ•W&ÂÂrö†VÇF‚r“°¢f–æÂ6Æ–VçBÒ‡GG6Æ–VçB‚’âæ6öææV7F–öåF–ÖV÷WBÒF–ÖV÷WC°¢G'’°¢f–æÂ&WVW7BÒv—B6Æ–VçBævWEW&Â‡W&’’çF–ÖV÷WB‡F–ÖV÷WB“°¢f–æÂ&W7öç6RÒv—B&WVW7Bæ6Æ÷6R‚’çF–ÖV÷WB‡F–ÖV÷WB“°¢v—B&W7öç6RæG&–â‚’çF–ÖV÷WB‡F–ÖV÷WB“°¢–b‡&W7öç6Rç7FGW46öFRÂ#ÇÂ&W7öç6Rç7FGW46öFRãÒ3’°¢F‡&÷r7FFTW'&÷"‚t…EEG·&W7öç6Rç7FGW46öFWÒr“°¢Ğ¢Òf–æÆÇ’°¢6Æ–VçBæ6Æ÷6R†f÷&6S¢G'VR“°¢Ğ¢Ğ ¢gWGW&SÇfö–CâöGFV×E&V6öææV7B…7G&–ær&VÆ•W&Â’7–æ2°¢–b…öÖçVÄF—66öææV7BÇÂ÷&V6öææV7D–å&öw&W72’&WGW&ã°¢÷&V6öææV7D–å&öw&W72ÒG'VS°¢G'’°¢÷&V6öææV7DGFV×B³Ò°¢v—B6öææV7B‡&VÆ•W&Ã¢&VÆ•W&Â“°¢öVæDÆör‚}	--íı]]ıíM­½í}]İR-½ıí½İ]İâr“°¢Ò6F6‚…ò’°¢òò	İRı]Â­mM=âİ]=M}İ=âıíı½-­2"m=İ³¢İ}RíÒ½-à¢òòı]-]-ò"=Âı‚-½­½í}]İİíÂ‡V"÷&VÆ’â
+-]­=’--=¢òò-M]Òıâ­íİ­R‚-í­Rí-íıİòà¢÷&V6öææV7D–å&öw&W72ÒfÇ6S°¢÷66†VGVÆU&V6öææV7B‚“°¢&WGW&ã°¢Ğ¢÷&V6öææV7D–å&öw&W72ÒfÇ6S°¢Ğ ¢gWGW&SÇfö–Câ&Vg&W6„ÖWFFF‡·&WV—&VB7G&–ær&V6öçÒ’7–æ2°¢v—B&WVW7DÆ–'&'•6æ6†÷B‡&V6öã¢rG&V6öâ÷&WVW7Br“°¢v—B'&öF67DÆ–'&'•6æ6†÷B‡&V6öã¢rG&V6öâ÷6æ6†÷Br“°¢Ğ ¢fö–B÷66†VGVÆU7F'GWÖWFFF&Vg&W6‚…&VÆ”6Æ–VçB6Æ–VçB’°¢f÷"†f–æÂFVÆ’–â6öç7B´GW&F–öâ†Ö–ÆÆ—6V6öæG3¢c’ÂGW&F–öâ‡6V6öæG3¢"’ÂGW&F–öâ‡6V6öæG3¢R•Ò’°¢Væv—FVB€¢gWGW&SÇfö–CâæFVÆ–VB†FVÆ’Â‚’7–æ2°¢–b…ö6Æ–VçBÒ6Æ–VçBÇÂ7FFRçfÇVRæ6öææV7FVB’&WGW&ã°¢v—BVÆÄöffÆ–æUVWVR‡&V6öã¢w7F'GW÷&WG'•òG¶FVÆ’æ–äÖ–ÆÆ—6V6öæG7Ö×2r“°¢v—B&Vg&W6„ÖWFFF‡&V6öã¢w7F'GW÷&WG'•òG¶FVÆ’æ–äÖ–ÆÆ—6V6öæG7Ö×2r“°¢Ò’À¢“°¢Ğ¢Ğ ¢fö–B÷7F'DÖWFFF&Vg&W6„Æö÷…&VÆ”6Æ–VçB6Æ–VçB’°¢öÖWFFF&Vg&W6…F–ÖW#òæ6æ6VÂ‚“°¢öÖWFFF&Vg&W6…F–ÖW"ÒF–ÖW"çW&–öF–2†6öç7BGW&F–öâ‡6V6öæG3¢3’Â…ò’°¢–b…ö6Æ–VçBÒ6Æ–VçBÇÂ7FFRçfÇVRæ6öææV7FVBÇÂöÖçVÄF—66öææV7B’&WGW&ã°¢òò7&–çBC27–æ2c#¢W&–öF–2†VÇF‚÷VWVRÖ–çFVææ6R×W7Bæ÷B7ÒVW'0¢òòv—F‚6æ6†÷B&WVW7G2â&WVFVB&WVW7G26â&W7W'&V7B7FÆRVWVV@¢òòÖWFFFg&öÒ§W7B×—&VB÷"V×G’FWf–6W2æBÖ¶RF†RT’Æöö²2–bF†P¢òòÆ–'&'’v2Æ÷7Bâ6æ6†÷B&WVW7G2&VÖ–âW‡Æ–6—C¢öâ6öææV7BÂgFW ¢òò—&–ærÂæBgFW"wV&FVBöFW7G'V7F—fR6æ6†÷B—2&V¦V7FVBà¢Væv—FVB‡VÆÄöffÆ–æUVWVR‡&V6öã¢wW&–öF–2r’“°¢Ò“°¢Ğ ¢gWGW&SÆ&ööÃâVÆÄöffÆ–æUVWVR‡·&WV—&VB7G&–ær&V6öçÒ’7–æ2°¢f–æÂ6Æ–VçBÒö6Æ–VçC°¢–b†6Æ–VçBÓÒçVÆÂÇÂ7FFRçfÇVRæ6öææV7FVB’&WGW&âfÇ6S°¢G'’°¢6Æ–VçBç6VæD6öçG&öÂ‡°¢wG—Rs¢vöffÆ–æU÷VWVU÷VÆÂrÀ¢v66÷VçD–Bs¢6Æ–VçBæ66÷VçD–BÀ¢vFWf–6T–Bs¢6Æ–VçBæFWf–6T–BÀ¢w–ÆöBs¢²w&V6öâs¢&V6öçÒÀ¢Ò“°¢&WGW&âG'VS°¢Ò6F6‚†W'&÷"’°¢öVæDÆör‚}	İR=M½íÂ}ıí-ÂöffÆ–æRVWVS¢FW'&÷"r“°¢&WGW&âfÇ6S°¢Ğ¢Ğ ¢gWGW&SÆ&ööÃâ'&öF67DÆ–'&'•6æ6†÷B‡·&WV—&VB7G&–ær&V6öçÒ’7–æ2°¢f–æÂ6Æ–VçBÒö6Æ–VçC°¢–b†6Æ–VçBÓÒçVÆÂÇÂ7FFRçfÇVRæ6öææV7FVB’&WGW&âfÇ6S° ¢f–æÂÖæ–fW7BÒv—B÷7F÷&vRçF÷V6„7W'&VçDFWf–6R‚“°¢f–æÂVçfVÆ÷RÒ7–æ4VçfVÆ÷R€¢G—S¢vÆ–'&'•÷6æ6†÷BrÀ¢66÷VçD–C¢Öæ–fW7Bæ66÷VçD–BÀ¢FWf–6T–C¢Öæ–fW7BæFWf–6T–BÀ¢–ÆöC¢²w&V6öâs¢&V6öâÂvÖæ–fW7Bs¢Öæ–fW7BçFõ7–æ4§6öâ‚—ÒÀ¢“° ¢f–æÂ6VçBÒv—B÷6VæDVçfVÆ÷R†VçfVÆ÷RÂÆötÆ&VÃ¢}	í-ı-½]ÒS$R6æ6†÷C¢G&V6öâr“°¢–b…÷6†÷VÆE&WG'•6æ6†÷D'&öF67B‡&V6öâ’’°¢÷66†VGVÆU6æ6†÷D'&öF67E&WG&–W2‡&V6öã¢&V6öâ“°¢Ğ¢&WGW&â6VçC°¢Ğ ¢&ööÂ÷6†÷VÆE&WG'•6æ6†÷D'&öF67B…7G&–ær&V6öâ’°¢–b‡&V6öâæ6öçF–ç2‚u÷&WG'•òr’’&WGW&âfÇ6S°¢&WGW&â&V6öâæ6öçF–ç2‚v&ööµö–×÷'FVBr’ÇÀ¢&V6öâæ6öçF–ç2‚vÆö6Åö6÷•÷&VÖ÷fVBr’ÇÀ¢&V6öâæ6öçF–ç2‚v&ööµöFVÆWFVBr’ÇÀ¢&V6öâæ6öçF–ç2‚wG'W7FVEöFWf–6U÷&Wfö¶VBr’ÇÀ¢&V6öâæ6öçF–ç2‚w—&–æuö6Æ–ÖVBr’ÇÀ¢&V6öâæ6öçF–ç2‚vFWf–6UöæÖUö6†ævVBr“°¢Ğ ¢fö–B÷66†VGVÆU6æ6†÷D'&öF67E&WG&–W2‡·&WV—&VB7G&–ær&V6öçÒ’°¢f÷"†f–æÂFVÆ’–â6öç7B´GW&F–öâ‡6V6öæG3¢"’ÂGW&F–öâ‡6V6öæG3¢‚•Ò’°¢Væv—FVB€¢gWGW&SÇfö–CâæFVÆ–VB†FVÆ’Â‚’7–æ2°¢–b‚7FFRçfÇVRæ6öææV7FVBÇÂöÖçVÄF—66öææV7B’&WGW&ã°¢v—B'&öF67DÆ–'&'•6æ6†÷B‡&V6öã¢rG·&V6öçÕ÷&WG'•òG¶FVÆ’æ–å6V6öæG7×2r“°¢Ò’À¢“°¢Ğ¢Ğ ¢gWGW&SÆ&ööÃâ&WVW7DÆ–'&'•6æ6†÷B‡·&WV—&VB7G&–ær&V6öçÒ’7–æ2°¢f–æÂÖæ–fW7BÒv—B÷7F÷&vRæÆöDÖæ–fW7B‚“°¢&WGW&â÷6VæDVçfVÆ÷R€¢7–æ4VçfVÆ÷R€¢G—S¢vÆ–'&'•÷6æ6†÷E÷&WVW7FVBrÀ¢66÷VçD–C¢Öæ–fW7Bæ66÷VçD–BÀ¢FWf–6T–C¢Öæ–fW7BæFWf–6T–BÀ¢–ÆöC¢²w&V6öâs¢&V6öâÂw&WVW7F–ætFWf–6T–Bs¢Öæ–fW7BæFWf–6T–GÒÀ¢’À¢ÆötÆ&VÃ¢}	}ıí]Ò6æ6†÷C¢G&V6öârÀ¢“°¢Ğ ¢gWGW&SÅ—&–æt–çf—FSâ7&VFU—&–æt–çf—FR‡°¢&WV—&VB7–æ56WGF–æw26WGF–æw2À¢GW&F–öâGFÂÒ6öç7BGW&F–öâ†Ö–çWFW3¢R’À¢Ò’7–æ2°¢÷fÆ–FFTVæGö–çDf÷%—&–ær‡6WGF–æw2“°¢f–æÂÖæ–fW7BÒv—B÷7F÷&vRæÆöDÖæ–fW7B‚“°¢f–æÂW&’Òö'V–ÆDVæGö–çEW&’‡6WGF–æw2æVffV7F—fU&VÆ•W&ÂÂr÷—&–ær÷7F'Br“°¢f–æÂ&W7öç6RÒv—B÷÷7D§6öâ‡W&’Â°¢v66÷VçD–Bs¢Öæ–fW7Bæ66÷VçD–BÀ¢v÷væW$FWf–6T–Bs¢Öæ–fW7BæFWf–6T–BÀ¢v÷væW$FWf–6TæÖRs¢Öæ–fW7BæFWf–6TæÖRÀ¢v÷væW$FWf–6UV&Æ–4¶W’s¢Öæ–fW7BæFWf–6U6–væ–æuV&Æ–4¶W’À¢òòF†R6†÷'BÖ6öFR—&–ærfÆ÷r7F÷&W2F†RöæR×F–ÖR–çf—FR–ÆöBöâF†P¢òòöff–6–Â&VÆ’VçF–Â—B—26Æ–ÖVB÷"W‡—&W2à¢v66÷VçDVæ7'—F–öä¶W’s¢Öæ–fW7Bæ66÷VçDVæ7'—F–öä¶W’À¢w&VÆ•W&Âs¢6WGF–æw2æVffV7F—fU&VÆ•W&ÂÀ¢vW‡—&W56V6öæG2s¢GFÂæ–å6V6öæG2À¢Ò“°¢–b‡&W7öç6U²vö²uÒÒG'VR’°¢F‡&÷r7FFTW'&÷"‡&W7öç6U²vÖW76vRuÓòçFõ7G&–ær‚’óòu&VÆ’İRí}M²—&–ærİ­íBr“°¢Ğ¢f–æÂ6öFRÒöæ÷&ÖÆ—¦U—&–æt6öFR‡&W7öç6U²v6öFRuÓòçFõ7G&–ær‚’óòrr“°¢–b†6öFRæÆVæwF‚Òb’°¢F‡&÷r7FFTW'&÷"‚u&VÆ’-]İ=²İ]­í]­-İ½’—&–ærİ­íBr“°¢Ğ¢f–æÂW‡—&W4E6V6öæG2Ò‡&W7öç6U²vW‡—&W4BuÒ2çVÓò“òçFôF÷V&ÆR‚“°¢f–æÂW‡—&W4BÒW‡—&W4E6V6öæG2ÓÒçVÆÀ¢òFFUF–ÖRææ÷r‚’çFõWF2‚’æFB‡GFÂ¢¢FFUF–ÖRæg&öÔÖ–ÆÆ—6V6öæG56–æ6TWö6‚‚†W‡—&W4E6V6öæG2¢’ç&÷VæB‚’Â—5WF3¢G'VR“°¢òò"æBÖçVÂVçG'’æ÷r6''’öæÇ’F†R6†÷'BöæR×F–ÖR6öFRâF†R&VÆ¢òò7F÷&W2F†RgVÆÂ–çf—FR–ÆöBf÷"fWrÖ–çWFW2æB&WGW&ç2—Bg&öĞ¢òò÷—&–ærö6Æ–ÒÂ6òW6W'2Fòæ÷B†fRFò66â÷G—RÆöærVç&VF&ÆRÆ–æ·2à¢f–æÂ–çf—FTÆ–æ²Ò6öFS°¢öVæDÆör‚}
+í}MÒ—&–ærİ­íBF6öFRr“°¢&WGW&â—&–æt–çf—FR€¢6öFS¢6öFRÀ¢&VÆ•W&Ã¢6WGF–æw2æVffV7F—fU&VÆ•W&ÂÀ¢W‡—&W4C¢W‡—&W4BÀ¢–çf—FTÆ–æ³¢–çf—FTÆ–æ²À¢÷væW$FWf–6TæÖS¢Öæ–fW7BæFWf–6TæÖRÀ¢66÷VçDVæ7'—F–öä¶W“¢Öæ–fW7Bæ66÷VçDVæ7'—F–öä¶W’À¢“°¢Ğ ¢gWGW&SÅ—&–æt6Æ–Õ&W7VÇCâ6Æ–Õ—&–æt–çf—FR‡·&WV—&VB7G&–ær–çWBÂ&WV—&VB7–æ56WGF–æw2fÆÆ&6µ6WGF–æw7Ò’7–æ2°¢f–æÂ'6VBÒ÷'6U—&–æt–çWB†–çWB“°¢f–æÂVffV7F—fU6WGF–æw2Ò÷6WGF–æw4f÷$6Æ–ÖVE&VÆ•W&Â€¢'6VBç&VÆ•W&ÂóòfÆÆ&6µ6WGF–æw2æVffV7F—fU&VÆ•W&ÂÀ¢fÆÆ&6µ6WGF–æw2À¢“°¢÷fÆ–FFTVæGö–çDf÷%—&–ær†VffV7F—fU6WGF–æw2“°¢f–æÂ&VÆ•W&ÂÒVffV7F—fU6WGF–æw2æVffV7F—fU&VÆ•W&Ã° ¢f"Æö6ÂÒv—B÷7F÷&vRæÆöDÖæ–fW7B‚“°¢–b†Æö6Âæ—47W'&VçDFWf–6U&Wfö¶VB’°¢Æö6ÂÒv—B÷7F÷&vRç&÷FFT7W'&VçDFWf–6T–FVçF—G”f÷%—&–ær‚“°¢öVæDÆör‚}
+í}Mİİí-òM]İ-}İí-Â=-í--M½òıí--íİí=âıíM­½í}]İòıí½Rí-}½-Mí-=ıâr“°¢Ğ ¢f–æÂW&’Òö'V–ÆDVæGö–çEW&’‡&VÆ•W&ÂÂr÷—&–ærö6Æ–Òr“°¢ÖÅ7G&–ærÂG–æÖ–3ãò&W7öç6S°¢ö&¦V7Cò6Æ–ÔW'&÷#°¢G'’°¢&W7öç6RÒv—B÷÷7D§6öâ‡W&’Â°¢v6öFRs¢'6VBæ6öFRÀ¢vFWf–6T–Bs¢Æö6ÂæFWf–6T–BÀ¢vFWf–6TæÖRs¢Æö6ÂæFWf–6TæÖRÀ¢vFWf–6UV&Æ–4¶W’s¢Æö6ÂæFWf–6U6–væ–æuV&Æ–4¶W’À¢Ò“°¢–b‡&W7öç6U²vö²uÒÒG'VR’°¢F‡&÷r7FFTW'&÷"‡&W7öç6U²vÖW76vRuÓòçFõ7G&–ær‚’óòu—&–ærİ­íBİRıİı"&VÆ’r“°¢Ğ¢Ò6F6‚†W'&÷"’°¢6Æ–ÔW'&÷"ÒW'&÷#°¢–b‚'6VBæ†4VÖ&VFFVD66÷VçD–çf—FRÇÂ'6VBæVÖ&VFFVD–çf—FTW‡—&VB’°¢&WF‡&÷s°¢Ğ¢öVæDÆör‚u&VÆ’İRıİı²­íí-­’­íC¢FW'&÷"r“°¢Ğ ¢f–æÂ66÷VçD–BÒ&W7öç6Sõ²v66÷VçD–BuÓòçFõ7G&–ær‚’óò'6VBæ66÷VçD–Bóòrs°¢f–æÂ÷væW$FWf–6T–BÒ&W7öç6Sõ²v÷væW$FWf–6T–BuÓòçFõ7G&–ær‚’óò'6VBæ÷væW$FWf–6T–Bóòrs°¢f–æÂ÷væW$FWf–6TæÖRÒ&W7öç6Sõ²v÷væW$FWf–6TæÖRuÓòçFõ7G&–ær‚’óò'6VBæ÷væW$FWf–6TæÖRóò}
+=-í--âs°¢f–æÂ÷væW$FWf–6UV&Æ–4¶W’Ò&W7öç6Sõ²v÷væW$FWf–6UV&Æ–4¶W’uÓòçFõ7G&–ær‚’óò'6VBæ÷væW$FWf–6UV&Æ–4¶W’óòrs°¢f–æÂ66÷VçDVæ7'—F–öä¶W’Ò'6VBæ66÷VçDVæ7'—F–öä¶W’óò&W7öç6Sõ²v66÷VçDVæ7'—F–öä¶W’uÓòçFõ7G&–ær‚’óòrs°¢f–æÂ&WGW&æVE&VÆ•W&ÂÒ&VÆ•W&Ã°¢–b†66÷VçD–Bæ—4V×G’ÇÂ÷væW$FWf–6T–Bæ—4V×G’’°¢F‡&÷r7FFTW'&÷"‚u&VÆ’-]İ=²İ]ıí½İ½R—&–ærİMİİ½RG¶6Æ–ÔW'&÷"ÓÒçVÆÂòrr¢s¢F6Æ–ÔW'&÷"wÒr“°¢Ğ¢–b†66÷VçDVæ7'—F–öä¶W’æ—4V×G’’°¢F‡&÷r7FFTW'&÷"‚}	"ı=½]İ‚İ]"­½í}Mí-İò­­=İ-r“°¢Ğ ¢v—BF—66öææV7B†ÖçVÃ¢fÇ6R“°¢v—B÷7F÷&vRç6fU7–æ56WGF–æw2€¢÷6WGF–æw4f÷$6Æ–ÖVE&VÆ•W&Â‡&WGW&æVE&VÆ•W&ÂÂfÆÆ&6µ6WGF–æw2’æ6÷•v—F‚†WFô6öææV7C¢G'VR’À¢“°¢v—B÷7F÷&vRç&WÆ6T66÷VçDg&öÕ—&–ær€¢66÷VçD–C¢66÷VçD–BÀ¢66÷VçDVæ7'—F–öä¶W“¢66÷VçDVæ7'—F–öä¶W’À¢÷væW$FWf–6T–C¢÷væW$FWf–6T–BÀ¢÷væW$FWf–6TæÖS¢÷væW$FWf–6TæÖRÀ¢÷væW$FWf–6UV&Æ–4¶W“¢÷væW$FWf–6UV&Æ–4¶W’À¢“°¢öVæDÆör‚u—&–ær-½ıí½İ]Òâ	­­=İ"ıíM­½í}Ò--íÍ-}]­‚âr“°¢v—B6öææV7B‡&VÆ•W&Ã¢&VÆ•W&Â“°¢v—B&Vg&W6„ÖWFFF‡&V6öã¢w—&–æuö6ö×ÆWFVBr“°¢&WGW&â—&–æt6Æ–Õ&W7VÇB€¢66÷VçD–C¢66÷VçD–BÀ¢&VÆ•W&Ã¢&VÆ•W&ÂÀ¢÷væW$FWf–6T–C¢÷væW$FWf–6T–BÀ¢÷væW$FWf–6TæÖS¢÷væW$FWf–6TæÖRÀ¢66÷VçDVæ7'—F–öä¶W“¢66÷VçDVæ7'—F–öä¶W’À¢“°¢Ğ ¢fö–B÷fÆ–FFTVæGö–çDf÷%—&–ær…7–æ56WGF–æw26WGF–æw2’°¢–b‡6WGF–æw2çW6W4öff–6–ÅÆ6V†öÆFW"’°¢F‡&÷r7FFTW'&÷"‚}	íMm½Íİ½’&VÆ’&VD&2İRİ-í]Ò"İ-í’í­Râr“°¢Ğ¢Ğ ¢W&’ö'V–ÆDVæGö–çEW&’…7G&–ær&VÆ•W&ÂÂ7G&–ærVæGö–çEF‚’°¢f–æÂ&6RÒW&’ç'6R‡&VÆ•W&ÂçG&–Ò‚’“°¢f–æÂ&6UF‚Ò&6RçF‚ç&WÆ6TÆÂ…&VtW‡‡"rò²Br’Ârr“°¢f–æÂ6ÆVäVæGö–çBÒVæGö–çEF‚ç7F'G5v—F‚‚ròr’òVæGö–çEF‚¢ròFVæGö–çEF‚s°¢&WGW&â&6Rç&WÆ6R€¢66†VÖS¢&6Rç66†VÖRÓÒww2p¢òv‡GGp¢¢&6Rç66†VÖRÓÒww72p¢òv‡GG2p¢¢&6Rç66†VÖRÀ¢Fƒ¢rF&6UF‚F6ÆVäVæGö–çBrç&WÆ6TÆÂ…&VtW‡‡"r÷³"ÇÒr’Âròr’À¢VW'“¢rrÀ¢“°¢Ğ ¢gWGW&SÄÖÅ7G&–ærÂG–æÖ–3ãâ÷÷7D§6öâ…W&’W&’ÂÖÅ7G&–ærÂG–æÖ–3â&öG’’7–æ2°¢f–æÂ6Æ–VçBÒ‡GG6Æ–VçB‚’âæ6öææV7F–öåF–ÖV÷WBÒ6öç7BGW&F–öâ‡6V6öæG3¢‚“°¢G'’°¢f–æÂ&WVW7BÒv—B6Æ–VçBç÷7EW&Â‡W&’“°¢&WVW7Bæ†VFW'2æ6öçFVçEG—RÒ6öçFVçEG—Ræ§6öã°¢&WVW7Bçw&—FR†§6öäVæ6öFR†&öG’’“°¢f–æÂ&W7öç6RÒv—B&WVW7Bæ6Æ÷6R‚’çF–ÖV÷WB†6öç7BGW&F–öâ‡6V6öæG3¢"’“°¢f–æÂ&W7öç6T&öG’Òv—B&W7öç6RçG&ç6f÷&Ò‡WFc‚æFV6öFW"’æ¦ö–â‚“°¢f–æÂFV6öFVBÒ&W7öç6T&öG’æ—4V×G’òÅ7G&–ærÂG–æÖ–3ç·Ò¢§6öäFV6öFR‡&W7öç6T&öG’“°¢–b†FV6öFVB—2Ö’°¢F‡&÷r7FFTW'&÷"‚u&VÆ’-]İ=²İR¥4ôâİí­]­"r“°¢Ğ¢f–æÂ&W7VÇBÒÖÅ7G&–ærÂG–æÖ–3âæg&öÒ†FV6öFVB“°¢–b‡&W7öç6Rç7FGW46öFRÂ#ÇÂ&W7öç6Rç7FGW46öFRãÒ3’°¢F‡&÷r7FFTW'&÷"‡&W7VÇE²vÖW76vRuÓòçFõ7G&–ær‚’óòt…EEG·&W7öç6Rç7FGW46öFWÒr“°¢Ğ¢&WGW&â&W7VÇC°¢Òf–æÆÇ’°¢6Æ–VçBæ6Æ÷6R†f÷&6S¢G'VR“°¢Ğ¢Ğ ¢õ'6VE—&–æt–çWB÷'6U—&–æt–çWB…7G&–ær–çWB’°¢f–æÂ&rÒ–çWBçG&–Ò‚“°¢–b‡&ræ—4V×G’’°¢F‡&÷r&wVÖVçDW'&÷"‚}	--]M-R—&–ærİ­íB½‚ı=½]İRr“°¢Ğ¢–b‡&rç7F'G5v—F‚‚w&VF&3¢òòr’’°¢f–æÂW&’ÒW&’ç'6R‡&r“°¢f–æÂ6öFRÒöæ÷&ÖÆ—¦U—&–æt6öFR‡W&’çVW'•&ÖWFW'5²v6öFRuÒóòrr“°¢f–æÂ&VÆ’ÒW&’çVW'•&ÖWFW'5²w&VÆ’uÓòçG&–Ò‚“°¢f–æÂ66÷VçD¶W’ÒW&’çVW'•&ÖWFW'5²v¶W’uÓòçG&–Ò‚“°¢f–æÂ÷væW$FWf–6TæÖRÒW&’çVW'•&ÖWFW'5²vFWf–6TæÖRuÓòçG&–Ò‚“°¢f–æÂ÷væW$FWf–6UV&Æ–4¶W’ÒW&’çVW'•&ÖWFW'5²v÷væW$FWf–6UV&Æ–4¶W’uÓòçG&–Ò‚“°¢f–æÂ66÷VçD–BÒW&’çVW'•&ÖWFW'5²v66÷VçD–BuÓòçG&–Ò‚“°¢f–æÂ÷væW$FWf–6T–BÒW&’çVW'•&ÖWFW'5²v÷væW$FWf–6T–BuÓòçG&–Ò‚“°¢f–æÂW‡—&W4E&rÒW&’çVW'•&ÖWFW'5²vW‡—&W4BuÓòçG&–Ò‚“°¢f–æÂW‡—&W4BÒW‡—&W4E&rÓÒçVÆÂÇÂW‡—&W4E&ræ—4V×G’òçVÆÂ¢FFUF–ÖRçG'•'6R†W‡—&W4E&r“òçFõWF2‚“°¢–b†6öFRæÆVæwF‚Òb’°¢F‡&÷r&wVÖVçDW'&÷"‚}	"ı=½]İ‚İ]"­í]­-İí=âbİ}İ}İí=â­íMr“°¢Ğ¢&WGW&âõ'6VE—&–æt–çWB€¢6öFS¢6öFRÀ¢&VÆ•W&Ã¢&VÆ“òæ—4V×G’ÓÒG'VRòçVÆÂ¢&VÆ’À¢66÷VçDVæ7'—F–öä¶W“¢66÷VçD¶W“òæ—4V×G’ÓÒG'VRòçVÆÂ¢66÷VçD¶W’À¢÷væW$FWf–6TæÖS¢÷væW$FWf–6TæÖSòæ—4V×G’ÓÒG'VRòçVÆÂ¢÷væW$FWf–6TæÖRÀ¢÷væW$FWf–6UV&Æ–4¶W“¢÷væW$FWf–6UV&Æ–4¶W“òæ—4V×G’ÓÒG'VRòçVÆÂ¢÷væW$FWf–6UV&Æ–4¶W’À¢66÷VçD–C¢66÷VçD–Còæ—4V×G’ÓÒG'VRòçVÆÂ¢66÷VçD–BÀ¢÷væW$FWf–6T–C¢÷væW$FWf–6T–Còæ—4V×G’ÓÒG'VRòçVÆÂ¢÷væW$FWf–6T–BÀ¢W‡—&W4C¢W‡—&W4BÀ¢“°¢Ğ¢f–æÂ6öFRÒöæ÷&ÖÆ—¦U—&–æt6öFR‡&r“°¢–b†6öFRæÆVæwF‚Òb’°¢F‡&÷r&wVÖVçDW'&÷"‚}	­íBı=½]İòMí½m]Òí-íı-ÂrbmMr“°¢Ğ¢&WGW&âõ'6VE—&–æt–çWB†6öFS¢6öFR“°¢Ğ ¢7G&–æröæ÷&ÖÆ—¦U—&–æt6öFR…7G&–ær&r’Óâ&rç&WÆ6TÆÂ…&VtW‡‡"uµãÓ•Òr’Ârr“° ¢7–æ56WGF–æw2÷6WGF–æw4f÷$6Æ–ÖVE&VÆ•W&Â…7G&–ær&VÆ•W&ÂÂ7–æ56WGF–æw2fÆÆ&6²’°¢òò7&–çB#S¢ÆÂ6Æ–VçB6öææV7F–öç2W6RF†Röff–6–Â&VD&2&VÆ’à¢òòöÆFW""Æ–æ·2Ö’7F–ÆÂ6''’7W7FöÒõF–Ç66ÆR&VÆ’&ÖWFW#²¶VW ¢òò66WF–ærF†RÆ–æ²'WB–væ÷&RF†BVæGö–çBf÷"F†R7GVÂ6öææV7F–öâà¢&WGW&âfÆÆ&6²æ4öff–6–Â†WFô6öææV7C¢G'VR“°¢Ğ ¢gWGW&SÆ&ööÃâ&WVW7D&öö´f–ÆR„&ööµ&V6÷&B&öö²’7–æ2°¢f–æÂ6Æ–VçBÒö6Æ–VçC°¢–b†6Æ–VçBÓÒçVÆÂÇÂ7FFRçfÇVRæ6öææV7FVB’°¢öVæDÆör‚}	İ]½Í}ò­}-ÂG¶&öö²çF—FÆWÓ¢İ]"ıíM­½í}]İò¢&VÆ’r“°¢&WGW&âfÇ6S°¢Ğ¢–b†&öö²æ—4FVÆWFVB’°¢öVæDÆör‚rG¶&öö²çF—FÆWÒ=M½]İr½í-]­‚r“°¢&WGW&âfÇ6S°¢Ğ¢–b†&öö²æ—4F÷væÆöFVB’°¢öVæDÆör‚rG¶&öö²çF—FÆWÒ=mR­}İİİ-íÂ=-í--Rr“°¢&WGW&âfÇ6S°¢Ğ ¢f–æÂÖæ–fW7BÒv—B÷7F÷&vRæÆöDÖæ–fW7B‚“°¢f–æÂG&ç6fW$–BÒwG&ç6fW"ÒGµ÷WV–BçcB‚—Òs°¢f–æÂ6W76–öâÒôF÷væÆöE6W76–öâ€¢G&ç6fW$–C¢G&ç6fW$–BÀ¢&öö´–C¢&öö²æ–BÀ¢f–ÆTæÖS¢&öö²æf–ÆTæÖRÀ¢f÷&ÖC¢&öö²æf÷&ÖBÀ¢W‡V7FVE6†#Sc¢&öö²æ6öçFVçE6†#SbÀ¢W‡V7FVD'—FW3¢&öö²ç6—¦T'—FW2À¢“°¢öF÷væÆöG4'•G&ç6fW$–E·G&ç6fW$–EÒÒ6W76–öã°¢÷6WDF÷væÆöE6æ6†÷B€¢f–ÆUG&ç6fW%6æ6†÷B€¢G&ç6fW$–C¢G&ç6fW$–BÀ¢&öö´–C¢&öö²æ–BÀ¢F—&V7F–öã¢vF÷væÆöBrÀ¢f–ÆTæÖS¢&öö²æf–ÆTæÖRÀ¢7FGW5FW‡C¢}	]Â=-í--âM½íÂââârÀ¢7F—fS¢G'VRÀ¢F÷FÄ'—FW3¢&öö²ç6—¦T'—FW2À¢’À¢“° ¢òò&WVW7G26â&RÆ÷7BW†7FÇ’v†–ÆRÖö&–ÆR6Æ–VçB÷"F–Ç66ÆRgVææVÂ—0¢òò&V6öææV7F–ærâ6VæBF†R6ÖR–FV×÷FVçB&WVW7BfWrF–ÖW2VçF–ÂâöffW ¢òò—2&V6V—fVBÂF†Vâf–Âv—F‚6ÆV"&V6öâ–ç7FVBöb†æv–ær6–ÆVçFÇ’à¢gWGW&SÆ&ööÃâ6VæE&WVW7B‡µ7G&–æsòÆ&VÇÒ’Óâ÷6VæDVçfVÆ÷R€¢7–æ4VçfVÆ÷R€¢G—S¢v&ööµöf–ÆU÷&WVW7FVBrÀ¢66÷VçD–C¢Öæ–fW7Bæ66÷VçD–BÀ¢FWf–6T–C¢Öæ–fW7BæFWf–6T–BÀ¢–ÆöC¢°¢wG&ç6fW$–Bs¢G&ç6fW$–BÀ¢v&öö´–Bs¢&öö²æ–BÀ¢w&WVW7F–ætFWf–6T–Bs¢Öæ–fW7BæFWf–6T–BÀ¢vf–ÆTæÖRs¢&öö²æf–ÆTæÖRÀ¢vW‡V7FVE6†#Sbs¢&öö²æ6öçFVçE6†#SbÀ¢vW‡V7FVE6—¦T'—FW2s¢&öö²ç6—¦T'—FW2À¢w&VfW'&VD6‡Væµ6—¦Rs¢öFVfVÇD6‡Væµ6—¦RÀ¢v&–æ'•G&ç6fW"s¢G'VRÀ¢ÒÀ¢’À¢ÆötÆ&VÃ¢Æ&VÂÀ¢“° ¢f÷"†f–æÂFVÆ’–â6öç7B´GW&F–öâ‡6V6öæG3¢R’ÂGW&F–öâ‡6V6öæG3¢"•Ò’°¢Væv—FVB€¢gWGW&SÇfö–CâæFVÆ–VB†FVÆ’Â‚’7–æ2°¢f–æÂ7W'&VçBÒöF÷væÆöG4'•G&ç6fW$–E·G&ç6fW$–EÓ°¢–b†7W'&VçBÓÒçVÆÂÇÂ7W'&VçBç6÷W&6TFWf–6T–BÒçVÆÂ’&WGW&ã°¢÷6WDF÷væÆöE6æ6†÷B€¢7FFRçfÇVP¢æF÷væÆöDf÷$&öö²†7W'&VçBæ&öö´–B’¢æ6÷•v—F‚‡7FGW5FW‡C¢}	ıí--íı]Âıí¢-í}İ­ââârÂ7F—fS¢G'VR’À¢“°¢v—B6VæE&WVW7B‚“°¢Ò’À¢“°¢Ğ ¢Væv—FVB€¢gWGW&SÇfö–CâæFVÆ–VB…öF÷væÆöDöffW%F–ÖV÷WBÂ‚’7–æ2°¢f–æÂ7W'&VçBÒöF÷væÆöG4'•G&ç6fW$–E·G&ç6fW$–EÓ°¢–b†7W'&VçBÓÒçVÆÂ’&WGW&ã°¢–b†7W'&VçBç6÷W&6TFWf–6T–BÓÒçVÆÂ’°¢v—Böf–ÄF÷væÆöB†7W'&VçBÂ}	-í}İ¢İRİM]Ó¢=-í--â­İ=í’İRí--]-½âr“°¢Ğ¢Ò’À¢“° ¢&WGW&â6VæE&WVW7B†Æ&VÃ¢}	}ıí]ÒM³¢G¶&öö²çF—FÆWÒr“°¢Ğ ¢gWGW&SÇfö–Câ6æ6VÄ&öö´f–ÆTF÷væÆöB…7G&–ær&öö´–B’7–æ2°¢ôF÷væÆöE6W76–öãò6W76–öã°¢f÷"†f–æÂ6æF–FFR–âöF÷væÆöG4'•G&ç6fW$–BçfÇVW2’°¢–b†6æF–FFRæ&öö´–BÓÒ&öö´–B’°¢6W76–öâÒ6æF–FFS°¢'&V³°¢Ğ¢Ğ¢–b‡6W76–öâÓÒçVÆÂ’&WGW&ã°¢f–æÂÖæ–fW7BÒv—B÷7F÷&vRæÆöDÖæ–fW7B‚“°¢f–æÂ6÷W&6TFWf–6T–BÒ6W76–öâç6÷W&6TFWf–6T–C°¢öF÷væÆöG4'•G&ç6fW$–Bç&VÖ÷fR‡6W76–öâçG&ç6fW$–B“°¢v—BöFVÆWFU'F–Â‡6W76–öâ“°¢÷6WDF÷væÆöE6æ6†÷B€¢f–ÆUG&ç6fW%6æ6†÷B€¢G&ç6fW$–C¢6W76–öâçG&ç6fW$–BÀ¢&öö´–C¢6W76–öâæ&öö´–BÀ¢F—&V7F–öã¢vF÷væÆöBrÀ¢f–ÆTæÖS¢6W76–öâæf–ÆTæÖRÀ¢VW$FWf–6T–C¢6÷W&6TFWf–6T–BóòrrÀ¢7FGW5FW‡C¢}
+­}-İRí-Í]İ]İârÀ¢7F—fS¢fÇ6RÀ¢&öw&W75W&6VçC¢À¢F÷FÄ'—FW3¢6W76–öâæW‡V7FVD'—FW2À¢’À¢“°¢–b‡6÷W&6TFWf–6T–BÒçVÆÂ’°¢v—B÷6VæDVçfVÆ÷R€¢7–æ4VçfVÆ÷R€¢G—S¢v&ööµöf–ÆUö6æ6VÆÆVBrÀ¢66÷VçD–C¢Öæ–fW7Bæ66÷VçD–BÀ¢FWf–6T–C¢Öæ–fW7BæFWf–6T–BÀ¢–ÆöC¢°¢wG&ç6fW$–Bs¢6W76–öâçG&ç6fW$–BÀ¢v&öö´–Bs¢6W76–öâæ&öö´–BÀ¢w6÷W&6TFWf–6T–Bs¢6÷W&6TFWf–6T–BÀ¢w&WVW7F–ætFWf–6T–Bs¢Öæ–fW7BæFWf–6T–BÀ¢ÒÀ¢’À¢“°¢Ğ¢öVæDÆör‚}
+­}-İRí-Í]İ]İã¢G·6W76–öâæf–ÆTæÖWÒr“°¢Ğ ¢gWGW&SÇfö–Câö†æFÆT–æ6öÖ–ætVçfVÆ÷R…7–æ4VçfVÆ÷RVçfVÆ÷R’7–æ2°¢f"†æFÆVBÒfÇ6S°¢G'’°¢v—Bö†æFÆT–æ6öÖ–ætVçfVÆ÷UVç6fR†VçfVÆ÷R“°¢†æFÆVBÒG'VS°¢Ò6F6‚†W'&÷"Â7F6µG&6R’°¢òòÖÆf÷&ÖVBf–ÆR×G&ç6fW"WfVçB×W7BæWfW"'&V²ÖWFFF7–æ2à¢FV'Vu&–çB‚u7–æ2WfVçB†æFÆ–ærf–ÆVC¢FW'&÷%ÆâG7F6µG&6Rr“°¢öVæDÆör‚}	í­íí-­‚G¶VçfVÆ÷RçG—WÓ¢FW'&÷"r“°¢Òf–æÆÇ’°¢–b††æFÆVB’°¢ö6µ&VÆ•VWVTVçfVÆ÷R†VçfVÆ÷R“°¢Ğ¢Ğ¢Ğ ¢fö–Bö6µ&VÆ•VWVTVçfVÆ÷R…7–æ4VçfVÆ÷RVçfVÆ÷R’°¢f–æÂ7W'6÷"ÒVçfVÆ÷Rç&VÆ•VWVU6W°¢f–æÂ6Æ–VçBÒö6Æ–VçC°¢–b†7W'6÷"ÓÒçVÆÂÇÂ6Æ–VçBÓÒçVÆÂÇÂ7FFRçfÇVRæ6öææV7FVB’&WGW&ã°¢G'’°¢6Æ–VçBç6VæD6öçG&öÂ‡°¢wG—Rs¢vöffÆ–æU÷VWVUö6²rÀ¢v66÷VçD–Bs¢VçfVÆ÷Ræ66÷VçD–BÀ¢vFWf–6T–Bs¢6Æ–VçBæFWf–6T–BÀ¢w–ÆöBs¢²v7W'6÷"s¢7W'6÷'ÒÀ¢Ò“°¢Ò6F6‚†W'&÷"’°¢öVæDÆör‚}	İR=M½íÂıíM--]M-ÂöffÆ–æRVWVS¢FW'&÷"r“°¢Ğ¢Ğ ¢gWGW&SÇfö–Câö†æFÆT–æ6öÖ–ætVçfVÆ÷UVç6fR…7–æ4VçfVÆ÷RVçfVÆ÷R’7–æ2°¢f–æÂÆö6ÂÒv—B÷7F÷&vRæÆöDÖæ–fW7B‚“°¢–b†VçfVÆ÷Ræ66÷VçD–BÒÆö6Âæ66÷VçD–B’°¢öVæDÆör‚}	ıíı=]İâí½-RM==í=â­­=İ-¢G¶VçfVÆ÷Ræ66÷VçD–GÒr“°¢&WGW&ã°¢Ğ¢–b†VçfVÆ÷RæFWf–6T–BÓÒÆö6ÂæFWf–6T–B’&WGW&ã° ¢–b†VçfVÆ÷RçG—RÓÒwVW%öÆ—7Br’°¢f–æÂVW'2Ò‚†VçfVÆ÷Rç–ÆöE²wVW'2uÒ2Æ—7Cò’óò6öç7BµÒ¢æÖ‚†—FVÒ’Óâ—FVÒçFõ7G&–ær‚’¢çv†W&R‚†–B’Óâ–BÒÆö6ÂæFWf–6T–B¢çFôÆ—7B‚“°¢÷6WE7FFR‡7FFRçfÇVRæ6÷•v—F‚†öæÆ–æUVW$FWf–6T–G3¢VW'2’“°¢öVæDÆör‚u&VÆ’VW'2öæÆ–æS¢G·VW'2æÆVæwF‡Òr“°¢v—B&Vg&W6„ÖWFFF‡&V6öã¢wVW%öÆ—7Br“°¢&WGW&ã°¢Ğ ¢–b†VçfVÆ÷RçG—RÓÒwVW%ö¦ö–æVBr’°¢f–æÂVW'2Ò²ââç7FFRçfÇVRæöæÆ–æUVW$FWf–6T–G2ÂVçfVÆ÷RæFWf–6T–GÒçFôÆ—7B‚’âç6÷'B‚“°¢÷6WE7FFR‡7FFRçfÇVRæ6÷•v—F‚†öæÆ–æUVW$FWf–6T–G3¢VW'2’“°¢öVæDÆör‚}	ıíM­½í}½íÂM==íR=-í--ã¢G¶VçfVÆ÷RæFWf–6T–GÒr“°¢v—B&Vg&W6„ÖWFFF‡&V6öã¢wVW%ö¦ö–æVBr“°¢&WGW&ã°¢Ğ ¢–b†VçfVÆ÷RçG—RÓÒwVW%öÆVgBr’°¢f–æÂVW'2Ò7FFRçfÇVRæöæÆ–æUVW$FWf–6T–G2çv†W&R‚†–B’Óâ–BÒVçfVÆ÷RæFWf–6T–B’çFôÆ—7B‚’âç6÷'B‚“°¢÷6WE7FFR‡7FFRçfÇVRæ6÷•v—F‚†öæÆ–æUVW$FWf–6T–G3¢VW'2’“°¢öVæDÆör‚}	í-­½í}½íÂM==íR=-í--ã¢G¶VçfVÆ÷RæFWf–6T–GÒr“°¢&WGW&ã°¢Ğ ¢–b†VçfVÆ÷RçG—RÓÒw—&–æuö6Æ–ÖVBr’°¢v—Bö†æFÆU—&–æt6Æ–ÖVB†VçfVÆ÷RÂÆö6Â“°¢&WGW&ã°¢Ğ ¢–b†VçfVÆ÷RçG—RÓÒvW'&÷"r’°¢öVæDÆör‚u&VÆ’-]İ=²í­3¢G¶VçfVÆ÷Rç–ÆöE²vÖW76vRuÒóòVçfVÆ÷Rç–ÆöGÒr“°¢&WGW&ã°¢Ğ ¢–b…ö—5&Wfö¶VDFWf–6R†Æö6ÂÂVçfVÆ÷RæFWf–6T–B’’°¢öVæDÆör‚}	í-­½íİ]İâí½-Rí"í-í}-İİí=â=-í--¢G¶VçfVÆ÷RæFWf–6T–GÒr“°¢&WGW&ã°¢Ğ ¢–b‚ö66WE6V7W&TVçfVÆ÷R†VçfVÆ÷R’’°¢&WGW&ã°¢Ğ ¢f–æÂFV7'—FVE–ÆöBÒv—B&VD&4S&T7'—FòæFV7'—E–ÆöB€¢Væ7'—FVE–ÆöC¢VçfVÆ÷Rç–ÆöBÀ¢66÷VçDVæ7'—F–öä¶W“¢Æö6Âæ66÷VçDVæ7'—F–öä¶W’À¢WfVçEG—S¢VçfVÆ÷RçG—RÀ¢66÷VçD–C¢VçfVÆ÷Ræ66÷VçD–BÀ¢FWf–6T–C¢VçfVÆ÷RæFWf–6T–BÀ¢7&VFVDC¢VçfVÆ÷Ræ7&VFVDBÀ¢“°¢f–æÂFV7'—FVDVçfVÆ÷RÒ7–æ4VçfVÆ÷R€¢G—S¢VçfVÆ÷RçG—RÀ¢66÷VçD–C¢VçfVÆ÷Ræ66÷VçD–BÀ¢FWf–6T–C¢VçfVÆ÷RæFWf–6T–BÀ¢7&VFVDC¢VçfVÆ÷Ræ7&VFVDBÀ¢–ÆöC¢FV7'—FVE–ÆöBÀ¢“° ¢–b‚ö66WEG'W7FVDFWf–6U–ÆöB†Æö6ÂÂFV7'—FVDVçfVÆ÷R’’°¢&WGW&ã°¢Ğ ¢7v—F6‚†FV7'—FVDVçfVÆ÷RçG—R’°¢66RvÆ–'&'•÷6æ6†÷E÷&WVW7FVBs ¢v—Bö†æFÆTÆ–'&'•6æ6†÷E&WVW7FVB†FV7'—FVDVçfVÆ÷RÂÆö6Â“°¢'&V³°¢66RvÆ–'&'•÷6æ6†÷Bs ¢v—Bö†æFÆTÆ–'&'•6æ6†÷B†FV7'—FVDVçfVÆ÷RÂÆö6Â“°¢'&V³°¢66Rv&ööµöf–ÆU÷&WVW7FVBs ¢v—Bö†æFÆT&öö´f–ÆU&WVW7FVB†FV7'—FVDVçfVÆ÷RÂÆö6Â“°¢'&V³°¢66Rv&ööµöf–ÆUööffW"s ¢v—Bö†æFÆT&öö´f–ÆTöffW"†FV7'—FVDVçfVÆ÷RÂÆö6Â“°¢'&V³°¢66Rv&ööµöf–ÆUö66WBs ¢Væv—FVB…ö†æFÆT&öö´f–ÆT66WB†FV7'—FVDVçfVÆ÷RÂÆö6Â’“°¢'&V³°¢66Rv&ööµöf–ÆUö6‡Væ²s ¢v—Bö†æFÆT&öö´f–ÆT6‡Væ²†FV7'—FVDVçfVÆ÷RÂÆö6Â“°¢'&V³°¢66Rv&ööµöf–ÆUö6‡Væµö6²s ¢v—Bö†æFÆT&öö´f–ÆT6‡Væ´6²†FV7'—FVDVçfVÆ÷RÂÆö6Â“°¢'&V³°¢66Rv&ööµöf–ÆUöW'&÷"s ¢v—Bö†æFÆT&öö´f–ÆTW'&÷"†FV7'—FVDVçfVÆ÷RÂÆö6Â“°¢'&V³°¢66Rv&ööµöf–ÆUö6æ6VÆÆVBs ¢v—Bö†æFÆT&öö´f–ÆT6æ6VÆÆVB†FV7'—FVDVçfVÆ÷RÂÆö6Â“°¢'&V³°¢FVfVÇC ¢öVæDÆör‚}	İ]}-]-İíRí½-S¢G¶FV7'—FVDVçfVÆ÷RçG—WÒr“°¢Ğ¢Ğ ¢&ööÂö66WE6V7W&TVçfVÆ÷R…7–æ4VçfVÆ÷RVçfVÆ÷R’°¢f–æÂWfVçD–BÒ&VD&4S&T7'—FòæVæ7'—FVDWfVçD–B†VçfVÆ÷Rç–ÆöB“°¢–b†WfVçD–BÓÒçVÆÂÇÂWfVçD–Bæ—4V×G’’°¢òòÆVv7’Væ7'—FVB–ÆöBg&öÒöÆFW"FW7B'V–ÆG2â66WBGW&–ær&öÆÆ÷WBà¢&WGW&âG'VS°¢Ğ¢f–æÂ—77VVDBÒ&VD&4S&T7'—FòæVæ7'—FVD—77VVDB†VçfVÆ÷Rç–ÆöB“°¢f–æÂæ÷rÒFFUF–ÖRææ÷r‚’çFõWF2‚“°¢–b†—77VVDBÓÒçVÆÂ’°¢öVæDÆör‚}	í-­½íİ]İâí½-R]r—77VVDC¢G¶VçfVÆ÷RçG—WÒr“°¢&WGW&âfÇ6S°¢Ğ¢–b†—77VVDBæ—4&Vf÷&R†æ÷rç7V'G&7B…÷&WÆ•v–æF÷r’’ÇÂ—77VVDBæ—4gFW"†æ÷ræFB†6öç7BGW&F–öâ†Ö–çWFW3¢R’’’’°¢öVæDÆör‚}	í-­½íİ]İâ=-]-]Rı=M=]Rí½-S¢G¶VçfVÆ÷RçG—WÒr“°¢&WGW&âfÇ6S°¢Ğ¢÷6VVå6V7W&TWfVçD–G2ç&VÖ÷fUv†W&R‚…òÂ6VVäB’Óâ6VVäBæ—4&Vf÷&R†æ÷rç7V'G&7B…÷&WÆ•v–æF÷r’’“°¢f–æÂ&WÆ”¶W’ÒrG¶VçfVÆ÷Ræ66÷VçD–GÓ¢G¶VçfVÆ÷RæFWf–6T–GÓ¢FWfVçD–Bs°¢–b…÷6VVå6V7W&TWfVçD–G2æ6öçF–ç4¶W’‡&WÆ”¶W’’’°¢öVæDÆör‚}	í-­½íİÒıí--íí½-ó¢G¶VçfVÆ÷RçG—WÒr“°¢&WGW&âfÇ6S°¢Ğ¢÷6VVå6V7W&TWfVçD–G5·&WÆ”¶W•ÒÒæ÷s°¢&WGW&âG'VS°¢Ğ ¢&ööÂö—5&Wfö¶VDFWf–6R„Æ–'&'”Öæ–fW7BÆö6ÂÂ7G&–ærFWf–6T–B’°¢f÷"†f–æÂFWf–6R–âÆö6ÂçG'W7FVDFWf–6W2’°¢–b†FWf–6RæFWf–6T–BÓÒFWf–6T–B’&WGW&âFWf–6Ræ—5&Wfö¶VC°¢Ğ¢&WGW&âfÇ6S°¢Ğ ¢&ööÂö—47F—fUG'W7FVDFWf–6R„Æ–'&'”Öæ–fW7BÆö6ÂÂ7G&–ærFWf–6T–B’°¢f÷"†f–æÂFWf–6R–âÆö6ÂçG'W7FVDFWf–6W2’°¢–b†FWf–6RæFWf–6T–BÓÒFWf–6T–B’&WGW&âFWf–6Ræ—5&Wfö¶VC°¢Ğ¢&WGW&âfÇ6S°¢Ğ ¢&ööÂö66WEG'W7FVDFWf–6U–ÆöB„Æ–'&'”Öæ–fW7BÆö6ÂÂ7–æ4VçfVÆ÷RVçfVÆ÷R’°¢–b…ö—47F—fUG'W7FVDFWf–6R†Æö6ÂÂVçfVÆ÷RæFWf–6T–B’’&WGW&âG'VS° ¢òòf—'7BWfVçBg&öÒg&W6†Ç’—&VBFWf–6R6â&R—G2Æ–'&'’6æ6†÷Bâ—B—0¢òòÇ&VG’Væ7'—FVBv—F‚F†R66÷VçB¶W’g&öÒF†RöæR×F–ÖR"–çf—FRâ66W@¢òòöæÇ’–bF†R6æ6†÷BW‡Æ–6—FÇ’–çG&öGV6W2F†R6VæFW"2G'W7FVBFWf–6P¢òòv—F‚V&Æ–2¶W“²ÆÂ÷F†W"Væ¶æ÷vâÖFWf–6RWfVçG2&R&V¦V7FVBà¢–b†VçfVÆ÷RçG—RÓÒvÆ–'&'•÷6æ6†÷Br’°¢f–æÂ–ÆöDÖæ–fW7BÒVçfVÆ÷Rç–ÆöE²vÖæ–fW7BuÓ°¢–b‡–ÆöDÖæ–fW7B—2Ö’°¢f–æÂFWf–6W2Ò‡–ÆöDÖæ–fW7E²wG'W7FVDFWf–6W2uÒ2Æ—7Cò’óò6öç7BµÓ°¢f÷"†f–æÂ—FVÒ–âFWf–6W2çv†W&UG—SÄÖâ‚’’°¢f–æÂ6æF–FFRÒG'W7FVDFWf–6U&V6÷&Bæg&öÔ§6öâ„ÖÅ7G&–ærÂG–æÖ–3âæg&öÒ†—FVÒ’“°¢–b†6æF–FFRæFWf–6T–BÓÒVçfVÆ÷RæFWf–6T–Bbb6æF–FFRæ—5&Wfö¶VBbb6æF–FFRæ†5V&Æ–4¶W’’°¢öVæDÆör‚}	ıİı-âı]-íRMí-]]İİíRí½-Rí"G¶6æF–FFRææÖWÒr“°¢&WGW&âG'VS°¢Ğ¢Ğ¢Ğ¢Ğ ¢öVæDÆör‚}	í-­½íİ]İâí½-Rí"İ]Mí-]]İİí=â=-í--¢G¶VçfVÆ÷RæFWf–6T–GÒr“°¢&WGW&âfÇ6S°¢Ğ ¢gWGW&SÇfö–Câö†æFÆU—&–æt6Æ–ÖVB…7–æ4VçfVÆ÷RVçfVÆ÷RÂÆ–'&'”Öæ–fW7BÆö6Â’7–æ2°¢–b†VçfVÆ÷RæFWf–6T–BÒw&VÆ’r’&WGW&ã°¢f–æÂ÷væW$FWf–6T–BÒVçfVÆ÷Rç–ÆöE²v÷væW$FWf–6T–BuÓòçFõ7G&–ær‚’óòrs°¢–b†÷væW$FWf–6T–Bæ—4æ÷DV×G’bb÷væW$FWf–6T–BÒÆö6ÂæFWf–6T–B’&WGW&ã° ¢f–æÂ66WFVDFWf–6T–BÒVçfVÆ÷Rç–ÆöE²v66WFVDFWf–6T–BuÓòçFõ7G&–ær‚’çG&–Ò‚’óòrs°¢–b†66WFVDFWf–6T–Bæ—4V×G’ÇÂ66WFVDFWf–6T–BÓÒÆö6ÂæFWf–6T–B’&WGW&ã° ¢f–æÂ66WFVDFWf–6TæÖRÒVçfVÆ÷Rç–ÆöE²v66WFVDFWf–6TæÖRuÓòçFõ7G&–ær‚’çG&–Ò‚’óò}
+=-í--âs°¢f–æÂ66WFVDFWf–6UV&Æ–4¶W’ÒVçfVÆ÷Rç–ÆöE²v66WFVDFWf–6UV&Æ–4¶W’uÓòçFõ7G&–ær‚’çG&–Ò‚’óòrs° ¢f–æÂWFFVBÒv—B÷7F÷&vRçG'W7DFWf–6R€¢FWf–6T–C¢66WFVDFWf–6T–BÀ¢æÖS¢66WFVDFWf–6TæÖRæ—4V×G’ò}
+=-í--âr¢66WFVDFWf–6TæÖRÀ¢&öÆS¢vFWf–6RrÀ¢V&Æ–4¶W“¢66WFVDFWf–6UV&Æ–4¶W’À¢“°¢öÖæ–fW7D6†ævW2æFB‡WFFVB“°¢öVæDÆör‚}
+=-í--âİí-Mí-]]İâ}]]r#¢F66WFVDFWf–6TæÖRr“°¢v—B'&öF67DÆ–'&'•6æ6†÷B‡&V6öã¢w—&–æuö6Æ–ÖVE÷&VWF†÷&—¦VEöFWf–6Rr“°¢Ğ ¢gWGW&SÇfö–Câö†æFÆTÆ–'&'•6æ6†÷E&WVW7FVB…7–æ4VçfVÆ÷RVçfVÆ÷RÂÆ–'&'”Öæ–fW7BÆö6Â’7–æ2°¢f–æÂ&WVW7FW"ÒVçfVÆ÷Rç–ÆöE²w&WVW7F–ætFWf–6T–BuÒ27G&–æsó°¢–b‡&WVW7FW"ÓÒÆö6ÂæFWf–6T–B’&WGW&ã°¢öVæDÆör‚}	ıí½=}]Ò}ıí6æ6†÷Bí"G¶VçfVÆ÷RæFWf–6T–GÒr“°¢v—B'&öF67DÆ–'&'•6æ6†÷B‡&V6öã¢w&WVW7FVEö'•÷VW"r“°¢Ğ ¢&ööÂöÆöö·4Æ–¶T66–FVçFÄV×G”Æ–'&'•6æ6†÷B‡°¢&WV—&VBÆ–'&'”Öæ–fW7BÆö6ÂÀ¢&WV—&VBÆ–'&'”Öæ–fW7B&VÖ÷FRÀ¢&WV—&VBÆ–'&'”Öæ–fW7BÖW&vVBÀ¢Ò’°¢f–æÂÆö6Åf—6–&ÆRÒÆö6Âçf—6–&ÆT&öö·2æÆVæwFƒ°¢–b†Æö6Åf—6–&ÆRÓÒ’&WGW&âfÇ6S°¢–b†ÖW&vVBçf—6–&ÆT&öö·2æ—4æ÷DV×G’’&WGW&âfÇ6S° ¢f–æÂ&VÖ÷FUf—6–&ÆRÒ&VÖ÷FRçf—6–&ÆT&öö·2æÆVæwFƒ°¢f–æÂ&VÖ÷FTFVÆWFVBÒ&VÖ÷FRæ&öö·2çv†W&R‚†&öö²’Óâ&öö²æ—4FVÆWFVB’æÆVæwFƒ°¢f–æÂÆö6ÄF÷væÆöFVBÒÆö6Âæ&öö·2çv†W&R‚†&öö²’Óâ&öö²æ—4F÷væÆöFVB’æÆVæwFƒ° ¢òòFF×6fWG’wV&C¢âöæÆ–æRööffÆ–æRVWVVB6æ6†÷BÂ§W7B×—&VBV×G¢òòFWf–6RÂ÷"7FÆRFöÖ'7FöæW2×W7BæWfW"v—RF†Rv†öÆRf—6–&ÆRÆ–'&'’öâ¢òòFWf–6RF†B7F–ÆÂ†2&öö·2âFVÆ–&W&FR&FVÆWFRWfW'’&öö²"÷W&F–öâ6à¢òò&R&Wf—6—FVBÆFW"v—F‚âW‡Æ–6—BvVæW&F–öâö6öæf—&ÖF–öâf–VÆC²VçF–À¢òòF†Vâ&W6W'f–ærF†RW6W"w2Æ–'&'’—2Ö÷&R–×÷'FçBF†âÇ––ærÖ70¢òòFW7G'V7F—fR6æ6†÷B6–ÆVçFÇ’à¢&WGW&â&VÖ÷FUf—6–&ÆRÓÒÇÂ&VÖ÷FTFVÆWFVBãÒÆö6Åf—6–&ÆRÇÂÆö6ÄF÷væÆöFVBâ°¢Ğ ¢gWGW&SÇfö–Câö†æFÆTÆ–'&'•6æ6†÷B…7–æ4VçfVÆ÷RVçfVÆ÷RÂÆ–'&'”Öæ–fW7BÆö6Â’7–æ2°¢f–æÂ–ÆöDÖæ–fW7BÒVçfVÆ÷Rç–ÆöE²vÖæ–fW7BuÓ°¢–b‡–ÆöDÖæ–fW7B—2Ö’°¢öVæDÆör‚}	İ]­í]­-İ½’6æ6†÷Br“°¢&WGW&ã°¢Ğ ¢f–æÂ&VÖ÷FRÒÆ–'&'”Öæ–fW7Bæg&öÔ§6öâ„ÖÅ7G&–ærÂG–æÖ–3âæg&öÒ‡–ÆöDÖæ–fW7B’“°¢–b‡&VÖ÷FRæFWf–6T–BÓÒÆö6ÂæFWf–6T–B’°¢òò–væ÷&RV6†öW2öb÷W"÷vâ6æ6†÷Bâ&VÆ’öffÆ–æRVWVW26âFVÆ—fW"¢òòÆö6Â6æ6†÷B&6²gFW"&V6öææV7C²Ç––ær—B—2W6VÆW72æB6âÖ6°¢òòÖ÷&R&V6VçBÆö6Â6†ævW2à¢&WGW&ã°¢Ğ¢f–æÂÖW&vVBÒÖW&vTÖæ–fW7G2†Æö6ÂÂ&VÖ÷FR“°¢–b…öÆöö·4Æ–¶T66–FVçFÄV×G”Æ–'&'•6æ6†÷B†Æö6Ã¢Æö6ÂÂ&VÖ÷FS¢&VÖ÷FRÂÖW&vVC¢ÖW&vVB’’°¢öVæDÆör‚}	í-­½íİÒ6æ6†÷BÂ­í-í½’­½-²-â½í­½Íİ=â½í-]­2â	}ıí]İıí--íİòİ]íİ}mòâr“°¢v—B&WVW7DÆ–'&'•6æ6†÷B‡&V6öã¢vFW7G'V7F—fU÷6æ6†÷EöwV&Br“°¢&WGW&ã°¢Ğ¢f–æÂ7W'&VçEf—6–&ÆRÒÆö6Âçf—6–&ÆT&öö·2æÆVæwFƒ°¢f–æÂÖW&vVEf—6–&ÆRÒÖW&vVBçf—6–&ÆT&öö·2æÆVæwFƒ°¢–b†7W'&VçEf—6–&ÆRâbbÖW&vVEf—6–&ÆRÓÒ’°¢öVæDÆör‚}	í-­½íİÒ6æ6†÷C¢½í­½Íİò½í-]­Æö6ÂÖf—'7BİRÍím]"½-Â}Í]İ]İı=-½Âí-íıİ]Ââr“°¢v—B&WVW7DÆ–'&'•6æ6†÷B‡&V6öã¢vÆö6Åöf—'7EöV×G•öÖW&vUöwV&Br“°¢&WGW&ã°¢Ğ¢f–æÂ6fVBÒv—B÷7F÷&vRæ×WFFTÖæ–fW7B‚†7W'&VçB’ÓâÖW&vTÖæ–fW7G2†7W'&VçBÂ&VÖ÷FR’“°¢öÖæ–fW7D6†ævW2æFB‡6fVB“°¢–b‡6fVBæ—47W'&VçDFWf–6U&Wfö¶VB’°¢öVæDÆör‚}	Mí-=òİ-í=â=-í--í-í}-Òâ
+İ]íİ}mòí-İí-½]İâr“°¢v—BF—66öææV7B†ÖçVÃ¢G'VR“°¢÷6WE7FFR‡7FFRçfÇVRæ6÷•v—F‚†6öææV7FVC¢fÇ6RÂ7FGW5FW‡C¢}	Mí-=òİ-í=â=-í--í-í}-Òr’“°¢&WGW&ã°¢Ğ¢öVæDÆör‚}	ıİı"6æ6†÷Bí"G·&VÖ÷FRæFWf–6TæÖWÒ(	B­İ3¢G·&VÖ÷FRæ&öö·2æÆ]ôòÚ$z{-®éÜj× _manifestChanges.add(updated);
         await broadcastLibrarySnapshot(reason: 'file_missing_on_source');
       } catch (_) {
         // Best effort: transfer must still be terminated for the requester.
