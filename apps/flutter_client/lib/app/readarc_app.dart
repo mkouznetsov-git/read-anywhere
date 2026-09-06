@@ -2132,13 +2132,15 @@ Future<_Fb2Document> _parseReaderDocumentFromFileSafely({
 }) async {
   final label = _richFormatLabel(kind);
   try {
-    return await operation.parse(kind, file).timeout(
-      kind == _RichSourceKind.djvu ? const Duration(seconds: 75) : const Duration(seconds: 45),
-      onTimeout: () {
-        operation.cancel();
-        throw TimeoutException('$label parsing timed out');
-      },
-    );
+    return await operation
+        .parse(kind, file)
+        .timeout(
+          kind == _RichSourceKind.djvu ? const Duration(seconds: 75) : const Duration(seconds: 45),
+          onTimeout: () {
+            operation.cancel();
+            throw TimeoutException('$label parsing timed out');
+          },
+        );
   } on TimeoutException {
     return _formatAdapterFailureDocument(
       label,

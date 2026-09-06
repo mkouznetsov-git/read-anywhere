@@ -31,10 +31,7 @@ Uint8List _declaredZipEntry({required String name, required int compressed, requ
 void main() {
   group('reader characterization fixtures', () {
     test('TXT preserves paragraphs, text and locator', () async {
-      final document = await ReaderRegressionPlatform.parse(
-        ReaderFormat.txt,
-        _fixture('txt_characterization.txt'),
-      );
+      final document = await ReaderRegressionPlatform.parse(ReaderFormat.txt, _fixture('txt_characterization.txt'));
       expect(document.blocks, hasLength(3));
       expect(document.plainText, contains('Первый абзац'));
       final saved = ReaderLocator.atBlock(document, 2);
@@ -44,10 +41,7 @@ void main() {
     });
 
     test('FB2 preserves title, blocks and stable locator', () async {
-      final document = await ReaderRegressionPlatform.parse(
-        ReaderFormat.fb2,
-        _fixture('fb2_characterization.fb2'),
-      );
+      final document = await ReaderRegressionPlatform.parse(ReaderFormat.fb2, _fixture('fb2_characterization.fb2'));
       expect(document.blocks.first.type, ReaderBlockType.title);
       expect(document.blocks.first.text, 'Глава первая');
       expect(document.plainText, contains('Второй абзац'));
@@ -59,22 +53,19 @@ void main() {
     });
 
     test('EPUB preserves spine text, hrefs and target anchors', () async {
-      final document = await ReaderRegressionPlatform.parse(
-        ReaderFormat.epub,
-        _fixture('epub_characterization.epub'),
-      );
+      final document = await ReaderRegressionPlatform.parse(ReaderFormat.epub, _fixture('epub_characterization.epub'));
       expect(document.plainText, contains('EPUB chapter one'));
       expect(document.blocks.expand((block) => block.hrefs), contains('OEBPS/chapter.xhtml#target'));
       expect(document.anchors['OEBPS/chapter.xhtml#target'], isNotNull);
       final target = document.anchors['OEBPS/chapter.xhtml#target']!;
-      expect(ReaderLocator.restore(document, ReaderLocator.atBlock(document, target).toJsonString()).blockIndex, target);
+      expect(
+        ReaderLocator.restore(document, ReaderLocator.atBlock(document, target).toJsonString()).blockIndex,
+        target,
+      );
     });
 
     test('PDF preserves selectable text, page count and page locator', () async {
-      final document = await ReaderRegressionPlatform.parse(
-        ReaderFormat.pdf,
-        _fixture('pdf_characterization.pdf'),
-      );
+      final document = await ReaderRegressionPlatform.parse(ReaderFormat.pdf, _fixture('pdf_characterization.pdf'));
       expect(document.pageCount, 2);
       expect(document.plainText, contains('stable selectable text'));
       final restored = ReaderLocator.restore(document, jsonEncode({'type': 'pdf-page-v1', 'page': 2}));
@@ -83,10 +74,7 @@ void main() {
     });
 
     test('DOCX preserves paragraphs, table cells, page breaks and locator', () async {
-      final document = await ReaderRegressionPlatform.parse(
-        ReaderFormat.docx,
-        _fixture('docx_characterization.docx'),
-      );
+      final document = await ReaderRegressionPlatform.parse(ReaderFormat.docx, _fixture('docx_characterization.docx'));
       expect(document.plainText, contains('First DOCX paragraph'));
       final table = document.blocks.singleWhere((block) => block.type == ReaderBlockType.table);
       expect(table.tableRows, [
@@ -99,10 +87,7 @@ void main() {
     });
 
     test('DJVU preserves detected pages and page anchors', () async {
-      final document = await ReaderRegressionPlatform.parse(
-        ReaderFormat.djvu,
-        _fixture('djvu_characterization.djvu'),
-      );
+      final document = await ReaderRegressionPlatform.parse(ReaderFormat.djvu, _fixture('djvu_characterization.djvu'));
       expect(document.pageCount, 2);
       expect(document.blocks.map((block) => block.type), everyElement(ReaderBlockType.page));
       expect(document.anchors, {'page-1': 0, 'page-2': 1});
@@ -155,7 +140,10 @@ void main() {
     test('large TXT parses in background with bounded output', () async {
       final paragraph = 'Large ReadArc paragraph keeps semantic parsing responsive and deterministic.\n\n';
       final bytes = Uint8List.fromList(utf8.encode(paragraph * 15000));
-      final document = await ReaderRegressionPlatform.parse(ReaderFormat.txt, bytes).timeout(const Duration(seconds: 20));
+      final document = await ReaderRegressionPlatform.parse(
+        ReaderFormat.txt,
+        bytes,
+      ).timeout(const Duration(seconds: 20));
       expect(document.blocks.length, 15000);
       expect(document.totalTextChars, greaterThan(1000000));
     });

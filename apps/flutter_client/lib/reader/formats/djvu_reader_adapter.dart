@@ -7,11 +7,7 @@ ReaderDocumentSnapshot _characterizeDjvu(Uint8List bytes) {
   }
   final blocks = List<ReaderBlockSnapshot>.generate(
     probe.pageCount,
-    (index) => ReaderBlockSnapshot(
-      type: ReaderBlockType.page,
-      text: '',
-      anchors: ['page-${index + 1}'],
-    ),
+    (index) => ReaderBlockSnapshot(type: ReaderBlockType.page, text: '', anchors: ['page-${index + 1}']),
     growable: false,
   );
   return ReaderDocumentSnapshot(

@@ -93,9 +93,7 @@ class ReaderBlockSnapshot {
     text: json['text']! as String,
     anchors: List<String>.from(json['anchors']! as List),
     hrefs: List<String>.from(json['hrefs']! as List),
-    tableRows: (json['tableRows']! as List)
-        .map((row) => List<String>.from(row as List))
-        .toList(growable: false),
+    tableRows: (json['tableRows']! as List).map((row) => List<String>.from(row as List)).toList(growable: false),
     bold: json['bold']! as bool,
     italic: json['italic']! as bool,
   );
@@ -120,10 +118,7 @@ class ReaderDocumentSnapshot {
   final int totalTextChars;
   final int pageCount;
 
-  String get plainText => blocks
-      .map((block) => block.text)
-      .where((text) => text.trim().isNotEmpty)
-      .join('\n');
+  String get plainText => blocks.map((block) => block.text).where((text) => text.trim().isNotEmpty).join('\n');
 
   ReaderBlockSnapshot blockAt(int index) => blocks[index];
 
@@ -193,11 +188,7 @@ class ReaderLocator {
     );
   }
 
-  static ReaderLocator restore(
-    ReaderDocumentSnapshot document,
-    String encoded, {
-    double fallbackProgressPercent = 0,
-  }) {
+  static ReaderLocator restore(ReaderDocumentSnapshot document, String encoded, {double fallbackProgressPercent = 0}) {
     if (document.format == ReaderFormat.pdf || document.format == ReaderFormat.djvu) {
       return _restorePageLocator(document, encoded, fallbackProgressPercent);
     }
@@ -225,11 +216,7 @@ class ReaderLocator {
     return atBlock(document, _blockForAnchor(document.blockStartChars, targetChar));
   }
 
-  static ReaderLocator _restorePageLocator(
-    ReaderDocumentSnapshot document,
-    String encoded,
-    double fallbackProgress,
-  ) {
+  static ReaderLocator _restorePageLocator(ReaderDocumentSnapshot document, String encoded, double fallbackProgress) {
     final pages = document.pageCount <= 0 ? 1 : document.pageCount;
     var page = pages <= 1 ? 1 : (1 + ((fallbackProgress.clamp(0, 100) / 100) * (pages - 1)).round());
     try {
@@ -297,9 +284,7 @@ class ReaderParseJob {
       final response = await port.first;
       if (_cancelled || _completer.isCompleted) return;
       if (response is Map && response['ok'] == true) {
-        _completer.complete(
-          ReaderDocumentSnapshot.fromJson(response['document'] as Map<Object?, Object?>),
-        );
+        _completer.complete(ReaderDocumentSnapshot.fromJson(response['document'] as Map<Object?, Object?>));
       } else if (response is Map) {
         _completer.completeError(
           ReaderParseException(
@@ -426,11 +411,7 @@ Future<void> _readerParseWorkerAsync(List<Object?> request) async {
   }
 }
 
-ReaderDocumentSnapshot _characterizeReaderBytes(
-  ReaderFormat format,
-  Uint8List bytes,
-  ReaderParseLimits limits,
-) {
+ReaderDocumentSnapshot _characterizeReaderBytes(ReaderFormat format, Uint8List bytes, ReaderParseLimits limits) {
   if (bytes.length > limits.maxInputBytes) {
     throw ReaderParseException('input_too_large', 'Input is ${bytes.length} bytes; limit is ${limits.maxInputBytes}.');
   }
@@ -452,23 +433,25 @@ ReaderDocumentSnapshot _characterizeReaderBytes(
 }
 
 ReaderDocumentSnapshot _snapshotFromRich(ReaderFormat format, _Fb2Document source, {int pageCount = 0}) {
-  final blocks = source.blocks.map((block) {
-    final type = switch (block.kind) {
-      _Fb2BlockKind.paragraph => ReaderBlockType.paragraph,
-      _Fb2BlockKind.title => ReaderBlockType.title,
-      _Fb2BlockKind.image => ReaderBlockType.image,
-      _Fb2BlockKind.table => ReaderBlockType.table,
-    };
-    return ReaderBlockSnapshot(
-      type: type,
-      text: block.plainText == _officePageBreakMarker ? '' : block.plainText,
-      anchors: List.unmodifiable(block.anchors),
-      hrefs: block.inlines.map((inline) => inline.href).whereType<String>().toSet().toList(growable: false),
-      tableRows: block.tableRows.map((row) => List<String>.unmodifiable(row)).toList(growable: false),
-      bold: block.officeFormat.bold || block.inlines.any((inline) => inline.bold),
-      italic: block.officeFormat.italic || block.inlines.any((inline) => inline.italic),
-    );
-  }).toList(growable: false);
+  final blocks = source.blocks
+      .map((block) {
+        final type = switch (block.kind) {
+          _Fb2BlockKind.paragraph => ReaderBlockType.paragraph,
+          _Fb2BlockKind.title => ReaderBlockType.title,
+          _Fb2BlockKind.image => ReaderBlockType.image,
+          _Fb2BlockKind.table => ReaderBlockType.table,
+        };
+        return ReaderBlockSnapshot(
+          type: type,
+          text: block.plainText == _officePageBreakMarker ? '' : block.plainText,
+          anchors: List.unmodifiable(block.anchors),
+          hrefs: block.inlines.map((inline) => inline.href).whereType<String>().toSet().toList(growable: false),
+          tableRows: block.tableRows.map((row) => List<String>.unmodifiable(row)).toList(growable: false),
+          bold: block.officeFormat.bold || block.inlines.any((inline) => inline.bold),
+          italic: block.officeFormat.italic || block.inlines.any((inline) => inline.italic),
+        );
+      })
+      .toList(growable: false);
   return ReaderDocumentSnapshot(
     format: format,
     blocks: blocks,
@@ -508,7 +491,8 @@ _ZipInspection _validateZipContainer(Uint8List bytes, [ReaderParseLimits limits 
     if (nameLength <= 0 || nameLength > 512 || end > bytes.length) {
       throw const ReaderParseException('invalid_zip_directory', 'Malformed ZIP central directory.');
     }
-    final name = utf8.decode(bytes.sublist(offset + 46, offset + 46 + nameLength), allowMalformed: true)
+    final name = utf8
+        .decode(bytes.sublist(offset + 46, offset + 46 + nameLength), allowMalformed: true)
         .replaceAll('\\', '/');
     if (name.startsWith('/') || name.split('/').contains('..')) {
       throw ReaderParseException('unsafe_zip_path', 'Unsafe ZIP entry path: $name');
@@ -573,7 +557,10 @@ class _RichDocumentParseOperation {
         _completer.complete(response[1]! as _Fb2Document);
       } else {
         _completer.completeError(
-          ReaderParseException('parse_failed', response is List && response.length > 1 ? '${response[1]}' : '$response'),
+          ReaderParseException(
+            'parse_failed',
+            response is List && response.length > 1 ? '${response[1]}' : '$response',
+          ),
         );
       }
     } catch (error, stackTrace) {
