@@ -16,15 +16,29 @@ ReaderDocumentSnapshot _snapshot(String text) => ReaderDocumentSnapshot(
   pageCount: 0,
 );
 
-Uint8List _declaredZipEntry({required String name, required int compressed, required int uncompressed}) {
+Uint8List _declaredZipEntry({
+  required String name,
+  required int compressed,
+  required int uncompressed,
+  Uint8List? prefix,
+}) {
   final nameBytes = utf8.encode(name);
-  final bytes = Uint8List(46 + nameBytes.length);
+  final centralDirectoryOffset = prefix?.length ?? 0;
+  final centralDirectorySize = 46 + nameBytes.length;
+  final eocdOffset = centralDirectoryOffset + centralDirectorySize;
+  final bytes = Uint8List(eocdOffset + 22);
+  if (prefix != null) bytes.setRange(0, prefix.length, prefix);
   final data = ByteData.sublistView(bytes);
-  data.setUint32(0, 0x02014b50, Endian.little);
-  data.setUint32(20, compressed, Endian.little);
-  data.setUint32(24, uncompressed, Endian.little);
-  data.setUint16(28, nameBytes.length, Endian.little);
-  bytes.setRange(46, bytes.length, nameBytes);
+  data.setUint32(centralDirectoryOffset, 0x02014b50, Endian.little);
+  data.setUint32(centralDirectoryOffset + 20, compressed, Endian.little);
+  data.setUint32(centralDirectoryOffset + 24, uncompressed, Endian.little);
+  data.setUint16(centralDirectoryOffset + 28, nameBytes.length, Endian.little);
+  bytes.setRange(centralDirectoryOffset + 46, eocdOffset, nameBytes);
+  data.setUint32(eocdOffset, 0x06054b50, Endian.little);
+  data.setUint16(eocdOffset + 8, 1, Endian.little);
+  data.setUint16(eocdOffset + 10, 1, Endian.little);
+  data.setUint32(eocdOffset + 12, centralDirectorySize, Endian.little);
+  data.setUint32(eocdOffset + 16, centralDirectoryOffset, Endian.little);
   return bytes;
 }
 
@@ -137,6 +151,15 @@ void main() {
       await expectLater(
         ReaderRegressionPlatform.parse(ReaderFormat.epub, traversal),
         throwsA(isA<ReaderParseException>().having((error) => error.code, 'code', 'unsafe_zip_path')),
+      );
+    });
+
+    test('does not scan compressed payload for false central-directory signatures', () async {
+      final payload = Uint8List(46)..setAll(0, [0x50, 0x4b, 0x01, 0x02]);
+      final archive = _declaredZipEntry(name: 'payload.bin', compressed: 4, uncompressed: 4, prefix: payload);
+      await expectLater(
+        ReaderRegressionPlatform.parse(ReaderFormat.epub, archive),
+        throwsA(isA<ReaderParseException>().having((error) => error.code, 'code', 'invalid_epub')),
       );
     });
 

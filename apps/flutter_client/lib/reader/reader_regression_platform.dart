@@ -473,14 +473,40 @@ _ZipInspection _validateZipContainer(Uint8List bytes, [ReaderParseLimits limits 
   if (bytes.length > limits.maxInputBytes) {
     throw ReaderParseException('input_too_large', 'ZIP input exceeds ${limits.maxInputBytes} bytes.');
   }
+  final eocd = _findZipEndOfCentralDirectory(bytes);
+  if (eocd < 0) {
+    throw const ReaderParseException('invalid_zip', 'ZIP end-of-central-directory record is missing.');
+  }
+  final diskNumber = _readLe16(bytes, eocd + 4);
+  final directoryDisk = _readLe16(bytes, eocd + 6);
+  final entriesOnDisk = _readLe16(bytes, eocd + 8);
+  final expectedEntries = _readLe16(bytes, eocd + 10);
+  final directorySize = _readLe32(bytes, eocd + 12);
+  final directoryOffset = _readLe32(bytes, eocd + 16);
+  final commentLength = _readLe16(bytes, eocd + 20);
+  if (eocd + 22 + commentLength != bytes.length) {
+    throw const ReaderParseException('invalid_zip_directory', 'Malformed ZIP end record or comment length.');
+  }
+  if (diskNumber != 0 || directoryDisk != 0 || entriesOnDisk != expectedEntries) {
+    throw const ReaderParseException('multi_disk_zip_not_supported', 'Multi-disk ZIP containers are not accepted.');
+  }
+  if (expectedEntries == 0xffff || directorySize == 0xffffffff || directoryOffset == 0xffffffff) {
+    throw const ReaderParseException('zip64_not_supported', 'ZIP64 containers are not accepted by the reader parser.');
+  }
+  if (expectedEntries == 0 ||
+      expectedEntries > limits.maxZipEntries ||
+      directoryOffset + directorySize != eocd ||
+      directoryOffset > bytes.length) {
+    throw const ReaderParseException('invalid_zip_directory', 'ZIP central directory bounds are invalid.');
+  }
   final names = <String>{};
   var entries = 0;
   var expanded = 0;
-  var offset = 0;
-  while (offset + 46 <= bytes.length) {
-    if (_readLe32(bytes, offset) != 0x02014b50) {
-      offset += 1;
-      continue;
+  var offset = directoryOffset;
+  final directoryEnd = directoryOffset + directorySize;
+  while (offset < directoryEnd) {
+    if (offset + 46 > directoryEnd || _readLe32(bytes, offset) != 0x02014b50) {
+      throw const ReaderParseException('invalid_zip_directory', 'Malformed ZIP central directory entry.');
     }
     final compressed = _readLe32(bytes, offset + 20);
     final uncompressed = _readLe32(bytes, offset + 24);
@@ -488,13 +514,13 @@ _ZipInspection _validateZipContainer(Uint8List bytes, [ReaderParseLimits limits 
     final extraLength = _readLe16(bytes, offset + 30);
     final commentLength = _readLe16(bytes, offset + 32);
     final end = offset + 46 + nameLength + extraLength + commentLength;
-    if (nameLength <= 0 || nameLength > 512 || end > bytes.length) {
+    if (nameLength <= 0 || nameLength > 512 || end > directoryEnd) {
       throw const ReaderParseException('invalid_zip_directory', 'Malformed ZIP central directory.');
     }
     final name = utf8
         .decode(bytes.sublist(offset + 46, offset + 46 + nameLength), allowMalformed: true)
         .replaceAll('\\', '/');
-    if (name.startsWith('/') || name.split('/').contains('..')) {
+    if (name.startsWith('/') || RegExp(r'^[A-Za-z]:/').hasMatch(name) || name.split('/').contains('..')) {
       throw ReaderParseException('unsafe_zip_path', 'Unsafe ZIP entry path: $name');
     }
     if (!names.add(name)) {
@@ -522,8 +548,21 @@ _ZipInspection _validateZipContainer(Uint8List bytes, [ReaderParseLimits limits 
     }
     offset = end;
   }
-  if (entries == 0) throw const ReaderParseException('invalid_zip', 'ZIP central directory is missing or empty.');
+  if (offset != directoryEnd || entries != expectedEntries) {
+    throw const ReaderParseException('invalid_zip_directory', 'ZIP central directory entry count is inconsistent.');
+  }
   return _ZipInspection(Set.unmodifiable(names), expanded);
+}
+
+int _findZipEndOfCentralDirectory(Uint8List bytes) {
+  const minimumRecordSize = 22;
+  const maximumCommentSize = 0xffff;
+  if (bytes.length < minimumRecordSize) return -1;
+  final firstCandidate = math.max(0, bytes.length - minimumRecordSize - maximumCommentSize);
+  for (var offset = bytes.length - minimumRecordSize; offset >= firstCandidate; offset -= 1) {
+    if (_readLe32(bytes, offset) == 0x06054b50) return offset;
+  }
+  return -1;
 }
 
 int _readLe16(Uint8List bytes, int offset) => bytes[offset] | (bytes[offset + 1] << 8);
@@ -535,9 +574,11 @@ class _RichDocumentParseOperation {
   final Completer<_Fb2Document> _completer = Completer<_Fb2Document>();
   Isolate? _isolate;
   ReceivePort? _port;
+  bool _started = false;
   bool _cancelled = false;
 
   Future<_Fb2Document> parse(_RichSourceKind kind, File file) {
+    _started = true;
     unawaited(_start(kind, file.path));
     return _completer.future;
   }
@@ -577,7 +618,7 @@ class _RichDocumentParseOperation {
     _cancelled = true;
     _isolate?.kill(priority: Isolate.immediate);
     _port?.close();
-    if (!_completer.isCompleted) _completer.completeError(const ReaderParseCancelledException());
+    if (_started && !_completer.isCompleted) _completer.completeError(const ReaderParseCancelledException());
   }
 }
 
