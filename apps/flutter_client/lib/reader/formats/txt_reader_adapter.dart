@@ -1,6 +1,10 @@
 part of '../../app/readarc_app.dart';
 
 ReaderDocumentSnapshot _characterizeTxt(Uint8List bytes) {
+  final controlBytes = bytes.where((byte) => byte == 0 || byte < 0x09 || (byte > 0x0d && byte < 0x20)).length;
+  if (controlBytes > 4 && controlBytes > bytes.length ~/ 50) {
+    throw const ReaderParseException('invalid_txt', 'TXT contains too many binary control bytes.');
+  }
   final text = _normalizeText(_decodeTextFile(bytes));
   final blocks = <ReaderBlockSnapshot>[];
   final starts = <int>[];

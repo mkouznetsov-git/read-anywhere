@@ -98,8 +98,11 @@ void main() {
   group('reader limits and failure containment', () {
     test('rejects every damaged fixture with a controlled parser error', () async {
       for (final format in ReaderFormat.values) {
+        final damaged = format == ReaderFormat.txt
+            ? Uint8List.fromList(List<int>.filled(64, 0))
+            : Uint8List.fromList('damaged ${format.name}'.codeUnits);
         await expectLater(
-          ReaderRegressionPlatform.parse(format, Uint8List.fromList('damaged ${format.name}'.codeUnits)),
+          ReaderRegressionPlatform.parse(format, damaged),
           throwsA(isA<ReaderParseException>()),
           reason: '${format.name} damage must not become an empty successful document',
         );
