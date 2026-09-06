@@ -21,10 +21,30 @@ import 'relay_client.dart';
 import 'sync_authorization.dart';
 
 const _uuid = Uuid();
-const _defaultChunkSize = 1024 * 1024; // Binary chunks: 1 MiB keeps Tailscale/Android stable and reduces ACK overhead.
-const _downloadOfferTimeout = Duration(seconds: 24);
-const _downloadIdleTimeout = Duration(seconds: 28);
-const _directStreamIdleTimeout = Duration(seconds: 18);
+
+class SyncServiceOptions {
+  const SyncServiceOptions({
+    this.chunkSize = 1024 * 1024,
+    this.minimumChunkSize = 256 * 1024,
+    this.downloadOfferTimeout = const Duration(seconds: 24),
+    this.downloadIdleTimeout = const Duration(seconds: 28),
+    this.directStreamIdleTimeout = const Duration(seconds: 18),
+    this.uploadAckTimeout = const Duration(seconds: 20),
+    this.uploadRetryDelay = const Duration(milliseconds: 350),
+    this.maxChunkAttempts = 3,
+    this.enableDirectTransfer = true,
+  });
+
+  final int chunkSize;
+  final int minimumChunkSize;
+  final Duration downloadOfferTimeout;
+  final Duration downloadIdleTimeout;
+  final Duration directStreamIdleTimeout;
+  final Duration uploadAckTimeout;
+  final Duration uploadRetryDelay;
+  final int maxChunkAttempts;
+  final bool enableDirectTransfer;
+}
 
 class PairingInvite {
   const PairingInvite({
@@ -203,17 +223,24 @@ class SyncStateSnapshot {
 }
 
 class SyncService {
-  SyncService(this._storage)
-    : _metadataSyncEngine = MetadataSyncEngine(_storage),
-      _fileTransferManager = FileTransferManager(appDirectory: _storage.appDir),
-      _pairingService = PairingService(const ConnectionManager());
+  SyncService(
+    this._storage, {
+    this.options = const SyncServiceOptions(),
+    ConnectionManager connectionManager = const ConnectionManager(),
+    DirectTransferServer? directTransferServer,
+  }) : _metadataSyncEngine = MetadataSyncEngine(_storage),
+       _fileTransferManager = FileTransferManager(appDirectory: _storage.appDir),
+       _connectionManager = connectionManager,
+       _pairingService = PairingService(connectionManager),
+       _directTransferServer = directTransferServer ?? DirectTransferServer();
 
   final StorageService _storage;
+  final SyncServiceOptions options;
   final MetadataSyncEngine _metadataSyncEngine;
   final FileTransferManager _fileTransferManager;
-  final ConnectionManager _connectionManager = const ConnectionManager();
+  final ConnectionManager _connectionManager;
   final PairingService _pairingService;
-  final DirectTransferServer _directTransferServer = DirectTransferServer();
+  final DirectTransferServer _directTransferServer;
   final SyncAuthorization _authorization = const SyncAuthorization();
   final state = ValueNotifier<SyncStateSnapshot>(
     const SyncStateSnapshot(connected: false, statusText: 'Не подключено'),
@@ -225,6 +252,9 @@ class SyncService {
   final _manifestChanges = StreamController<LibraryManifest>.broadcast();
   final _downloadsByTransferId = <String, _DownloadSession>{};
   final _uploadAckWaiters = <String, Completer<void>>{};
+  final _uploadPeerDeviceIds = <String, String>{};
+  final _activeUploads = <Future<void>>{};
+  final _inFlightIncoming = <Future<void>>{};
   final _uploadLocks = <String>{};
   final _cancelledTransfers = <String>{};
   final _seenSecureEventIds = <String, DateTime>{};
@@ -285,9 +315,7 @@ class SyncService {
     final client = _connectionManager.createClient(relayUri: uri, manifest: manifest);
     _client = client;
     _incomingSubscription = client.incoming
-        .asyncMap((envelope) async {
-          await _handleIncomingEnvelope(envelope);
-        })
+        .asyncMap((envelope) => _trackIncoming(_handleIncomingEnvelope(envelope)))
         .listen(
           (_) {},
           onError: (error) {
@@ -295,9 +323,7 @@ class SyncService {
           },
         );
     _binarySubscription = client.binaryIncoming
-        .asyncMap((message) async {
-          await _handleIncomingBinaryFrame(message);
-        })
+        .asyncMap((message) => _trackIncoming(_handleIncomingBinaryFrame(message)))
         .listen(
           (_) {},
           onError: (error) {
@@ -322,7 +348,9 @@ class SyncService {
     _setState(state.value.copyWith(connected: true, statusText: 'Подключено'));
     _startHealthMonitor(relayUrl);
     _startMetadataRefreshLoop(client);
-    unawaited(_ensureDirectFileServer());
+    if (options.enableDirectTransfer) {
+      unawaited(_ensureDirectFileServer());
+    }
 
     await pullOfflineQueue(reason: 'connected');
     await refreshMetadata(reason: 'connected');
@@ -348,6 +376,7 @@ class SyncService {
     final client = _client;
     _client = null;
     await client?.dispose();
+    _pauseRelayTransfers();
     if (manual && state.value.connected) {
       _appendLog('Отключено');
     }
@@ -463,7 +492,9 @@ class SyncService {
   void _startMetadataRefreshLoop(RelayClient client) {
     _metadataRefreshTimer?.cancel();
     _metadataRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (_client != client || !state.value.connected || _manualDisconnect) return;
+      if (_client != client || !state.value.connected || _manualDisconnect) {
+        return;
+      }
       // Sprint 43 Sync v2: periodic health/queue maintenance must not spam peers
       // with snapshot requests. Repeated requests can resurrect stale queued
       // metadata from just-paired or empty devices and make the UI look as if the
@@ -497,6 +528,7 @@ class SyncService {
     final manifest = await _storage.touchCurrentDevice();
     if (reason.contains('trusted_device_revoked')) {
       _directTransferServer.revokeAllShares();
+      _cancelUnauthorizedTransfers(manifest);
     }
     final envelope = SyncEnvelope(
       type: 'library_snapshot',
@@ -730,6 +762,10 @@ class SyncService {
     }
 
     final manifest = await _storage.loadManifest();
+    if (!_authorization.allows(manifest, manifest.deviceId, SyncCapability.fileTransfer)) {
+      _appendLog('Скачивание запрещено настройками доступа этого устройства');
+      return false;
+    }
     final transferId = 'transfer-${_uuid.v4()}';
     final session = _DownloadSession(
       transferId: transferId,
@@ -738,6 +774,7 @@ class SyncService {
       format: book.format,
       expectedSha256: book.contentSha256,
       expectedBytes: book.sizeBytes,
+      chunkSize: options.chunkSize,
     );
     await _fileTransferManager.prepare(
       PendingFileTransfer(
@@ -747,7 +784,7 @@ class SyncService {
         format: book.format,
         expectedSha256: book.contentSha256,
         expectedBytes: book.sizeBytes,
-        chunkSize: _defaultChunkSize,
+        chunkSize: options.chunkSize,
       ),
     );
     _downloadsByTransferId[transferId] = session;
@@ -778,7 +815,7 @@ class SyncService {
           'fileName': book.fileName,
           'expectedSha256': book.contentSha256,
           'expectedSizeBytes': book.sizeBytes,
-          'preferredChunkSize': _defaultChunkSize,
+          'preferredChunkSize': options.chunkSize,
           'binaryTransfer': true,
         },
       ),
@@ -801,7 +838,7 @@ class SyncService {
     }
 
     unawaited(
-      Future<void>.delayed(_downloadOfferTimeout, () async {
+      Future<void>.delayed(options.downloadOfferTimeout, () async {
         final current = _downloadsByTransferId[transferId];
         if (current == null) return;
         if (current.sourceDeviceId == null) {
@@ -913,6 +950,8 @@ class SyncService {
       _setState(state.value.copyWith(onlinePeerDeviceIds: peers));
       _appendLog('Подключилось другое устройство: ${envelope.deviceId}');
       await refreshMetadata(reason: 'peer_joined');
+      _pauseRelayDownloadsForPeer(envelope.deviceId, includeUnassigned: true);
+      await _resumePendingTransfers();
       return;
     }
 
@@ -920,6 +959,8 @@ class SyncService {
       final peers = state.value.onlinePeerDeviceIds.where((id) => id != envelope.deviceId).toList()..sort();
       _setState(state.value.copyWith(onlinePeerDeviceIds: peers));
       _appendLog('Отключилось другое устройство: ${envelope.deviceId}');
+      _pauseRelayDownloadsForPeer(envelope.deviceId);
+      _abortUploadsToPeer(envelope.deviceId, 'Peer disconnected during file transfer');
       return;
     }
 
@@ -937,6 +978,14 @@ class SyncService {
       _metadataSyncEngine.validateProtocol(envelope.protocolVersion);
     } on ProtocolCompatibilityException catch (error) {
       _appendLog('$error');
+      return;
+    }
+
+    final requiredCapability = envelope.type.startsWith('book_file_')
+        ? SyncCapability.fileTransfer
+        : SyncCapability.metadata;
+    if (!_authorization.allows(local, local.deviceId, requiredCapability)) {
+      _appendLog('Отклонено ${envelope.type}: право текущего устройства отключено');
       return;
     }
 
@@ -997,7 +1046,7 @@ class SyncService {
         await _handleBookFileOffer(decryptedEnvelope, local);
         break;
       case 'book_file_accept':
-        unawaited(_handleBookFileAccept(decryptedEnvelope, local));
+        _startBookFileUpload(decryptedEnvelope, local);
         break;
       case 'book_file_chunk':
         await _handleBookFileChunk(decryptedEnvelope, local);
@@ -1045,7 +1094,9 @@ class SyncService {
 
   bool _acceptTrustedDevicePayload(LibraryManifest local, SyncEnvelope envelope) {
     final capability = envelope.type.startsWith('book_file_') ? SyncCapability.fileTransfer : SyncCapability.metadata;
-    if (_authorization.allows(local, envelope.deviceId, capability)) return true;
+    if (_authorization.allows(local, envelope.deviceId, capability)) {
+      return true;
+    }
 
     // First event from a freshly paired device can be its library snapshot. It is
     // already encrypted with the account key from the one-time QR invite. Accept
@@ -1129,6 +1180,8 @@ class SyncService {
     if (saved.trustedDevices.any((device) => device.isRevoked)) {
       _directTransferServer.revokeAllShares();
     }
+    _cancelUnauthorizedTransfers(saved);
+    _enforceCurrentDevicePermissions(saved);
     _emitManifest(saved);
     if (saved.isCurrentDeviceRevoked) {
       _appendLog('Доступ этого устройства отозван. Синхронизация остановлена.');
@@ -1172,7 +1225,9 @@ class SyncService {
   Future<void> _handleBookFileRequested(SyncEnvelope envelope, LibraryManifest local) async {
     final payload = envelope.payload;
     final requestingDeviceId = payload['requestingDeviceId'] as String?;
-    if (requestingDeviceId == null || requestingDeviceId == local.deviceId) return;
+    if (requestingDeviceId == null || requestingDeviceId == local.deviceId) {
+      return;
+    }
 
     final bookId = payload['bookId'] as String?;
     final transferId = payload['transferId'] as String?;
@@ -1201,10 +1256,12 @@ class SyncService {
     }
 
     final chunkSize = math.min(
-      (payload['preferredChunkSize'] as num?)?.toInt() ?? _defaultChunkSize,
-      _defaultChunkSize,
+      (payload['preferredChunkSize'] as num?)?.toInt() ?? options.chunkSize,
+      options.chunkSize,
     );
-    final directUrls = await _createDirectShareUrls(book: book, file: file);
+    final directUrls = options.enableDirectTransfer
+        ? await _createDirectShareUrls(book: book, file: file)
+        : const <String>[];
 
     if (directUrls.isEmpty) {
       _appendLog('Direct/LAN endpoint недоступен для ${book.title}; будет использован relay fallback');
@@ -1251,7 +1308,7 @@ class SyncService {
       return;
     }
 
-    final chunkSize = (payload['chunkSize'] as num?)?.toInt() ?? _defaultChunkSize;
+    final chunkSize = (payload['chunkSize'] as num?)?.toInt() ?? options.chunkSize;
     final prepared = await _fileTransferManager.prepare(
       PendingFileTransfer(
         transferId: transferId,
@@ -1272,6 +1329,11 @@ class SyncService {
       ..chunkSize = chunkSize
       ..receivedBytes = resumeBytes
       ..expectedChunkIndex = prepared.nextChunkIndex;
+
+    if (session.expectedBytes == 0) {
+      await _finalizeDownload(session);
+      return;
+    }
 
     final resumeText = resumeBytes > 0
         ? 'Продолжаем с ${_formatBytes(resumeBytes)}...'
@@ -1294,8 +1356,10 @@ class SyncService {
         .where((url) => url.trim().isNotEmpty)
         .toList();
     if (directUrls.isNotEmpty) {
+      session.directTransferActive = true;
       final directOk = await _tryDirectDownload(session, directUrls);
       if (directOk) return;
+      session.directTransferActive = false;
       final existing = state.value.downloadForBook(session.bookId);
       if (existing != null) {
         _setDownloadSnapshot(
@@ -1330,8 +1394,11 @@ class SyncService {
     final transferId = payload['transferId'] as String?;
     final bookId = payload['bookId'] as String?;
     final requestingDeviceId = payload['requestingDeviceId'] as String?;
-    if (transferId == null || bookId == null || requestingDeviceId == null) return;
+    if (transferId == null || bookId == null || requestingDeviceId == null) {
+      return;
+    }
     if (!_uploadLocks.add(transferId)) return;
+    _uploadPeerDeviceIds[transferId] = requestingDeviceId;
 
     try {
       await _sendFileChunks(
@@ -1339,12 +1406,30 @@ class SyncService {
         transferId: transferId,
         bookId: bookId,
         requestingDeviceId: requestingDeviceId,
-        chunkSize: (payload['chunkSize'] as num?)?.toInt() ?? _defaultChunkSize,
+        chunkSize: (payload['chunkSize'] as num?)?.toInt() ?? options.chunkSize,
         startChunkIndex: (payload['startChunkIndex'] as num?)?.toInt() ?? 0,
         binaryTransfer: payload['binaryTransfer'] == true,
       );
     } finally {
       _uploadLocks.remove(transferId);
+      _uploadPeerDeviceIds.remove(transferId);
+    }
+  }
+
+  void _startBookFileUpload(SyncEnvelope envelope, LibraryManifest local) {
+    late final Future<void> upload;
+    upload = _handleBookFileAccept(envelope, local).whenComplete(() {
+      _activeUploads.remove(upload);
+    });
+    _activeUploads.add(upload);
+  }
+
+  Future<void> _trackIncoming(Future<void> handler) async {
+    _inFlightIncoming.add(handler);
+    try {
+      await handler;
+    } finally {
+      _inFlightIncoming.remove(handler);
     }
   }
 
@@ -1404,8 +1489,8 @@ class SyncService {
       );
       return;
     }
-    final safeChunkSize = chunkSize.clamp(256 * 1024, _defaultChunkSize).toInt();
-    final totalChunks = (size / safeChunkSize).ceil();
+    final safeChunkSize = chunkSize.clamp(options.minimumChunkSize, options.chunkSize).toInt();
+    final totalChunks = (size + safeChunkSize - 1) ~/ safeChunkSize;
     final safeStartChunkIndex = startChunkIndex.clamp(0, totalChunks).toInt();
     final startOffset = (safeStartChunkIndex * safeChunkSize).clamp(0, size).toInt();
     final uploadKey = 'upload:$transferId';
@@ -1466,7 +1551,7 @@ class SyncService {
         if (data.isEmpty) break;
         sentBytes += data.length;
         var acknowledged = false;
-        for (var attempt = 1; attempt <= 3 && !acknowledged; attempt++) {
+        for (var attempt = 1; attempt <= options.maxChunkAttempts && !acknowledged; attempt++) {
           final ackKey = _ackKey(transferId, chunkIndex);
           final ackCompleter = Completer<void>();
           _uploadAckWaiters[ackKey] = ackCompleter;
@@ -1504,7 +1589,7 @@ class SyncService {
                 );
           if (!sent) {
             _uploadAckWaiters.remove(ackKey);
-            if (attempt == 3) {
+            if (attempt == options.maxChunkAttempts) {
               failed = true;
               await _sendFileError(
                 local,
@@ -1518,16 +1603,18 @@ class SyncService {
             continue;
           }
           try {
-            await ackCompleter.future.timeout(const Duration(seconds: 20));
+            await ackCompleter.future.timeout(options.uploadAckTimeout);
             acknowledged = true;
           } on TimeoutException {
             _uploadAckWaiters.remove(ackKey);
-            if (attempt < 3) {
+            if (attempt < options.maxChunkAttempts) {
               _updateTransferByKey(
                 uploadKey,
-                state.value.fileTransfers[uploadKey]!.copyWith(statusText: 'Повтор chunk $chunkIndex ($attempt/3)...'),
+                state.value.fileTransfers[uploadKey]!.copyWith(
+                  statusText: 'Повтор chunk $chunkIndex ($attempt/${options.maxChunkAttempts})...',
+                ),
               );
-              await Future<void>.delayed(const Duration(milliseconds: 350));
+              await Future<void>.delayed(options.uploadRetryDelay);
             } else {
               failed = true;
               await _sendFileError(
@@ -1641,6 +1728,10 @@ class SyncService {
       _metadataSyncEngine.validateProtocol(protocolVersion);
       if (header['accountId'] != local.accountId) return;
       if (header['requestingDeviceId'] != local.deviceId) return;
+      if (!_authorization.allows(local, local.deviceId, SyncCapability.fileTransfer)) {
+        _appendLog('Отклонён binary chunk: право передачи файлов отключено');
+        return;
+      }
       final sourceDeviceId = header['sourceDeviceId']?.toString() ?? header['deviceId']?.toString() ?? '';
       if (!_authorization.allows(local, sourceDeviceId, SyncCapability.fileTransfer)) {
         _appendLog('Отклонён binary chunk от недоверенного/отозванного устройства: $sourceDeviceId');
@@ -1652,72 +1743,17 @@ class SyncService {
         accountEncryptionKey: local.accountEncryptionKey,
       );
       await _handleBookFileBinaryChunk(header, clearBytes, local);
-    } catch (error, stackTrace) {
-      debugPrint('Binary sync event handling failed: $error\n$stackTrace');
+    } catch (error) {
+      // Invalid/tampered network frames are expected hostile input. Keep the
+      // diagnostic concise instead of allowing a peer to flood logs with full
+      // stack traces.
+      debugPrint('Binary sync event handling failed: $error');
       _appendLog('Ошибка binary transfer: $error');
     }
   }
 
   Future<void> _handleBookFileBinaryChunk(Map<String, dynamic> payload, List<int> data, LibraryManifest local) async {
-    final transferId = payload['transferId'] as String?;
-    if (transferId == null) return;
-    final session = _downloadsByTransferId[transferId];
-    if (session == null) return;
-    if (session.sourceDeviceId != null && payload['sourceDeviceId'] != session.sourceDeviceId) return;
-
-    final chunkIndex = (payload['chunkIndex'] as num?)?.toInt();
-    if (chunkIndex == null) return;
-    if (chunkIndex != session.expectedChunkIndex) {
-      // Duplicate chunks can arrive when the source retries after a delayed ACK.
-      // ACK them again and keep the already written file intact.
-      if (chunkIndex < session.expectedChunkIndex) {
-        await _sendChunkAck(local, session, chunkIndex);
-        return;
-      }
-      await _failDownload(
-        session,
-        'Нарушен порядок binary chunks: ожидали ${session.expectedChunkIndex}, получили $chunkIndex',
-      );
-      return;
-    }
-
-    final tempFile = session.tempFile;
-    if (tempFile == null) return;
-    try {
-      await tempFile.writeAsBytes(data, mode: FileMode.append, flush: false);
-      session
-        ..expectedChunkIndex += 1
-        ..receivedBytes += data.length
-        ..totalChunks = (payload['totalChunks'] as num?)?.toInt()
-        ..expectedBytes = (payload['totalBytes'] as num?)?.toInt() ?? session.expectedBytes;
-
-      final totalBytes = session.expectedBytes;
-      final progress = totalBytes <= 0 ? 0.0 : (session.receivedBytes / totalBytes) * 100;
-      final elapsed = DateTime.now().difference(session.startedAt).inMilliseconds.clamp(1, 1 << 31);
-      final mbps = (session.receivedBytes / (1024 * 1024)) / (elapsed / 1000.0);
-      _setDownloadSnapshot(
-        state.value
-            .downloadForBook(session.bookId)!
-            .copyWith(
-              statusText: 'Скачивание: ${progress.clamp(0, 100).toStringAsFixed(1)}% • ${mbps.toStringAsFixed(1)} MB/s',
-              progressPercent: progress.clamp(0, 100).toDouble(),
-              transferredBytes: session.receivedBytes,
-              totalBytes: totalBytes,
-              active: true,
-            ),
-      );
-
-      _resetDownloadWatchdog(session);
-      await _sendChunkAck(local, session, chunkIndex);
-
-      final totalChunks = session.totalChunks;
-      if (totalChunks != null && session.expectedChunkIndex >= totalChunks) {
-        session.watchdog?.cancel();
-        await _finalizeDownload(session);
-      }
-    } catch (error) {
-      await _failDownload(session, 'Ошибка получения binary chunk: $error');
-    }
+    await _handleReceivedFileChunk(payload: payload, data: data, local: local, transportLabel: 'binary');
   }
 
   Future<void> _sendChunkAck(LibraryManifest local, _DownloadSession session, int chunkIndex) async {
@@ -1743,61 +1779,100 @@ class SyncService {
     if (payload['requestingDeviceId'] != local.deviceId) return;
     final transferId = payload['transferId'] as String?;
     if (transferId == null) return;
+    final dataBase64 = payload['dataBase64'] as String?;
+    if (dataBase64 == null) return;
+
+    try {
+      final data = base64Decode(dataBase64);
+      await _handleReceivedFileChunk(payload: payload, data: data, local: local, transportLabel: 'relay');
+    } catch (error) {
+      final session = _downloadsByTransferId[transferId];
+      if (session == null) return;
+      await _failDownload(session, 'Ошибка получения chunk: $error');
+    }
+  }
+
+  Future<void> _handleReceivedFileChunk({
+    required Map<String, dynamic> payload,
+    required List<int> data,
+    required LibraryManifest local,
+    required String transportLabel,
+  }) async {
+    final transferId = payload['transferId'] as String?;
+    final chunkIndex = (payload['chunkIndex'] as num?)?.toInt();
+    final offset = (payload['offset'] as num?)?.toInt();
+    final totalChunks = (payload['totalChunks'] as num?)?.toInt();
+    final totalBytes = (payload['totalBytes'] as num?)?.toInt();
+    if (transferId == null || chunkIndex == null || offset == null || totalChunks == null || totalBytes == null) {
+      return;
+    }
     final session = _downloadsByTransferId[transferId];
-    if (session == null) return;
+    if (session == null || session.tempFile == null) return;
     if (session.sourceDeviceId != null && payload['sourceDeviceId'] != session.sourceDeviceId) {
       return;
     }
 
-    final chunkIndex = (payload['chunkIndex'] as num?)?.toInt();
-    if (chunkIndex == null) return;
-    if (chunkIndex != session.expectedChunkIndex) {
-      await _failDownload(
-        session,
-        'Нарушен порядок chunks: ожидали ${session.expectedChunkIndex}, получили $chunkIndex',
-      );
-      return;
+    final result = await _fileTransferManager.appendChunk(
+      transfer: PendingFileTransfer(
+        transferId: session.transferId,
+        bookId: session.bookId,
+        fileName: session.fileName,
+        format: session.format,
+        expectedSha256: session.expectedSha256,
+        expectedBytes: session.expectedBytes,
+        chunkSize: session.chunkSize,
+      ),
+      partialFile: session.tempFile!,
+      expectedChunkIndex: session.expectedChunkIndex,
+      chunkIndex: chunkIndex,
+      offset: offset,
+      totalChunks: totalChunks,
+      totalBytes: totalBytes,
+      sha256: payload['sha256']?.toString() ?? '',
+      data: data,
+    );
+
+    switch (result.status) {
+      case FileChunkAppendStatus.duplicate:
+        await _sendChunkAck(local, session, chunkIndex);
+        return;
+      case FileChunkAppendStatus.premature:
+        _appendLog(
+          'Пропущен преждевременный $transportLabel chunk $chunkIndex; ожидается ${session.expectedChunkIndex}',
+        );
+        return;
+      case FileChunkAppendStatus.invalid:
+        _appendLog('Отклонён $transportLabel chunk с несовместимыми transfer metadata');
+        return;
+      case FileChunkAppendStatus.appended:
+        break;
     }
 
-    final tempFile = session.tempFile;
-    final dataBase64 = payload['dataBase64'] as String?;
-    if (tempFile == null || dataBase64 == null) return;
-
-    try {
-      final data = base64Decode(dataBase64);
-      await tempFile.writeAsBytes(data, mode: FileMode.append, flush: false);
-      session
-        ..expectedChunkIndex += 1
-        ..receivedBytes += data.length
-        ..totalChunks = (payload['totalChunks'] as num?)?.toInt()
-        ..expectedBytes = (payload['totalBytes'] as num?)?.toInt() ?? session.expectedBytes;
-
-      final totalBytes = session.expectedBytes;
-      final progress = totalBytes <= 0 ? 0.0 : (session.receivedBytes / totalBytes) * 100;
-      final elapsed = DateTime.now().difference(session.startedAt).inMilliseconds.clamp(1, 1 << 31);
-      final mbps = (session.receivedBytes / (1024 * 1024)) / (elapsed / 1000.0);
+    session
+      ..expectedChunkIndex = result.nextChunkIndex
+      ..receivedBytes = result.receivedBytes
+      ..totalChunks = totalChunks;
+    final progress = session.expectedBytes <= 0 ? 0.0 : (session.receivedBytes / session.expectedBytes) * 100;
+    final elapsed = DateTime.now().difference(session.startedAt).inMilliseconds.clamp(1, 1 << 31);
+    final mbps = (session.receivedBytes / (1024 * 1024)) / (elapsed / 1000.0);
+    final snapshot = state.value.downloadForBook(session.bookId);
+    if (snapshot != null) {
       _setDownloadSnapshot(
-        state.value
-            .downloadForBook(session.bookId)!
-            .copyWith(
-              statusText: 'Скачивание: ${progress.clamp(0, 100).toStringAsFixed(1)}% • ${mbps.toStringAsFixed(1)} MB/s',
-              progressPercent: progress.clamp(0, 100).toDouble(),
-              transferredBytes: session.receivedBytes,
-              totalBytes: totalBytes,
-              active: true,
-            ),
+        snapshot.copyWith(
+          statusText: 'Скачивание: ${progress.clamp(0, 100).toStringAsFixed(1)}% • ${mbps.toStringAsFixed(1)} MB/s',
+          progressPercent: progress.clamp(0, 100).toDouble(),
+          transferredBytes: session.receivedBytes,
+          totalBytes: session.expectedBytes,
+          active: true,
+        ),
       );
+    }
 
-      _resetDownloadWatchdog(session);
-      await _sendChunkAck(local, session, chunkIndex);
-
-      final totalChunks = session.totalChunks;
-      if (totalChunks != null && session.expectedChunkIndex >= totalChunks) {
-        session.watchdog?.cancel();
-        await _finalizeDownload(session);
-      }
-    } catch (error) {
-      await _failDownload(session, 'Ошибка получения chunk: $error');
+    _resetDownloadWatchdog(session);
+    await _sendChunkAck(local, session, chunkIndex);
+    if (session.expectedChunkIndex >= totalChunks) {
+      session.watchdog?.cancel();
+      await _finalizeDownload(session);
     }
   }
 
@@ -1848,7 +1923,7 @@ class SyncService {
 
   void _resetDownloadWatchdog(_DownloadSession session) {
     session.watchdog?.cancel();
-    session.watchdog = Timer(_downloadIdleTimeout, () {
+    session.watchdog = Timer(options.downloadIdleTimeout, () {
       final current = _downloadsByTransferId[session.transferId];
       if (current == null || current.sourceDeviceId == null) return;
       unawaited(_failDownload(current, 'Источник перестал отвечать во время скачивания'));
@@ -1917,6 +1992,110 @@ class SyncService {
     }
   }
 
+  void _pauseRelayTransfers() {
+    final waiters = _uploadAckWaiters.values.toList(growable: false);
+    _uploadAckWaiters.clear();
+    for (final waiter in waiters) {
+      if (!waiter.isCompleted) {
+        waiter.completeError(StateError('Relay disconnected during file transfer'));
+      }
+    }
+
+    final relaySessions = _downloadsByTransferId.values
+        .where((session) => !session.directTransferActive)
+        .toList(growable: false);
+    for (final session in relaySessions) {
+      session.watchdog?.cancel();
+      _downloadsByTransferId.remove(session.transferId);
+      final snapshot = state.value.downloadForBook(session.bookId);
+      if (snapshot != null) {
+        _setDownloadSnapshot(
+          snapshot.copyWith(statusText: 'Передача приостановлена. Продолжим после подключения к relay.', active: false),
+        );
+      }
+    }
+  }
+
+  void _pauseRelayDownloadsForPeer(String peerDeviceId, {bool includeUnassigned = false}) {
+    final sessions = _downloadsByTransferId.values
+        .where(
+          (session) =>
+              !session.directTransferActive &&
+              (session.sourceDeviceId == peerDeviceId || includeUnassigned && session.sourceDeviceId == null),
+        )
+        .toList(growable: false);
+    for (final session in sessions) {
+      session.watchdog?.cancel();
+      _downloadsByTransferId.remove(session.transferId);
+      final snapshot = state.value.downloadForBook(session.bookId);
+      if (snapshot != null) {
+        _setDownloadSnapshot(
+          snapshot.copyWith(statusText: 'Источник отключился. Ожидаем его возвращения для продолжения.', active: false),
+        );
+      }
+    }
+  }
+
+  void _abortUploadsToPeer(String peerDeviceId, String reason) {
+    final transferIds = _uploadPeerDeviceIds.entries
+        .where((entry) => entry.value == peerDeviceId)
+        .map((entry) => entry.key)
+        .toSet();
+    if (transferIds.isEmpty) return;
+    _cancelledTransfers.addAll(transferIds);
+    final waiterEntries = _uploadAckWaiters.entries
+        .where((entry) => transferIds.any((transferId) => entry.key.startsWith('$transferId:')))
+        .toList(growable: false);
+    for (final entry in waiterEntries) {
+      _uploadAckWaiters.remove(entry.key);
+      if (!entry.value.isCompleted) {
+        entry.value.completeError(StateError(reason));
+      }
+    }
+  }
+
+  void _cancelUnauthorizedTransfers(LibraryManifest manifest) {
+    final cancelledTransferIds = _uploadPeerDeviceIds.entries
+        .where((entry) => !_authorization.allows(manifest, entry.value, SyncCapability.fileTransfer))
+        .map((entry) => entry.key)
+        .toSet();
+    if (cancelledTransferIds.isEmpty) return;
+
+    for (final peerDeviceId
+        in _uploadPeerDeviceIds.entries
+            .where((entry) => cancelledTransferIds.contains(entry.key))
+            .map((entry) => entry.value)
+            .toSet()) {
+      _abortUploadsToPeer(peerDeviceId, 'File-transfer permission was revoked');
+    }
+  }
+
+  void _enforceCurrentDevicePermissions(LibraryManifest manifest) {
+    if (_authorization.allows(manifest, manifest.deviceId, SyncCapability.fileTransfer)) {
+      return;
+    }
+    _directTransferServer.revokeAllShares();
+    for (final session in _downloadsByTransferId.values.toList(growable: false)) {
+      session
+        ..watchdog?.cancel()
+        ..cancelled = true;
+      _downloadsByTransferId.remove(session.transferId);
+      final snapshot = state.value.downloadForBook(session.bookId);
+      if (snapshot != null) {
+        _setDownloadSnapshot(
+          snapshot.copyWith(
+            statusText: 'Передача остановлена: право доступа отключено',
+            active: false,
+            error: 'Устройство больше не имеет права передавать файлы',
+          ),
+        );
+      }
+    }
+    for (final peerDeviceId in _uploadPeerDeviceIds.values.toSet()) {
+      _abortUploadsToPeer(peerDeviceId, 'Current device file-transfer permission was revoked');
+    }
+  }
+
   String _formatBytes(int bytes) {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
@@ -1935,7 +2114,9 @@ class SyncService {
     final candidates = <Uri>[];
     for (final rawUrl in urls) {
       final uri = Uri.tryParse(rawUrl.trim());
-      if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) continue;
+      if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+        continue;
+      }
       if (!seen.add(uri.toString())) continue;
       candidates.add(uri);
     }
@@ -1986,7 +2167,9 @@ class SyncService {
             })
             .whenComplete(() {
               pending -= 1;
-              if (pending <= 0 && !completer.isCompleted) completer.complete(null);
+              if (pending <= 0 && !completer.isCompleted) {
+                completer.complete(null);
+              }
             }),
       );
     }
@@ -2045,7 +2228,9 @@ class SyncService {
         resumeBytes = 0;
       }
       final request = await client.getUrl(uri).timeout(const Duration(seconds: 3));
-      if (resumeBytes > 0) request.headers.set(HttpHeaders.rangeHeader, 'bytes=$resumeBytes-');
+      if (resumeBytes > 0) {
+        request.headers.set(HttpHeaders.rangeHeader, 'bytes=$resumeBytes-');
+      }
       final response = await request.close().timeout(const Duration(seconds: 5));
       if (response.statusCode == HttpStatus.notFound || response.statusCode == HttpStatus.gone) {
         await response.drain();
@@ -2056,6 +2241,22 @@ class SyncService {
         await response.drain();
         return false;
       }
+      final advertisedBookId = response.headers.value('X-ReadArc-Book-Id');
+      final advertisedSha256 = response.headers.value('X-ReadArc-Sha256');
+      if (advertisedBookId != session.bookId || advertisedSha256 != session.expectedSha256) {
+        await response.drain();
+        return false;
+      }
+      if (response.statusCode == HttpStatus.partialContent) {
+        final contentRange = response.headers.value(HttpHeaders.contentRangeHeader);
+        final rangeStart = contentRange == null
+            ? null
+            : int.tryParse(RegExp(r'^bytes (\d+)-').firstMatch(contentRange)?.group(1) ?? '');
+        if (rangeStart != resumeBytes) {
+          await response.drain();
+          return false;
+        }
+      }
       if (response.statusCode == HttpStatus.ok && resumeBytes > 0) {
         await tempFile.writeAsBytes(const [], flush: true);
         resumeBytes = 0;
@@ -2064,7 +2265,10 @@ class SyncService {
       sink = tempFile.openWrite(mode: FileMode.append);
       final startedAt = DateTime.now();
       var lastUi = DateTime.fromMillisecondsSinceEpoch(0);
-      await for (final chunk in response.timeout(_directStreamIdleTimeout)) {
+      await for (final chunk in response.timeout(options.directStreamIdleTimeout)) {
+        if (session.cancelled || !_downloadsByTransferId.containsKey(session.transferId)) {
+          return false;
+        }
         sink.add(chunk);
         session.receivedBytes += chunk.length;
         final now = DateTime.now();
@@ -2155,6 +2359,11 @@ class SyncService {
         _setState(state.value.copyWith(connected: false, statusText: 'Доступ этого устройства отозван'));
         return false;
       }
+      final capability = envelope.type.startsWith('book_file_') ? SyncCapability.fileTransfer : SyncCapability.metadata;
+      if (!_authorization.allows(local, local.deviceId, capability)) {
+        _appendLog('Не отправлено ${envelope.type}: право текущего устройства отключено');
+        return false;
+      }
       final encryptedPayload = await ReadArcE2eCrypto.encryptPayload(
         payload: {
           ...envelope.payload,
@@ -2227,9 +2436,12 @@ class SyncService {
     _disposed = true;
     for (final session in _downloadsByTransferId.values) {
       session.watchdog?.cancel();
+      session.cancelled = true;
     }
     _downloadsByTransferId.clear();
     await disconnect(manual: true);
+    await Future.wait(_activeUploads.toList(growable: false)).catchError((_) => <void>[]);
+    await Future.wait(_inFlightIncoming.toList(growable: false)).catchError((_) => <void>[]);
     _reconnectTimer?.cancel();
     await _directTransferServer.dispose();
     await _manifestChanges.close();
@@ -2245,6 +2457,7 @@ class _DownloadSession {
     required this.format,
     required this.expectedSha256,
     required this.expectedBytes,
+    required this.chunkSize,
   });
 
   final String transferId;
@@ -2256,10 +2469,12 @@ class _DownloadSession {
 
   String? sourceDeviceId;
   File? tempFile;
-  int chunkSize = _defaultChunkSize;
+  int chunkSize;
   int expectedChunkIndex = 0;
   int receivedBytes = 0;
   int? totalChunks;
   Timer? watchdog;
+  bool directTransferActive = false;
+  bool cancelled = false;
   final DateTime startedAt = DateTime.now();
 }

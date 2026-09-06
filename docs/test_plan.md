@@ -154,6 +154,12 @@ macOS DMG/PKG build
 4. Вернуть подключение и нажать скачать снова.
 5. Ожидается: скачивание продолжается с partial chunk, затем проходит SHA-256 проверку.
 
+Автоматизированная fault-injection матрица Sprint 47B дополнительно покрывает
+перезапуск relay, процесса источника и процесса получателя, duplicate/reordered/
+tampered chunks, Direct/LAN Range-resume и отзыв устройства во время активной
+передачи. Каноническое описание матрицы находится в
+`docs/sprint_47b_transfer_fault_injection_ru.md`.
+
 ### Download cancel
 
 1. Начать скачивание книги.

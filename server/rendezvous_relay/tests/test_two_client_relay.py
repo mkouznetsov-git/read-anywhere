@@ -24,9 +24,13 @@ class RealRelayHarnessTest(unittest.IsolatedAsyncioTestCase):
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             self.port = probe.getsockname()[1]
+        self.process = self._start_process()
+        await self._wait_until_ready()
+
+    def _start_process(self) -> subprocess.Popen:
         environment = os.environ.copy()
         environment["READARC_RELAY_DATA_DIR"] = self.temp.name
-        self.process = subprocess.Popen(
+        return subprocess.Popen(
             [
                 sys.executable,
                 "-m",
@@ -44,6 +48,12 @@ class RealRelayHarnessTest(unittest.IsolatedAsyncioTestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+
+    async def _restart_process(self) -> None:
+        previous = self.process
+        previous.kill()
+        previous.communicate(timeout=5)
+        self.process = self._start_process()
         await self._wait_until_ready()
 
     async def asyncTearDown(self) -> None:
@@ -138,6 +148,65 @@ class RealRelayHarnessTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("unsupported_protocol_version", error["code"])
         self.assertEqual([2, 3], error["supportedProtocolVersions"])
         await client.close()
+
+    async def test_relay_restart_keeps_metadata_but_never_persists_binary_chunks(self) -> None:
+        client_a = await self._connect("restart-a")
+        operation = {
+            "type": "library_snapshot",
+            "accountId": "integration-account",
+            "deviceId": "restart-a",
+            "protocolVersion": 3,
+            "operationId": "restart-metadata-1",
+            "payload": {"e2ee": {"ciphertext": "opaque"}},
+        }
+        await client_a.send(json.dumps(operation))
+        await client_a.send(b"must-not-survive-restart")
+        await client_a.close()
+
+        await self._restart_process()
+        client_b = await websockets.connect(
+            f"ws://127.0.0.1:{self.port}/ws/integration-account/restart-b"
+        )
+        replay = json.loads(await asyncio.wait_for(client_b.recv(), timeout=2))
+        self.assertEqual("restart-metadata-1", replay["operationId"])
+        peer_list = json.loads(await asyncio.wait_for(client_b.recv(), timeout=2))
+        self.assertEqual("peer_list", peer_list["type"])
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(client_b.recv(), timeout=0.2)
+        await client_b.close()
+
+    async def test_duplicate_and_reordered_binary_frames_are_forwarded_without_mutation(self) -> None:
+        client_a = await self._connect("order-a")
+        client_b = await self._connect("order-b")
+        joined = json.loads(await asyncio.wait_for(client_a.recv(), timeout=2))
+        self.assertEqual("peer_joined", joined["type"])
+
+        frames = [b"chunk-1", b"chunk-0", b"chunk-0"]
+        for frame in frames:
+            await client_a.send(frame)
+        delivered = [await asyncio.wait_for(client_b.recv(), timeout=2) for _ in frames]
+        self.assertEqual(frames, delivered)
+
+        await client_a.close()
+        await client_b.close()
+
+    async def test_receiver_disconnect_mid_stream_does_not_poison_the_room(self) -> None:
+        client_a = await self._connect("drop-a")
+        client_b = await self._connect("drop-b")
+        await asyncio.wait_for(client_a.recv(), timeout=2)  # peer_joined
+        await client_a.send(b"first")
+        self.assertEqual(b"first", await asyncio.wait_for(client_b.recv(), timeout=2))
+        await client_b.close()
+        await asyncio.wait_for(client_a.recv(), timeout=2)  # peer_left
+
+        await client_a.send(b"sent-without-receiver")
+        client_c = await self._connect("drop-c")
+        await asyncio.wait_for(client_a.recv(), timeout=2)  # peer_joined
+        await client_a.send(b"after-reconnect")
+        self.assertEqual(b"after-reconnect", await asyncio.wait_for(client_c.recv(), timeout=2))
+
+        await client_a.close()
+        await client_c.close()
 
 
 if __name__ == "__main__":
