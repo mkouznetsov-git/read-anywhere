@@ -74,7 +74,9 @@ jobs:
 
       - name: Capture formatter diff
         if: failure()
-        run: git diff -- apps/flutter_client/lib apps/flutter_client/test > test-results/dart-format.patch
+        run: |
+          dart format apps/flutter_client/lib apps/flutter_client/test
+          git diff -- apps/flutter_client/lib apps/flutter_client/test > test-results/dart-format.patch
 
       - name: Upload quality logs
         if: always()
