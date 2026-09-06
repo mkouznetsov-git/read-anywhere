@@ -84,6 +84,7 @@ jobs:
   android-smoke:
     name: Android emulator smoke test
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     needs: quality
     steps:
       - name: Checkout
@@ -135,6 +136,7 @@ jobs:
   macos-smoke:
     name: macOS application smoke test
     runs-on: macos-15
+    timeout-minutes: 20
     needs: quality
     steps:
       - name: Checkout
