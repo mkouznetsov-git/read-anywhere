@@ -1,4 +1,10 @@
-# Sprint 47 — Sync reliability
+# Sprint 47A — Sync state и relay reliability
+
+Исходный Sprint 47 разделён на два самостоятельных этапа. Этот документ
+фиксирует Sprint 47A: версионирование протокола, конфликтную модель metadata,
+idempotency, tombstones, авторизацию, durable relay и базовый restart/resume
+механизм передачи. Sprint 47B будет отдельным PR с fault-injection и полным
+end-to-end набором сценариев обрыва файловых передач через relay и Direct/LAN.
 
 ## Проблемы до спринта
 
@@ -61,3 +67,12 @@ Binary frame v3 также содержит защищённые `protocolVersio
 - revoked и permission-disabled devices не имеют metadata/file capability;
 - relay отвергает несовместимую версию контролируемой ошибкой;
 - 50 конкурентных relay append сохраняются без потерь, cursor переживает restart.
+
+## Граница Sprint 47B
+
+В следующем этапе остаются расширенные end-to-end проверки передачи файлов:
+принудительный обрыв relay и процесса клиента посередине нескольких chunks,
+возобновление после restart через relay и Direct/LAN, повторы и перестановка
+chunks, отзыв устройства во время активной передачи и итоговая матрица всех
+девяти сценариев исходного Sprint 47. Эти проверки будут выполняться в отдельной
+ветке и PR, не меняя уже зафиксированные правила protocol v3.

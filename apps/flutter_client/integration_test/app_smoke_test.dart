@@ -13,11 +13,19 @@ void main() {
     addTearDown(() => FlutterError.onError = previousHandler);
 
     await tester.pumpWidget(const app.ReadArcApp());
-    await tester.pump(const Duration(milliseconds: 250));
-    await tester.pump(const Duration(seconds: 1));
+    try {
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump(const Duration(seconds: 1));
 
-    expect(find.byType(MaterialApp), findsOneWidget);
-    expect(find.byType(app.LibraryScreen), findsOneWidget);
-    expect(errors, isEmpty, reason: 'ReadArc emitted a Flutter framework error during startup: $errors');
-  });
+      expect(find.byType(MaterialApp), findsOneWidget);
+      expect(find.byType(app.LibraryScreen), findsOneWidget);
+      expect(errors, isEmpty, reason: 'ReadArc emitted a Flutter framework error during startup: $errors');
+    } finally {
+      // Explicitly dispose application-owned sync streams, timers and HTTP
+      // resources. Device integration runners keep the process alive while any
+      // of these resources remain attached to the widget under test.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+  }, timeout: const Timeout(Duration(minutes: 2)));
 }
