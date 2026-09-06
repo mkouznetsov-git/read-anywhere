@@ -1,7 +1,10 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:readarc/main.dart' as app;
+import 'package:readarc/models/manifest.dart';
 import 'package:readarc/services/storage_service.dart';
 import 'package:readarc/services/sync/sync_service.dart';
 
@@ -14,7 +17,11 @@ void main() {
     FlutterError.onError = errors.add;
     addTearDown(() => FlutterError.onError = previousHandler);
 
-    final storage = StorageService();
+    final directory = await Directory.systemTemp.createTemp('readarc-platform-smoke-');
+    addTearDown(() async {
+      if (await directory.exists()) await directory.delete(recursive: true);
+    });
+    final storage = _SmokeStorage(directory);
     final sync = SyncService(storage);
     // Relay behavior has its own real two-client integration harness. Keep the
     // platform boot smoke deterministic and independent from production DNS,
@@ -36,4 +43,17 @@ void main() {
       await sync.dispose();
     }
   }, timeout: const Timeout(Duration(minutes: 2)));
+}
+
+class _SmokeStorage extends StorageService {
+  _SmokeStorage(this.directory);
+
+  final Directory directory;
+
+  @override
+  Future<Directory> appDir() async => directory;
+
+  @override
+  Future<LibraryManifest> loadManifest() async =>
+      LibraryManifest(accountId: 'platform-smoke-account', deviceId: 'platform-smoke-device');
 }
