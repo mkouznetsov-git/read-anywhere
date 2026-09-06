@@ -55,7 +55,9 @@ void main() {
 }
 
 class ReadArcApp extends StatefulWidget {
-  const ReadArcApp({super.key});
+  const ReadArcApp({super.key, this.autoConnect = true});
+
+  final bool autoConnect;
 
   @override
   State<ReadArcApp> createState() => _ReadArcAppState();
@@ -68,7 +70,7 @@ class _ReadArcAppState extends State<ReadArcApp> {
   @override
   void initState() {
     super.initState();
-    unawaited(_autoConnectSync());
+    if (widget.autoConnect) unawaited(_autoConnectSync());
   }
 
   Future<void> _autoConnectSync() async {

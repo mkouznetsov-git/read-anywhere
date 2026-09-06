@@ -12,7 +12,10 @@ void main() {
     FlutterError.onError = errors.add;
     addTearDown(() => FlutterError.onError = previousHandler);
 
-    await tester.pumpWidget(const app.ReadArcApp());
+    // Relay behavior has its own real two-client integration harness. Keep the
+    // platform boot smoke deterministic and independent from production DNS,
+    // internet reachability and live peer traffic.
+    await tester.pumpWidget(const app.ReadArcApp(autoConnect: false));
     try {
       await tester.pump(const Duration(milliseconds: 250));
       await tester.pump(const Duration(seconds: 1));
