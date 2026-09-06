@@ -225,14 +225,12 @@ class SyncService {
     DirectTransferServer? directTransferServer,
     int fileChunkSize = _defaultChunkSize,
     Duration fileChunkAckTimeout = const Duration(seconds: 20),
-    FileTransferFaultInjector? pauseAfterCommittedChunk,
-    BeforeSendingFileChunk? beforeSendingFileChunk,
+    this.pauseAfterCommittedChunk,
+    this.beforeSendingFileChunk,
   }) : assert(fileChunkSize >= 256 * 1024 && fileChunkSize <= _defaultChunkSize),
        assert(fileChunkAckTimeout > Duration.zero),
        _fileChunkSize = fileChunkSize,
        _fileChunkAckTimeout = fileChunkAckTimeout,
-       _pauseAfterCommittedChunk = pauseAfterCommittedChunk,
-       _beforeSendingFileChunk = beforeSendingFileChunk,
        _directTransferServer = directTransferServer ?? DirectTransferServer(),
        _metadataSyncEngine = MetadataSyncEngine(_storage),
        _fileTransferManager = FileTransferManager(appDirectory: _storage.appDir),
@@ -243,8 +241,8 @@ class SyncService {
   final FileTransferManager _fileTransferManager;
   final int _fileChunkSize;
   final Duration _fileChunkAckTimeout;
-  final FileTransferFaultInjector? _pauseAfterCommittedChunk;
-  final BeforeSendingFileChunk? _beforeSendingFileChunk;
+  final FileTransferFaultInjector? pauseAfterCommittedChunk;
+  final BeforeSendingFileChunk? beforeSendingFileChunk;
   final ConnectionManager _connectionManager = const ConnectionManager();
   final PairingService _pairingService;
   final DirectTransferServer _directTransferServer;
@@ -1506,7 +1504,7 @@ class SyncService {
           _appendLog('Отправка отменена получателем: ${book.title}');
           break;
         }
-        await _beforeSendingFileChunk?.call(
+        await beforeSendingFileChunk?.call(
           FileTransferChunkCheckpoint(
             transferId: transferId,
             bookId: bookId,
@@ -1929,7 +1927,7 @@ class SyncService {
   String _ackKey(String transferId, int chunkIndex) => '$transferId:$chunkIndex';
 
   bool _pauseForInjectedFault(_DownloadSession session, int chunkIndex) {
-    final injector = _pauseAfterCommittedChunk;
+    final injector = pauseAfterCommittedChunk;
     if (injector == null ||
         !injector(
           FileTransferChunkCheckpoint(
