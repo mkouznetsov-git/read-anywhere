@@ -7,9 +7,19 @@ import 'package:uuid/uuid.dart';
 import '../../models/book.dart';
 
 class DirectTransferServer {
-  DirectTransferServer({this.onStarted});
+  DirectTransferServer({
+    this.onStarted,
+    this.bindAddress,
+    this.includeLoopback = false,
+    this.streamChunkSize = 64 * 1024,
+    this.streamChunkDelay = Duration.zero,
+  });
 
   final void Function(int port)? onStarted;
+  final InternetAddress? bindAddress;
+  final bool includeLoopback;
+  final int streamChunkSize;
+  final Duration streamChunkDelay;
   final _uuid = const Uuid();
   final _shares = <String, _DirectFileShare>{};
   HttpServer? _server;
@@ -18,7 +28,7 @@ class DirectTransferServer {
     if (_server != null) return;
     for (final port in const [8790, 8791, 0]) {
       try {
-        final server = await HttpServer.bind(InternetAddress.anyIPv4, port, shared: true);
+        final server = await HttpServer.bind(bindAddress ?? InternetAddress.anyIPv4, port, shared: true);
         _server = server;
         server.listen(
           (request) => unawaited(_handle(request)),
@@ -47,12 +57,26 @@ class DirectTransferServer {
         expiresAt: DateTime.now().toUtc().add(const Duration(minutes: 15)),
       );
       _shares.removeWhere((_, share) => share.expiresAt.isBefore(DateTime.now().toUtc()));
-      final interfaces = await NetworkInterface.list(type: InternetAddressType.IPv4, includeLoopback: false);
       final urls = <String>[];
-      for (final interface in interfaces) {
-        for (final address in interface.addresses) {
-          if (address.address.startsWith('169.254.')) continue;
-          urls.add('http://${address.address}:$port/direct-file/$token');
+      final explicitAddress = bindAddress;
+      if (explicitAddress != null &&
+          explicitAddress.address != InternetAddress.anyIPv4.address &&
+          explicitAddress.address != InternetAddress.anyIPv6.address) {
+        urls.add('http://${explicitAddress.address}:$port/direct-file/$token');
+      } else {
+        try {
+          final interfaces = await NetworkInterface.list(
+            type: InternetAddressType.IPv4,
+            includeLoopback: includeLoopback,
+          );
+          for (final interface in interfaces) {
+            for (final address in interface.addresses) {
+              if (address.address.startsWith('169.254.')) continue;
+              urls.add('http://${address.address}:$port/direct-file/$token');
+            }
+          }
+        } catch (error) {
+          debugPrint('Cannot enumerate Direct/LAN interfaces: $error');
         }
       }
       return urls.toSet().toList()..sort();
@@ -100,11 +124,32 @@ class DirectTransferServer {
         request.response.statusCode = HttpStatus.partialContent;
         request.response.headers.set(HttpHeaders.contentRangeHeader, 'bytes $start-${size - 1}/$size');
       }
-      request.response.contentLength = size - start;
       if (request.method == 'HEAD') {
+        request.response.contentLength = size - start;
         await request.response.close();
       } else {
-        await share.file.openRead(start).pipe(request.response);
+        final reader = await share.file.open(mode: FileMode.read);
+        try {
+          await reader.setPosition(start);
+          var remaining = size - start;
+          while (remaining > 0 && identical(_shares[segments[1]], share)) {
+            final preferredChunkSize = streamChunkSize <= 0 ? remaining : streamChunkSize;
+            final chunk = await reader.read(remaining < preferredChunkSize ? remaining : preferredChunkSize);
+            if (chunk.isEmpty) break;
+            request.response.add(chunk);
+            remaining -= chunk.length;
+            await request.response.flush();
+            if (streamChunkDelay > Duration.zero) {
+              await Future<void>.delayed(streamChunkDelay);
+            }
+          }
+          // Revocation removes the share while this response is active. Closing
+          // early leaves a resumable partial instead of accepting bytes
+          // authorized by an obsolete token.
+          await request.response.close();
+        } finally {
+          await reader.close();
+        }
       }
     } catch (error) {
       debugPrint('Direct file request failed: $error');

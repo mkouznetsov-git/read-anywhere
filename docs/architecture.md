@@ -4,6 +4,11 @@
 
 `SyncService` остаётся фасадом UI над `ConnectionManager`, `MetadataSyncEngine`, `PairingService`, `FileTransferManager` и `DirectTransferServer`. Sync protocol v3 использует отдельные Lamport revisions для metadata, прогресса и закладок, а также durable `operationId`. Relay хранит непрозрачную зашифрованную очередь событий в SQLite; локальный `LibraryRepository` остаётся транзакционной границей source of truth.
 
+Sprint 47B закрепляет lifecycle file transfer: ACK выдаётся только после durable
+записи chunk, reconnect/`peer_joined` восстанавливает передачу из verified
+journal, а revocation закрывает relay upload и активные Direct/LAN streams.
+Relay никогда не сохраняет binary chunks.
+
 ## Главный принцип
 
 ReadArc — local-first приложение. Каждое устройство хранит собственную копию метаданных аккаунта, прогресса, закладок и выбранных книг. Нет центральной базы с библиотекой и нет облачного хранения файлов книг.
