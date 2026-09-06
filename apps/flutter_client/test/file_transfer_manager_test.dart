@@ -59,4 +59,63 @@ void main() {
     await prepared.partialFile.writeAsBytes([0], mode: FileMode.append, flush: true);
     expect(await manager.verifySha256(prepared.partialFile, hash), isFalse);
   });
+
+  test('duplicate and reordered chunks never duplicate bytes or create holes', () async {
+    final expected = List<int>.generate(8, (index) => index);
+    final prepared = await manager.prepare(
+      PendingFileTransfer(
+        transferId: 'transfer-ordering',
+        bookId: 'book-ordering',
+        fileName: 'ordered.bin',
+        format: 'bin',
+        expectedSha256: sha256.convert(expected).toString(),
+        expectedBytes: expected.length,
+        chunkSize: 4,
+      ),
+    );
+
+    final futureChunk = await manager.commitChunk(
+      partialFile: prepared.partialFile,
+      expectedChunkIndex: 0,
+      receivedChunkIndex: 1,
+      chunkSize: 4,
+      expectedBytes: expected.length,
+      data: expected.sublist(4),
+    );
+    expect(futureChunk.disposition, IncomingChunkDisposition.waitingForMissingChunk);
+    expect(await prepared.partialFile.length(), 0);
+
+    final first = await manager.commitChunk(
+      partialFile: prepared.partialFile,
+      expectedChunkIndex: 0,
+      receivedChunkIndex: 0,
+      chunkSize: 4,
+      expectedBytes: expected.length,
+      data: expected.sublist(0, 4),
+    );
+    expect(first.disposition, IncomingChunkDisposition.appended);
+
+    final duplicate = await manager.commitChunk(
+      partialFile: prepared.partialFile,
+      expectedChunkIndex: first.nextChunkIndex,
+      receivedChunkIndex: 0,
+      chunkSize: 4,
+      expectedBytes: expected.length,
+      data: expected.sublist(0, 4),
+    );
+    expect(duplicate.disposition, IncomingChunkDisposition.duplicate);
+    expect(await prepared.partialFile.readAsBytes(), expected.sublist(0, 4));
+
+    final second = await manager.commitChunk(
+      partialFile: prepared.partialFile,
+      expectedChunkIndex: first.nextChunkIndex,
+      receivedChunkIndex: 1,
+      chunkSize: 4,
+      expectedBytes: expected.length,
+      data: expected.sublist(4),
+    );
+    expect(second.disposition, IncomingChunkDisposition.appended);
+    expect(await prepared.partialFile.readAsBytes(), expected);
+    expect(await manager.verifySha256(prepared.partialFile, sha256.convert(expected).toString()), isTrue);
+  });
 }

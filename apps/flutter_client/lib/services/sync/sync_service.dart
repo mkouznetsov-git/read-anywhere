@@ -26,6 +26,23 @@ const _downloadOfferTimeout = Duration(seconds: 24);
 const _downloadIdleTimeout = Duration(seconds: 28);
 const _directStreamIdleTimeout = Duration(seconds: 18);
 
+class FileTransferChunkCheckpoint {
+  const FileTransferChunkCheckpoint({
+    required this.transferId,
+    required this.bookId,
+    required this.chunkIndex,
+    required this.receivedBytes,
+  });
+
+  final String transferId;
+  final String bookId;
+  final int chunkIndex;
+  final int receivedBytes;
+}
+
+typedef FileTransferFaultInjector = bool Function(FileTransferChunkCheckpoint checkpoint);
+typedef BeforeSendingFileChunk = Future<void> Function(FileTransferChunkCheckpoint checkpoint);
+
 class PairingInvite {
   const PairingInvite({
     required this.code,
@@ -203,17 +220,32 @@ class SyncStateSnapshot {
 }
 
 class SyncService {
-  SyncService(this._storage)
-    : _metadataSyncEngine = MetadataSyncEngine(_storage),
-      _fileTransferManager = FileTransferManager(appDirectory: _storage.appDir),
-      _pairingService = PairingService(const ConnectionManager());
+  SyncService(
+    this._storage, {
+    DirectTransferServer? directTransferServer,
+    int fileChunkSize = _defaultChunkSize,
+    Duration fileChunkAckTimeout = const Duration(seconds: 20),
+    this.pauseAfterCommittedChunk,
+    this.beforeSendingFileChunk,
+  }) : assert(fileChunkSize >= 256 * 1024 && fileChunkSize <= _defaultChunkSize),
+       assert(fileChunkAckTimeout > Duration.zero),
+       _fileChunkSize = fileChunkSize,
+       _fileChunkAckTimeout = fileChunkAckTimeout,
+       _directTransferServer = directTransferServer ?? DirectTransferServer(),
+       _metadataSyncEngine = MetadataSyncEngine(_storage),
+       _fileTransferManager = FileTransferManager(appDirectory: _storage.appDir),
+       _pairingService = PairingService(const ConnectionManager());
 
   final StorageService _storage;
   final MetadataSyncEngine _metadataSyncEngine;
   final FileTransferManager _fileTransferManager;
+  final int _fileChunkSize;
+  final Duration _fileChunkAckTimeout;
+  final FileTransferFaultInjector? pauseAfterCommittedChunk;
+  final BeforeSendingFileChunk? beforeSendingFileChunk;
   final ConnectionManager _connectionManager = const ConnectionManager();
   final PairingService _pairingService;
-  final DirectTransferServer _directTransferServer = DirectTransferServer();
+  final DirectTransferServer _directTransferServer;
   final SyncAuthorization _authorization = const SyncAuthorization();
   final state = ValueNotifier<SyncStateSnapshot>(
     const SyncStateSnapshot(connected: false, statusText: 'Не подключено'),
@@ -331,6 +363,11 @@ class SyncService {
   }
 
   Future<void> disconnect({bool manual = true}) async {
+    _pauseActiveDownloads(
+      statusText: manual
+          ? 'Передача приостановлена. После подключения скачивание продолжится.'
+          : 'Соединение прервано. После reconnect скачивание продолжится.',
+    );
     _healthTimer?.cancel();
     _healthTimer = null;
     _metadataRefreshTimer?.cancel();
@@ -747,7 +784,7 @@ class SyncService {
         format: book.format,
         expectedSha256: book.contentSha256,
         expectedBytes: book.sizeBytes,
-        chunkSize: _defaultChunkSize,
+        chunkSize: _fileChunkSize,
       ),
     );
     _downloadsByTransferId[transferId] = session;
@@ -778,7 +815,7 @@ class SyncService {
           'fileName': book.fileName,
           'expectedSha256': book.contentSha256,
           'expectedSizeBytes': book.sizeBytes,
-          'preferredChunkSize': _defaultChunkSize,
+          'preferredChunkSize': _fileChunkSize,
           'binaryTransfer': true,
         },
       ),
@@ -1200,10 +1237,7 @@ class SyncService {
       return;
     }
 
-    final chunkSize = math.min(
-      (payload['preferredChunkSize'] as num?)?.toInt() ?? _defaultChunkSize,
-      _defaultChunkSize,
-    );
+    final chunkSize = math.min((payload['preferredChunkSize'] as num?)?.toInt() ?? _fileChunkSize, _fileChunkSize);
     final directUrls = await _createDirectShareUrls(book: book, file: file);
 
     if (directUrls.isEmpty) {
@@ -1251,7 +1285,7 @@ class SyncService {
       return;
     }
 
-    final chunkSize = (payload['chunkSize'] as num?)?.toInt() ?? _defaultChunkSize;
+    final chunkSize = (payload['chunkSize'] as num?)?.toInt() ?? _fileChunkSize;
     final prepared = await _fileTransferManager.prepare(
       PendingFileTransfer(
         transferId: transferId,
@@ -1296,6 +1330,25 @@ class SyncService {
     if (directUrls.isNotEmpty) {
       final directOk = await _tryDirectDownload(session, directUrls);
       if (directOk) return;
+      if (session.cancelled || !_downloadsByTransferId.containsKey(session.transferId)) return;
+      // A failed Direct/LAN stream can end at an arbitrary byte. Re-align the
+      // durable partial before switching transports so relay chunk 0/N never
+      // gets appended after an unaligned Direct tail.
+      final relayPrepared = await _fileTransferManager.prepare(
+        PendingFileTransfer(
+          transferId: transferId,
+          bookId: session.bookId,
+          fileName: session.fileName,
+          format: session.format,
+          expectedSha256: session.expectedSha256,
+          expectedBytes: session.expectedBytes,
+          chunkSize: session.chunkSize,
+        ),
+      );
+      session
+        ..tempFile = relayPrepared.partialFile
+        ..receivedBytes = relayPrepared.resumeBytes
+        ..expectedChunkIndex = relayPrepared.nextChunkIndex;
       final existing = state.value.downloadForBook(session.bookId);
       if (existing != null) {
         _setDownloadSnapshot(
@@ -1339,7 +1392,7 @@ class SyncService {
         transferId: transferId,
         bookId: bookId,
         requestingDeviceId: requestingDeviceId,
-        chunkSize: (payload['chunkSize'] as num?)?.toInt() ?? _defaultChunkSize,
+        chunkSize: (payload['chunkSize'] as num?)?.toInt() ?? _fileChunkSize,
         startChunkIndex: (payload['startChunkIndex'] as num?)?.toInt() ?? 0,
         binaryTransfer: payload['binaryTransfer'] == true,
       );
@@ -1404,7 +1457,7 @@ class SyncService {
       );
       return;
     }
-    final safeChunkSize = chunkSize.clamp(256 * 1024, _defaultChunkSize).toInt();
+    final safeChunkSize = chunkSize.clamp(256 * 1024, _fileChunkSize).toInt();
     final totalChunks = (size / safeChunkSize).ceil();
     final safeStartChunkIndex = startChunkIndex.clamp(0, totalChunks).toInt();
     final startOffset = (safeStartChunkIndex * safeChunkSize).clamp(0, size).toInt();
@@ -1449,6 +1502,21 @@ class SyncService {
       while (true) {
         if (_cancelledTransfers.contains(transferId)) {
           _appendLog('Отправка отменена получателем: ${book.title}');
+          break;
+        }
+        await beforeSendingFileChunk?.call(
+          FileTransferChunkCheckpoint(
+            transferId: transferId,
+            bookId: bookId,
+            chunkIndex: chunkIndex,
+            receivedBytes: sentBytes,
+          ),
+        );
+        final latestManifest = await _storage.loadManifest();
+        if (latestManifest.isCurrentDeviceRevoked ||
+            !_authorization.allows(latestManifest, requestingDeviceId, SyncCapability.fileTransfer)) {
+          failed = true;
+          _appendLog('Отправка остановлена: доступ устройства $requestingDeviceId отозван');
           break;
         }
         if (!await file.exists()) {
@@ -1518,7 +1586,7 @@ class SyncService {
             continue;
           }
           try {
-            await ackCompleter.future.timeout(const Duration(seconds: 20));
+            await ackCompleter.future.timeout(_fileChunkAckTimeout);
             acknowledged = true;
           } on TimeoutException {
             _uploadAckWaiters.remove(ackKey);
@@ -1667,27 +1735,29 @@ class SyncService {
 
     final chunkIndex = (payload['chunkIndex'] as num?)?.toInt();
     if (chunkIndex == null) return;
-    if (chunkIndex != session.expectedChunkIndex) {
-      // Duplicate chunks can arrive when the source retries after a delayed ACK.
-      // ACK them again and keep the already written file intact.
-      if (chunkIndex < session.expectedChunkIndex) {
-        await _sendChunkAck(local, session, chunkIndex);
-        return;
-      }
-      await _failDownload(
-        session,
-        'Нарушен порядок binary chunks: ожидали ${session.expectedChunkIndex}, получили $chunkIndex',
-      );
-      return;
-    }
-
     final tempFile = session.tempFile;
     if (tempFile == null) return;
     try {
-      await tempFile.writeAsBytes(data, mode: FileMode.append, flush: false);
+      final result = await _fileTransferManager.commitChunk(
+        partialFile: tempFile,
+        expectedChunkIndex: session.expectedChunkIndex,
+        receivedChunkIndex: chunkIndex,
+        chunkSize: session.chunkSize,
+        expectedBytes: (payload['totalBytes'] as num?)?.toInt() ?? session.expectedBytes,
+        data: data,
+      );
+      if (result.disposition == IncomingChunkDisposition.duplicate) {
+        await _sendChunkAck(local, session, chunkIndex);
+        return;
+      }
+      if (result.disposition == IncomingChunkDisposition.waitingForMissingChunk) {
+        _appendLog('Пропущен преждевременный binary chunk $chunkIndex; ожидаем ${session.expectedChunkIndex}');
+        _resetDownloadWatchdog(session);
+        return;
+      }
       session
-        ..expectedChunkIndex += 1
-        ..receivedBytes += data.length
+        ..expectedChunkIndex = result.nextChunkIndex
+        ..receivedBytes = result.receivedBytes
         ..totalChunks = (payload['totalChunks'] as num?)?.toInt()
         ..expectedBytes = (payload['totalBytes'] as num?)?.toInt() ?? session.expectedBytes;
 
@@ -1708,6 +1778,7 @@ class SyncService {
       );
 
       _resetDownloadWatchdog(session);
+      if (_pauseForInjectedFault(session, chunkIndex)) return;
       await _sendChunkAck(local, session, chunkIndex);
 
       final totalChunks = session.totalChunks;
@@ -1751,24 +1822,32 @@ class SyncService {
 
     final chunkIndex = (payload['chunkIndex'] as num?)?.toInt();
     if (chunkIndex == null) return;
-    if (chunkIndex != session.expectedChunkIndex) {
-      await _failDownload(
-        session,
-        'Нарушен порядок chunks: ожидали ${session.expectedChunkIndex}, получили $chunkIndex',
-      );
-      return;
-    }
-
     final tempFile = session.tempFile;
     final dataBase64 = payload['dataBase64'] as String?;
     if (tempFile == null || dataBase64 == null) return;
 
     try {
       final data = base64Decode(dataBase64);
-      await tempFile.writeAsBytes(data, mode: FileMode.append, flush: false);
+      final result = await _fileTransferManager.commitChunk(
+        partialFile: tempFile,
+        expectedChunkIndex: session.expectedChunkIndex,
+        receivedChunkIndex: chunkIndex,
+        chunkSize: session.chunkSize,
+        expectedBytes: (payload['totalBytes'] as num?)?.toInt() ?? session.expectedBytes,
+        data: data,
+      );
+      if (result.disposition == IncomingChunkDisposition.duplicate) {
+        await _sendChunkAck(local, session, chunkIndex);
+        return;
+      }
+      if (result.disposition == IncomingChunkDisposition.waitingForMissingChunk) {
+        _appendLog('Пропущен преждевременный chunk $chunkIndex; ожидаем ${session.expectedChunkIndex}');
+        _resetDownloadWatchdog(session);
+        return;
+      }
       session
-        ..expectedChunkIndex += 1
-        ..receivedBytes += data.length
+        ..expectedChunkIndex = result.nextChunkIndex
+        ..receivedBytes = result.receivedBytes
         ..totalChunks = (payload['totalChunks'] as num?)?.toInt()
         ..expectedBytes = (payload['totalBytes'] as num?)?.toInt() ?? session.expectedBytes;
 
@@ -1789,6 +1868,7 @@ class SyncService {
       );
 
       _resetDownloadWatchdog(session);
+      if (_pauseForInjectedFault(session, chunkIndex)) return;
       await _sendChunkAck(local, session, chunkIndex);
 
       final totalChunks = session.totalChunks;
@@ -1845,6 +1925,39 @@ class SyncService {
   }
 
   String _ackKey(String transferId, int chunkIndex) => '$transferId:$chunkIndex';
+
+  bool _pauseForInjectedFault(_DownloadSession session, int chunkIndex) {
+    final injector = pauseAfterCommittedChunk;
+    if (injector == null ||
+        !injector(
+          FileTransferChunkCheckpoint(
+            transferId: session.transferId,
+            bookId: session.bookId,
+            chunkIndex: chunkIndex,
+            receivedBytes: session.receivedBytes,
+          ),
+        )) {
+      return false;
+    }
+    _appendLog('Fault injection: соединение оборвано после durable chunk $chunkIndex');
+    _pauseActiveDownloads(statusText: 'Соединение оборвано после сохранения chunk. Ожидается restart/resume.');
+    unawaited(disconnect(manual: true));
+    return true;
+  }
+
+  void _pauseActiveDownloads({required String statusText}) {
+    if (_downloadsByTransferId.isEmpty) return;
+    for (final session in _downloadsByTransferId.values.toList(growable: false)) {
+      session
+        ..cancelled = true
+        ..watchdog?.cancel();
+      final existing = state.value.downloadForBook(session.bookId);
+      if (existing != null) {
+        _setDownloadSnapshot(existing.copyWith(statusText: statusText, active: false));
+      }
+    }
+    _downloadsByTransferId.clear();
+  }
 
   void _resetDownloadWatchdog(_DownloadSession session) {
     session.watchdog?.cancel();
@@ -2056,6 +2169,21 @@ class SyncService {
         await response.drain();
         return false;
       }
+      final advertisedSha256 = response.headers.value('X-ReadArc-Sha256');
+      if (advertisedSha256 != null && advertisedSha256.toLowerCase() != session.expectedSha256.toLowerCase()) {
+        await response.drain();
+        return false;
+      }
+      if (response.statusCode == HttpStatus.partialContent && resumeBytes > 0) {
+        final contentRange = response.headers.value(HttpHeaders.contentRangeHeader);
+        final match = contentRange == null ? null : RegExp(r'^bytes (\d+)-(\d+)/(\d+)$').firstMatch(contentRange);
+        final rangeStart = match == null ? null : int.tryParse(match.group(1)!);
+        final rangeTotal = match == null ? null : int.tryParse(match.group(3)!);
+        if (rangeStart != resumeBytes || (rangeTotal != null && rangeTotal != session.expectedBytes)) {
+          await response.drain();
+          return false;
+        }
+      }
       if (response.statusCode == HttpStatus.ok && resumeBytes > 0) {
         await tempFile.writeAsBytes(const [], flush: true);
         resumeBytes = 0;
@@ -2065,6 +2193,7 @@ class SyncService {
       final startedAt = DateTime.now();
       var lastUi = DateTime.fromMillisecondsSinceEpoch(0);
       await for (final chunk in response.timeout(_directStreamIdleTimeout)) {
+        if (session.cancelled) return false;
         sink.add(chunk);
         session.receivedBytes += chunk.length;
         final now = DateTime.now();
@@ -2260,6 +2389,7 @@ class _DownloadSession {
   int expectedChunkIndex = 0;
   int receivedBytes = 0;
   int? totalChunks;
+  bool cancelled = false;
   Timer? watchdog;
   final DateTime startedAt = DateTime.now();
 }

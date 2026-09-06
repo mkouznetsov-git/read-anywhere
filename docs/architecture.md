@@ -2,7 +2,7 @@
 
 ## Sync reliability boundary (Sprint 47)
 
-`SyncService` остаётся фасадом UI над `ConnectionManager`, `MetadataSyncEngine`, `PairingService`, `FileTransferManager` и `DirectTransferServer`. Sync protocol v3 использует отдельные Lamport revisions для metadata, прогресса и закладок, а также durable `operationId`. Relay хранит непрозрачную зашифрованную очередь событий в SQLite; локальный `LibraryRepository` остаётся транзакционной границей source of truth.
+`SyncService` остаётся фасадом UI над `ConnectionManager`, `MetadataSyncEngine`, `PairingService`, `FileTransferManager` и `DirectTransferServer`. Sync protocol v3 использует отдельные Lamport revisions для metadata, прогресса и закладок, а также durable `operationId`. Relay хранит непрозрачную зашифрованную очередь событий в SQLite; локальный `LibraryRepository` остаётся транзакционной границей source of truth. File transfer использует durable journal/partial, stop-and-wait chunks с безопасной обработкой повторов и перестановки, restart/resume через relay или HTTP Range и обязательную SHA-256 проверку до изменения manifest.
 
 ## Главный принцип
 
