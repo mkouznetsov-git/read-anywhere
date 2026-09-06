@@ -138,7 +138,7 @@ void main() {
     });
 
     test('large TXT parses in background with bounded output', () async {
-      final paragraph = 'Large ReadArc paragraph keeps semantic parsing responsive and deterministic.\n\n';
+      const paragraph = 'Large ReadArc paragraph keeps semantic parsing responsive and deterministic.\n\n';
       final bytes = Uint8List.fromList(utf8.encode(paragraph * 15000));
       final document = await ReaderRegressionPlatform.parse(
         ReaderFormat.txt,
