@@ -55,20 +55,26 @@ void main() {
 }
 
 class ReadArcApp extends StatefulWidget {
-  const ReadArcApp({super.key});
+  const ReadArcApp({super.key, this.autoConnect = true, this.storage, this.sync, this.disposeSync = true})
+    : assert(sync == null || storage != null);
+
+  final bool autoConnect;
+  final StorageService? storage;
+  final SyncService? sync;
+  final bool disposeSync;
 
   @override
   State<ReadArcApp> createState() => _ReadArcAppState();
 }
 
 class _ReadArcAppState extends State<ReadArcApp> {
-  final _storage = StorageService();
-  late final _sync = SyncService(_storage);
+  late final _storage = widget.storage ?? StorageService();
+  late final _sync = widget.sync ?? SyncService(_storage);
 
   @override
   void initState() {
     super.initState();
-    unawaited(_autoConnectSync());
+    if (widget.autoConnect) unawaited(_autoConnectSync());
   }
 
   Future<void> _autoConnectSync() async {
@@ -88,7 +94,7 @@ class _ReadArcAppState extends State<ReadArcApp> {
 
   @override
   void dispose() {
-    unawaited(_sync.dispose());
+    if (widget.disposeSync) unawaited(_sync.dispose());
     super.dispose();
   }
 

@@ -121,6 +121,31 @@ void main() {
     expect(firstDisk, isNot(contains('legacy-device-key')));
   });
 
+  test('schema v2 is durably migrated to logical revisions in schema v3', () async {
+    final book = _book('legacy-book').toJson()
+      ..remove('metadataRevision')
+      ..remove('progressRevision')
+      ..remove('tombstoneAckedByDeviceIds')
+      ..['progressVersion'] = 7
+      ..['updatedByDeviceId'] = 'legacy-device';
+    final v2 = _initial().toJson()
+      ..['schemaVersion'] = 2
+      ..remove('logicalClock')
+      ..remove('appliedOperationIds')
+      ..['books'] = [book];
+    final manifestFile = File(p.join(directory.path, 'manifest.json'));
+    await manifestFile.writeAsString(jsonEncode(v2));
+
+    final migrated = await repository.read();
+    final persisted = jsonDecode(await manifestFile.readAsString()) as Map<String, dynamic>;
+
+    expect(migrated.schemaVersion, 3);
+    expect(migrated.logicalClock, 7);
+    expect(migrated.books.single.progressRevision.counter, 7);
+    expect(persisted['schemaVersion'], 3);
+    expect((persisted['books'] as List).single, contains('progressRevision'));
+  });
+
   test('restart retains books, progress, bookmarks and pairing metadata', () async {
     final bookmark = BookmarkRecord(id: 'bookmark', bookId: 'book', label: 'Saved', locator: 'loc');
     await repository.mutate(

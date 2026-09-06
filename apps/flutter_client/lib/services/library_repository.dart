@@ -118,10 +118,10 @@ class LibraryRepository {
       return initial;
     }
     try {
-      final decoded = await _decodeAndMigrate(await file.readAsString());
+      final raw = await file.readAsString();
+      final decoded = await _decodeAndMigrate(raw);
       final hydrated = await _hydrateSecrets(decoded);
-      if (decoded.schemaVersion != LibraryManifest.currentSchemaVersion ||
-          _containsLegacySecrets(await file.readAsString())) {
+      if (_storedSchemaVersion(raw) != LibraryManifest.currentSchemaVersion || _containsLegacySecrets(raw)) {
         await _writeVerified(hydrated, previous: decoded);
       }
       return hydrated;
@@ -140,16 +140,26 @@ class LibraryRepository {
   bool _containsLegacySecrets(String raw) =>
       raw.contains('"accountEncryptionKey"') || raw.contains('"deviceSigningPrivateKey"');
 
+  int _storedSchemaVersion(String raw) {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) return 0;
+    return (decoded['schemaVersion'] as num?)?.toInt() ?? 1;
+  }
+
   Future<LibraryManifest> _decodeAndMigrate(String raw) async {
     if (raw.trim().isEmpty) throw const FormatException('manifest.json is empty');
     final value = jsonDecode(raw);
     if (value is! Map) throw const FormatException('manifest.json root is not an object');
     var json = Map<String, dynamic>.from(value);
-    final version = (json['schemaVersion'] as num?)?.toInt() ?? 1;
+    var version = (json['schemaVersion'] as num?)?.toInt() ?? 1;
     if (version > LibraryManifest.currentSchemaVersion) {
       throw FormatException('Unsupported manifest schemaVersion $version');
     }
-    if (version < 2) json = await _migrateV1ToV2(json);
+    if (version < 2) {
+      json = await _migrateV1ToV2(json);
+      version = 2;
+    }
+    if (version < 3) json = _migrateV2ToV3(json);
     _validate(json);
     return LibraryManifest.fromJson(json);
   }
@@ -160,6 +170,54 @@ class LibraryRepository {
     await _persistLegacySecret(migrated, 'deviceSigningPrivateKey', devicePrivateKeySecret);
     migrated['schemaVersion'] = 2;
     return migrated;
+  }
+
+  Map<String, dynamic> _migrateV2ToV3(Map<String, dynamic> source) {
+    final migrated = Map<String, dynamic>.from(source);
+    final localDeviceId = migrated['deviceId']?.toString() ?? '';
+    var clock = (migrated['logicalClock'] as num?)?.toInt() ?? 0;
+    final migratedBooks = <Map<String, dynamic>>[];
+    for (final rawBook in (migrated['books'] as List?) ?? const []) {
+      if (rawBook is! Map) continue;
+      final book = Map<String, dynamic>.from(rawBook);
+      final updatedBy = book['updatedByDeviceId']?.toString() ?? localDeviceId;
+      final progressCounter = (book['progressVersion'] as num?)?.toInt() ?? 0;
+      clock = clock < progressCounter ? progressCounter : clock;
+      book.putIfAbsent('metadataRevision', () => {'counter': 0, 'deviceId': updatedBy});
+      book.putIfAbsent('progressRevision', () => {'counter': progressCounter, 'deviceId': updatedBy});
+      clock = _maxRevisionCounter(clock, book['metadataRevision']);
+      clock = _maxRevisionCounter(clock, book['progressRevision']);
+      book.putIfAbsent(
+        'tombstoneAckedByDeviceIds',
+        () => book['deletedAt'] == null || localDeviceId.isEmpty ? <String>[] : <String>[localDeviceId],
+      );
+      final bookmarks = <Map<String, dynamic>>[];
+      for (final rawBookmark in (book['bookmarks'] as List?) ?? const []) {
+        if (rawBookmark is! Map) continue;
+        final bookmark = Map<String, dynamic>.from(rawBookmark);
+        bookmark.putIfAbsent('revision', () => {'counter': 0, 'deviceId': updatedBy});
+        clock = _maxRevisionCounter(clock, bookmark['revision']);
+        bookmark.putIfAbsent(
+          'tombstoneAckedByDeviceIds',
+          () => bookmark['deletedAt'] == null || localDeviceId.isEmpty ? <String>[] : <String>[localDeviceId],
+        );
+        bookmarks.add(bookmark);
+      }
+      book['bookmarks'] = bookmarks;
+      migratedBooks.add(book);
+    }
+    migrated
+      ..['books'] = migratedBooks
+      ..['logicalClock'] = clock
+      ..putIfAbsent('appliedOperationIds', () => <String>[])
+      ..['schemaVersion'] = 3;
+    return migrated;
+  }
+
+  int _maxRevisionCounter(int clock, Object? rawRevision) {
+    if (rawRevision is! Map) return clock;
+    final counter = (rawRevision['counter'] as num?)?.toInt() ?? 0;
+    return counter > clock ? counter : clock;
   }
 
   Future<void> _persistLegacySecret(Map<String, dynamic> json, String field, String key) async {
@@ -207,7 +265,8 @@ class LibraryRepository {
     await persistSecrets(manifest);
     final file = await manifestFile;
     await file.parent.create(recursive: true);
-    final payload = const JsonEncoder.withIndent('  ').convert(manifest.copyWith(schemaVersion: 2).toJson());
+    final payload = const JsonEncoder.withIndent('  ')
+        .convert(manifest.copyWith(schemaVersion: LibraryManifest.currentSchemaVersion).toJson());
     final temp = File('${file.path}.tmp-${_uuid.v4()}');
     await temp.writeAsString(payload, flush: true);
     await _decodeAndMigrate(await temp.readAsString());

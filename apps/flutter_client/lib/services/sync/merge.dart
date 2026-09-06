@@ -1,41 +1,29 @@
 import '../../models/book.dart';
 import '../../models/manifest.dart';
 
+/// Deterministic, clock-independent metadata merge.
+///
+/// Wall-clock timestamps remain in the manifest for diagnostics and v2
+/// compatibility only. All v3 mutations are ordered by domain-specific Lamport
+/// revisions, so a metadata rename cannot overwrite newer reading progress and
+/// an old active snapshot cannot defeat a deletion tombstone.
 LibraryManifest mergeManifests(LibraryManifest local, LibraryManifest remote) {
-  final mergedById = <String, BookRecord>{};
-
-  for (final book in local.books) {
-    mergedById[book.id] = book;
-  }
+  final mergedById = <String, BookRecord>{for (final book in local.books) book.id: book};
 
   for (final remoteBook in remote.books) {
     final localBook = mergedById[remoteBook.id];
-    if (localBook == null) {
-      mergedById[remoteBook.id] = BookRecord(
-        id: remoteBook.id,
-        title: remoteBook.title,
-        fileName: remoteBook.fileName,
-        format: remoteBook.format,
-        sizeBytes: remoteBook.sizeBytes,
-        contentSha256: remoteBook.contentSha256,
-        localPath: null,
-        addedAt: remoteBook.addedAt,
-        updatedAt: remoteBook.updatedAt,
-        progressPercent: remoteBook.progressPercent,
-        currentLocator: remoteBook.currentLocator,
-        progressVersion: remoteBook.progressVersion,
-        updatedByDeviceId: remoteBook.updatedByDeviceId,
-        deletedAt: remoteBook.deletedAt,
-        availableOnDeviceIds: remoteBook.availableOnDeviceIds,
-        bookmarks: remoteBook.bookmarks,
-      );
-      continue;
-    }
-    mergedById[remoteBook.id] = _mergeBook(localBook, remoteBook);
+    mergedById[remoteBook.id] = localBook == null
+        ? _remoteOnlyBook(remoteBook, local.deviceId)
+        : _mergeBook(localBook, remoteBook, local.deviceId);
   }
 
+  final applied = <String>{...local.appliedOperationIds, ...remote.appliedOperationIds}.toList();
+  if (applied.length > 4096) applied.removeRange(0, applied.length - 4096);
+
   return local.copyWith(
-    updatedAt: DateTime.now().toUtc(),
+    updatedAt: _latest(local.updatedAt, remote.updatedAt),
+    logicalClock: local.logicalClock > remote.logicalClock ? local.logicalClock : remote.logicalClock,
+    appliedOperationIds: applied,
     trustedDevices: _mergeTrustedDevices(local.trustedDevices, remote.trustedDevices),
     books: mergedById.values.toList()
       ..sort((a, b) {
@@ -45,57 +33,87 @@ LibraryManifest mergeManifests(LibraryManifest local, LibraryManifest remote) {
   );
 }
 
-BookRecord _mergeBook(BookRecord local, BookRecord remote) {
-  final deletedWinner = _deletedWinner(local, remote);
-  final progressWinner = _progressCompare(local, remote) >= 0 ? local : remote;
-  final bookmarks = _mergeBookmarks(local.bookmarks, remote.bookmarks);
-  final availableOn = <String>{...local.availableOnDeviceIds, ...remote.availableOnDeviceIds}.toList()..sort();
-
-  // Important: localPath is never accepted from another device. A remote book may
-  // be visible in the library but still not downloaded on this device.
-  return local.copyWith(
-    title: remote.updatedAt.isAfter(local.updatedAt) ? remote.title : local.title,
-    fileName: remote.fileName.isNotEmpty ? remote.fileName : local.fileName,
-    format: remote.format.isNotEmpty ? remote.format : local.format,
-    sizeBytes: remote.sizeBytes > 0 ? remote.sizeBytes : local.sizeBytes,
+BookRecord _remoteOnlyBook(BookRecord remote, String localDeviceId) {
+  return BookRecord(
+    id: remote.id,
+    title: remote.title,
+    fileName: remote.fileName,
+    format: remote.format,
+    sizeBytes: remote.sizeBytes,
     contentSha256: remote.contentSha256,
-    localPath: local.localPath,
+    localPath: null,
+    addedAt: remote.addedAt,
+    updatedAt: remote.updatedAt,
+    progressPercent: remote.progressPercent,
+    currentLocator: remote.currentLocator,
+    progressVersion: remote.progressVersion,
+    updatedByDeviceId: remote.updatedByDeviceId,
+    deletedAt: remote.deletedAt,
+    availableOnDeviceIds: remote.availableOnDeviceIds,
+    bookmarks: remote.bookmarks.map((bookmark) => _ackBookmarkTombstone(bookmark, localDeviceId)).toList(),
+    metadataRevision: remote.metadataRevision,
+    progressRevision: remote.progressRevision,
+    tombstoneAckedByDeviceIds: _acknowledgeIfDeleted(
+      deleted: remote.isDeleted,
+      acknowledgements: remote.tombstoneAckedByDeviceIds,
+      deviceId: localDeviceId,
+    ),
+  );
+}
+
+BookRecord _mergeBook(BookRecord local, BookRecord remote, String localDeviceId) {
+  final metadataWinner = _metadataCompare(local, remote) >= 0 ? local : remote;
+  final progressWinner = _progressCompare(local, remote) >= 0 ? local : remote;
+  final bookmarks = _mergeBookmarks(local.bookmarks, remote.bookmarks, localDeviceId);
+  final availableOn = <String>{...local.availableOnDeviceIds, ...remote.availableOnDeviceIds}.toList()..sort();
+  final deleted = metadataWinner.isDeleted;
+  final deletionAcks = deleted
+      ? _acknowledgeIfDeleted(
+          deleted: true,
+          acknowledgements: {...local.tombstoneAckedByDeviceIds, ...remote.tombstoneAckedByDeviceIds}.toList(),
+          deviceId: localDeviceId,
+        )
+      : const <String>[];
+
+  // localPath is device-local and is never accepted from a remote snapshot.
+  return BookRecord(
+    id: local.id,
+    title: metadataWinner.title,
+    fileName: metadataWinner.fileName,
+    format: metadataWinner.format,
+    sizeBytes: metadataWinner.sizeBytes,
+    contentSha256: metadataWinner.contentSha256,
+    localPath: deleted ? null : local.localPath,
+    addedAt: local.addedAt.isBefore(remote.addedAt) ? local.addedAt : remote.addedAt,
+    updatedAt: _latest(local.updatedAt, remote.updatedAt),
     progressPercent: progressWinner.progressPercent,
     currentLocator: progressWinner.currentLocator,
     progressVersion: progressWinner.progressVersion,
     updatedByDeviceId: progressWinner.updatedByDeviceId,
-    deletedAt: deletedWinner?.deletedAt,
-    clearDeletedAt: deletedWinner == null,
-    availableOnDeviceIds: deletedWinner == null ? availableOn : const [],
+    deletedAt: deleted ? metadataWinner.deletedAt : null,
+    availableOnDeviceIds: deleted ? const [] : availableOn,
     bookmarks: bookmarks,
-    updatedAt: DateTime.now().toUtc(),
+    metadataRevision: metadataWinner.metadataRevision,
+    progressRevision: progressWinner.progressRevision,
+    tombstoneAckedByDeviceIds: deletionAcks,
   );
 }
 
-BookRecord? _deletedWinner(BookRecord local, BookRecord remote) {
-  final deletedCandidates = [local, remote].where((book) => book.deletedAt != null).toList();
-  if (deletedCandidates.isEmpty) return null;
-
-  final activeCandidates = [local, remote].where((book) => book.deletedAt == null).toList();
-
-  deletedCandidates.sort((a, b) => a.deletedAt!.compareTo(b.deletedAt!));
-  final latestDeletion = deletedCandidates.last;
-  final latestDeletionAt = latestDeletion.deletedAt!;
-
-  // A deletion tombstone must not permanently win over a newer local re-import
-  // or a newer active copy from another trusted device. This case was visible
-  // after updating ReadArc and reconnecting an Android device: an older queued
-  // snapshot from the phone contained a tombstone for a book that had later been
-  // re-added/configured on the Mac, and the old merge logic hid the fresh local
-  // library entry. Deletion wins only when it is newer than every active copy.
-  for (final active in activeCandidates) {
-    if (active.updatedAt.isAfter(latestDeletionAt)) return null;
+int _metadataCompare(BookRecord a, BookRecord b) {
+  if (!a.metadataRevision.isZero || !b.metadataRevision.isZero) {
+    return a.metadataRevision.compareTo(b.metadataRevision);
   }
-
-  return latestDeletion;
+  // Compatibility only for schema-v2 manifests. Migration makes all future
+  // mutations use Lamport revisions, so device time is not a v3 ordering input.
+  final time = a.updatedAt.compareTo(b.updatedAt);
+  if (time != 0) return time;
+  return a.updatedByDeviceId.compareTo(b.updatedByDeviceId);
 }
 
 int _progressCompare(BookRecord a, BookRecord b) {
+  if (!a.progressRevision.isZero || !b.progressRevision.isZero) {
+    return a.progressRevision.compareTo(b.progressRevision);
+  }
   final version = a.progressVersion.compareTo(b.progressVersion);
   if (version != 0) return version;
   final time = a.updatedAt.compareTo(b.updatedAt);
@@ -103,15 +121,54 @@ int _progressCompare(BookRecord a, BookRecord b) {
   return a.updatedByDeviceId.compareTo(b.updatedByDeviceId);
 }
 
-List<BookmarkRecord> _mergeBookmarks(List<BookmarkRecord> local, List<BookmarkRecord> remote) {
+List<BookmarkRecord> _mergeBookmarks(List<BookmarkRecord> local, List<BookmarkRecord> remote, String localDeviceId) {
   final byId = <String, BookmarkRecord>{};
   for (final item in [...local, ...remote]) {
     final existing = byId[item.id];
-    if (existing == null || item.updatedAt.isAfter(existing.updatedAt)) {
-      byId[item.id] = item;
-    }
+    if (existing == null || _bookmarkCompare(item, existing) > 0) byId[item.id] = item;
   }
-  return byId.values.where((b) => !b.isDeleted).toList()..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+  return byId.values.map((bookmark) => _ackBookmarkTombstone(bookmark, localDeviceId)).toList()
+    ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+}
+
+int _bookmarkCompare(BookmarkRecord a, BookmarkRecord b) {
+  if (!a.revision.isZero || !b.revision.isZero) return a.revision.compareTo(b.revision);
+  final time = a.updatedAt.compareTo(b.updatedAt);
+  if (time != 0) return time;
+  return a.id.compareTo(b.id);
+}
+
+BookmarkRecord _ackBookmarkTombstone(BookmarkRecord bookmark, String localDeviceId) {
+  if (!bookmark.isDeleted) return bookmark;
+  return bookmark.copyWith(
+    updatedAt: bookmark.updatedAt,
+    tombstoneAckedByDeviceIds: _acknowledgeIfDeleted(
+      deleted: true,
+      acknowledgements: bookmark.tombstoneAckedByDeviceIds,
+      deviceId: localDeviceId,
+    ),
+  );
+}
+
+List<String> _acknowledgeIfDeleted({
+  required bool deleted,
+  required List<String> acknowledgements,
+  required String deviceId,
+}) {
+  if (!deleted) return const [];
+  final result = <String>{...acknowledgements};
+  if (deviceId.trim().isNotEmpty) result.add(deviceId);
+  return result.toList()..sort();
+}
+
+bool tombstoneAcknowledgedByAllTrustedDevices({
+  required Iterable<String> acknowledgedDeviceIds,
+  required Iterable<TrustedDeviceRecord> trustedDevices,
+}) {
+  final acknowledgements = acknowledgedDeviceIds.toSet();
+  return trustedDevices
+      .where((device) => !device.isRevoked)
+      .every((device) => acknowledgements.contains(device.deviceId));
 }
 
 List<TrustedDeviceRecord> _mergeTrustedDevices(List<TrustedDeviceRecord> local, List<TrustedDeviceRecord> remote) {
@@ -123,8 +180,6 @@ List<TrustedDeviceRecord> _mergeTrustedDevices(List<TrustedDeviceRecord> local, 
       continue;
     }
     if (existing.isRevoked != device.isRevoked) {
-      // Revocation is a security tombstone. Do not let a later ordinary
-      // lastSeenAt update from the revoked device resurrect it.
       if (device.isRevoked) byId[device.deviceId] = device;
       continue;
     }
@@ -139,3 +194,5 @@ List<TrustedDeviceRecord> _mergeTrustedDevices(List<TrustedDeviceRecord> local, 
     return a.name.toLowerCase().compareTo(b.name.toLowerCase());
   });
 }
+
+DateTime _latest(DateTime a, DateTime b) => a.isAfter(b) ? a : b;

@@ -12,10 +12,13 @@ import 'package:uuid/uuid.dart';
 import '../models/book.dart';
 import '../models/manifest.dart';
 import '../models/sync_settings.dart';
+import '../models/sync_revision.dart';
 import 'library_repository.dart';
 
 class StorageService {
-  StorageService({LibraryRepository? repository, this._secretStore}) : _repositoryOverride = repository;
+  StorageService({LibraryRepository? repository, LibrarySecretStore? secretStore}) : this._(repository, secretStore);
+
+  StorageService._(this._repositoryOverride, this._secretStore);
 
   final _uuid = const Uuid();
   LibraryRepository? _repositoryOverride;
@@ -30,6 +33,10 @@ class StorageService {
   );
 
   Future<Directory> appDir() async {
+    final repositoryOverride = _repositoryOverride;
+    if (repositoryOverride != null) {
+      return (await repositoryOverride.manifestFile).parent;
+    }
     // Canonical ReadArc data directory. Keep it stable so app updates do not
     // erase an existing development/test library.
     final documents = await getApplicationDocumentsDirectory();
@@ -350,6 +357,7 @@ class StorageService {
 
   Future<void> upsertBook(BookRecord book) async {
     await mutateManifest((manifest) {
+      final revision = _nextRevision(manifest);
       final books = [...manifest.books];
       final index = books.indexWhere((b) => b.id == book.id);
       if (index >= 0) {
@@ -365,11 +373,19 @@ class StorageService {
           updatedAt: DateTime.now().toUtc(),
           clearDeletedAt: true,
           availableOnDeviceIds: availableOn,
+          metadataRevision: revision,
+          tombstoneAckedByDeviceIds: const [],
         );
       } else {
-        books.add(book);
+        books.add(
+          book.copyWith(
+            metadataRevision: revision,
+            updatedByDeviceId: manifest.deviceId,
+            tombstoneAckedByDeviceIds: const [],
+          ),
+        );
       }
-      return manifest.copyWith(books: books);
+      return manifest.copyWith(books: books, logicalClock: revision.counter);
     });
   }
 
@@ -379,6 +395,7 @@ class StorageService {
     required String locator,
   }) async {
     return mutateManifest((manifest) {
+      final revision = _nextRevision(manifest);
       final updatedBooks = manifest.books.map((book) {
         if (book.id != bookId) return book;
         return book.copyWith(
@@ -387,20 +404,22 @@ class StorageService {
           progressVersion: book.progressVersion + 1,
           updatedByDeviceId: manifest.deviceId,
           updatedAt: DateTime.now().toUtc(),
+          progressRevision: revision,
         );
       }).toList();
-      return manifest.copyWith(books: updatedBooks);
+      return manifest.copyWith(books: updatedBooks, logicalClock: revision.counter);
     });
   }
 
   Future<void> addBookmark({required String bookId, required String label, required String locator}) async {
     await mutateManifest((manifest) {
+      final revision = _nextRevision(manifest);
       final updatedBooks = manifest.books.map((book) {
         if (book.id != bookId) return book;
-        final bookmark = BookmarkRecord(bookId: bookId, label: label, locator: locator);
+        final bookmark = BookmarkRecord(bookId: bookId, label: label, locator: locator, revision: revision);
         return book.copyWith(bookmarks: [...book.bookmarks, bookmark], updatedAt: DateTime.now().toUtc());
       }).toList();
-      return manifest.copyWith(books: updatedBooks);
+      return manifest.copyWith(books: updatedBooks, logicalClock: revision.counter);
     });
   }
 
@@ -410,6 +429,7 @@ class StorageService {
     if (target == null) throw StateError('Книга не найдена в manifest: $bookId');
     await _deleteLocalBookFileIfSafe(target.localPath);
     return mutateManifest((manifest) {
+      final revision = _nextRevision(manifest);
       var found = false;
       final updatedBooks = <BookRecord>[];
       for (final book in manifest.books) {
@@ -425,7 +445,10 @@ class StorageService {
         );
       }
       if (!found) throw StateError('Книга не найдена в manifest: $bookId');
-      return manifest.copyWith(books: updatedBooks);
+      final revisedBooks = updatedBooks
+          .map((book) => book.id == bookId ? book.copyWith(metadataRevision: revision) : book)
+          .toList();
+      return manifest.copyWith(books: revisedBooks, logicalClock: revision.counter);
     });
   }
 
@@ -437,6 +460,7 @@ class StorageService {
     return mutateManifest((manifest) {
       var found = false;
       final now = DateTime.now().toUtc();
+      final revision = _nextRevision(manifest);
       final updatedBooks = <BookRecord>[];
       for (final book in manifest.books) {
         if (book.id != bookId) {
@@ -445,17 +469,25 @@ class StorageService {
         }
         found = true;
         updatedBooks.add(
-          book.copyWith(clearLocalPath: true, availableOnDeviceIds: const [], deletedAt: now, updatedAt: now),
+          book.copyWith(
+            clearLocalPath: true,
+            availableOnDeviceIds: const [],
+            deletedAt: now,
+            updatedAt: now,
+            metadataRevision: revision,
+            tombstoneAckedByDeviceIds: [manifest.deviceId],
+          ),
         );
       }
       if (!found) throw StateError('Книга не найдена в manifest: $bookId');
-      return manifest.copyWith(books: updatedBooks);
+      return manifest.copyWith(books: updatedBooks, logicalClock: revision.counter);
     });
   }
 
   Future<LibraryManifest> markBookDownloaded({required String bookId, required String localPath}) async {
     return mutateManifest((manifest) {
       var found = false;
+      final revision = _nextRevision(manifest);
       final updatedBooks = manifest.books.map((book) {
         if (book.id != bookId) return book;
         found = true;
@@ -465,36 +497,26 @@ class StorageService {
           availableOnDeviceIds: availableOn,
           clearDeletedAt: true,
           updatedAt: DateTime.now().toUtc(),
+          metadataRevision: revision,
+          tombstoneAckedByDeviceIds: const [],
         );
       }).toList();
       if (!found) {
         throw StateError('Книга не найдена в manifest: $bookId');
       }
-      return manifest.copyWith(books: updatedBooks);
+      return manifest.copyWith(books: updatedBooks, logicalClock: revision.counter);
     });
   }
 
-  LibraryManifest _normalizeManifest(LibraryManifest manifest) {
-    final books =
-        manifest.books.map((book) {
-          if (!book.isDeleted) return book;
-          final localPath = book.localPath?.trim() ?? '';
-          if (localPath.isEmpty) return book;
+  SyncRevision _nextRevision(LibraryManifest manifest) =>
+      SyncRevision(counter: manifest.logicalClock + 1, deviceId: manifest.deviceId);
 
-          // Safety repair for stale remote tombstones. A normal user-initiated
-          // delete clears localPath first. If a deleted record still has a local
-          // file path, the book was almost certainly hidden by an older remote
-          // tombstone during sync. Keep the user's local library visible.
-          final availableOn = <String>{...book.availableOnDeviceIds, manifest.deviceId}.toList()..sort();
-          return book.copyWith(
-            clearDeletedAt: true,
-            availableOnDeviceIds: availableOn,
-            updatedAt: DateTime.now().toUtc(),
-          );
-        }).toList()..sort((a, b) {
-          if (a.isDeleted != b.isDeleted) return a.isDeleted ? 1 : -1;
-          return compareBooksForLibrary(a, b);
-        });
+  LibraryManifest _normalizeManifest(LibraryManifest manifest) {
+    final books = [...manifest.books]
+      ..sort((a, b) {
+        if (a.isDeleted != b.isDeleted) return a.isDeleted ? 1 : -1;
+        return compareBooksForLibrary(a, b);
+      });
     final devices = <String, TrustedDeviceRecord>{};
     for (final device in manifest.trustedDevices) {
       final existing = devices[device.deviceId];

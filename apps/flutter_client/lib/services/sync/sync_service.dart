@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
@@ -12,9 +11,14 @@ import '../../models/book.dart';
 import '../../models/manifest.dart';
 import '../../models/sync_settings.dart';
 import '../storage_service.dart';
+import 'connection_manager.dart';
+import 'direct_transfer_server.dart';
 import 'e2e_crypto.dart';
-import 'merge.dart';
+import 'file_transfer_manager.dart';
+import 'metadata_sync_engine.dart';
+import 'pairing_service.dart';
 import 'relay_client.dart';
+import 'sync_authorization.dart';
 
 const _uuid = Uuid();
 const _defaultChunkSize = 1024 * 1024; // Binary chunks: 1 MiB keeps Tailscale/Android stable and reduces ACK overhead.
@@ -199,9 +203,18 @@ class SyncStateSnapshot {
 }
 
 class SyncService {
-  SyncService(this._storage);
+  SyncService(this._storage)
+    : _metadataSyncEngine = MetadataSyncEngine(_storage),
+      _fileTransferManager = FileTransferManager(appDirectory: _storage.appDir),
+      _pairingService = PairingService(const ConnectionManager());
 
   final StorageService _storage;
+  final MetadataSyncEngine _metadataSyncEngine;
+  final FileTransferManager _fileTransferManager;
+  final ConnectionManager _connectionManager = const ConnectionManager();
+  final PairingService _pairingService;
+  final DirectTransferServer _directTransferServer = DirectTransferServer();
+  final SyncAuthorization _authorization = const SyncAuthorization();
   final state = ValueNotifier<SyncStateSnapshot>(
     const SyncStateSnapshot(connected: false, statusText: 'Не подключено'),
   );
@@ -226,13 +239,10 @@ class SyncService {
   bool _manualDisconnect = true;
   bool _reconnectInProgress = false;
   bool _relayUnavailableLogged = false;
+  bool _disposed = false;
   int _reconnectAttempt = 0;
   int _healthMisses = 0;
   String? _lastRelayUrl;
-
-  HttpServer? _directFileServer;
-  int? _directFileServerPort;
-  final _directShares = <String, _DirectFileShare>{};
 
   Stream<LibraryManifest> get manifestChanges => _manifestChanges.stream;
 
@@ -240,6 +250,7 @@ class SyncService {
   /// succeed. This is used on app startup when autoConnect=true and the
   /// Personal Hub/relay is still offline.
   void startAutoReconnect({required String relayUrl}) {
+    if (_disposed) return;
     if (relayUrl.trim().isEmpty || _manualDisconnect == false && _lastRelayUrl == relayUrl && _reconnectTimer != null) {
       return;
     }
@@ -254,6 +265,7 @@ class SyncService {
   }
 
   Future<void> connect({required String relayUrl}) async {
+    if (_disposed) throw StateError('SyncService уже остановлен');
     _manualDisconnect = false;
     _lastRelayUrl = relayUrl;
     _reconnectTimer?.cancel();
@@ -270,7 +282,7 @@ class SyncService {
     }
     await _probeRelayHealth(relayUrl, timeout: const Duration(seconds: 5));
     final uri = Uri.parse(relayUrl.trim());
-    final client = RelayClient(relayUri: uri, accountId: manifest.accountId, deviceId: manifest.deviceId);
+    final client = _connectionManager.createClient(relayUri: uri, manifest: manifest);
     _client = client;
     _incomingSubscription = client.incoming
         .asyncMap((envelope) async {
@@ -315,6 +327,7 @@ class SyncService {
     await pullOfflineQueue(reason: 'connected');
     await refreshMetadata(reason: 'connected');
     _scheduleStartupMetadataRefresh(client);
+    unawaited(_resumePendingTransfers());
   }
 
   Future<void> disconnect({bool manual = true}) async {
@@ -372,12 +385,7 @@ class SyncService {
     });
   }
 
-  int _reconnectDelaySeconds(int attempt) {
-    // Keep retry/health traffic modest, but detect recovery quickly.
-    // After the first two quick attempts we probe every 5 seconds.
-    const delays = [2, 2, 5, 5, 5, 5];
-    return delays[attempt.clamp(0, delays.length - 1).toInt()];
-  }
+  int _reconnectDelaySeconds(int attempt) => _connectionManager.retryDelaySeconds(attempt);
 
   void _appendRelayUnavailableLogOnce() {
     if (_relayUnavailableLogged) return;
@@ -414,20 +422,8 @@ class SyncService {
     }
   }
 
-  Future<void> _probeRelayHealth(String relayUrl, {required Duration timeout}) async {
-    final uri = _buildEndpointUri(relayUrl, '/health');
-    final client = HttpClient()..connectionTimeout = timeout;
-    try {
-      final request = await client.getUrl(uri).timeout(timeout);
-      final response = await request.close().timeout(timeout);
-      await response.drain().timeout(timeout);
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw StateError('HTTP ${response.statusCode}');
-      }
-    } finally {
-      client.close(force: true);
-    }
-  }
+  Future<void> _probeRelayHealth(String relayUrl, {required Duration timeout}) =>
+      _connectionManager.probeHealth(relayUrl, timeout: timeout);
 
   Future<void> _attemptReconnect(String relayUrl) async {
     if (_manualDisconnect || _reconnectInProgress) return;
@@ -456,7 +452,7 @@ class SyncService {
     for (final delay in const [Duration(milliseconds: 600), Duration(seconds: 2), Duration(seconds: 5)]) {
       unawaited(
         Future<void>.delayed(delay, () async {
-          if (_client != client || !state.value.connected) return;
+          if (_disposed || _client != client || !state.value.connected) return;
           await pullOfflineQueue(reason: 'startup_retry_${delay.inMilliseconds}ms');
           await refreshMetadata(reason: 'startup_retry_${delay.inMilliseconds}ms');
         }),
@@ -499,6 +495,9 @@ class SyncService {
     if (client == null || !state.value.connected) return false;
 
     final manifest = await _storage.touchCurrentDevice();
+    if (reason.contains('trusted_device_revoked')) {
+      _directTransferServer.revokeAllShares();
+    }
     final envelope = SyncEnvelope(
       type: 'library_snapshot',
       accountId: manifest.accountId,
@@ -527,7 +526,7 @@ class SyncService {
     for (final delay in const [Duration(seconds: 2), Duration(seconds: 8)]) {
       unawaited(
         Future<void>.delayed(delay, () async {
-          if (!state.value.connected || _manualDisconnect) return;
+          if (_disposed || !state.value.connected || _manualDisconnect) return;
           await broadcastLibrarySnapshot(reason: '${reason}_retry_${delay.inSeconds}s');
         }),
       );
@@ -663,48 +662,11 @@ class SyncService {
     );
   }
 
-  void _validateEndpointForPairing(SyncSettings settings) {
-    if (settings.usesOfficialPlaceholder) {
-      throw StateError('Официальный relay ReadArc не настроен в этой сборке.');
-    }
-  }
+  void _validateEndpointForPairing(SyncSettings settings) => _pairingService.validateEndpoint(settings);
 
-  Uri _buildEndpointUri(String relayUrl, String endpointPath) {
-    final base = Uri.parse(relayUrl.trim());
-    final basePath = base.path.replaceAll(RegExp(r'/+$'), '');
-    final cleanEndpoint = endpointPath.startsWith('/') ? endpointPath : '/$endpointPath';
-    return base.replace(
-      scheme: base.scheme == 'ws'
-          ? 'http'
-          : base.scheme == 'wss'
-          ? 'https'
-          : base.scheme,
-      path: '$basePath$cleanEndpoint'.replaceAll(RegExp(r'/{2,}'), '/'),
-      query: '',
-    );
-  }
+  Uri _buildEndpointUri(String relayUrl, String endpointPath) => _pairingService.endpointUri(relayUrl, endpointPath);
 
-  Future<Map<String, dynamic>> _postJson(Uri uri, Map<String, dynamic> body) async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
-    try {
-      final request = await client.postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.write(jsonEncode(body));
-      final response = await request.close().timeout(const Duration(seconds: 12));
-      final responseBody = await response.transform(utf8.decoder).join();
-      final decoded = responseBody.isEmpty ? <String, dynamic>{} : jsonDecode(responseBody);
-      if (decoded is! Map) {
-        throw StateError('Relay вернул не JSON-объект');
-      }
-      final result = Map<String, dynamic>.from(decoded);
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw StateError(result['message']?.toString() ?? 'HTTP ${response.statusCode}');
-      }
-      return result;
-    } finally {
-      client.close(force: true);
-    }
-  }
+  Future<Map<String, dynamic>> _postJson(Uri uri, Map<String, dynamic> body) => _pairingService.postJson(uri, body);
 
   _ParsedPairingInput _parsePairingInput(String input) {
     final raw = input.trim();
@@ -776,6 +738,17 @@ class SyncService {
       format: book.format,
       expectedSha256: book.contentSha256,
       expectedBytes: book.sizeBytes,
+    );
+    await _fileTransferManager.prepare(
+      PendingFileTransfer(
+        transferId: transferId,
+        bookId: book.id,
+        fileName: book.fileName,
+        format: book.format,
+        expectedSha256: book.contentSha256,
+        expectedBytes: book.sizeBytes,
+        chunkSize: _defaultChunkSize,
+      ),
     );
     _downloadsByTransferId[transferId] = session;
     _setDownloadSnapshot(
@@ -852,7 +825,7 @@ class SyncService {
     final manifest = await _storage.loadManifest();
     final sourceDeviceId = session.sourceDeviceId;
     _downloadsByTransferId.remove(session.transferId);
-    await _deletePartial(session);
+    await _fileTransferManager.discard(session.bookId);
     _setDownloadSnapshot(
       FileTransferSnapshot(
         transferId: session.transferId,
@@ -960,6 +933,13 @@ class SyncService {
       return;
     }
 
+    try {
+      _metadataSyncEngine.validateProtocol(envelope.protocolVersion);
+    } on ProtocolCompatibilityException catch (error) {
+      _appendLog('$error');
+      return;
+    }
+
     if (_isRevokedDevice(local, envelope.deviceId)) {
       _appendLog('Отклонено событие от отозванного устройства: ${envelope.deviceId}');
       return;
@@ -977,12 +957,26 @@ class SyncService {
       deviceId: envelope.deviceId,
       createdAt: envelope.createdAt,
     );
+    final protectedSync = decryptedPayload.remove('_sync');
+    if (protectedSync is Map) {
+      final protectedVersion = (protectedSync['protocolVersion'] as num?)?.toInt();
+      final protectedOperationId = protectedSync['operationId']?.toString();
+      if (protectedVersion != envelope.protocolVersion || protectedOperationId != envelope.operationId) {
+        _appendLog('Отклонено событие с изменёнными protocolVersion/operationId');
+        return;
+      }
+    } else if (envelope.protocolVersion >= SyncEnvelope.currentProtocolVersion) {
+      _appendLog('Отклонено v${envelope.protocolVersion} событие без защищённых sync-полей');
+      return;
+    }
     final decryptedEnvelope = SyncEnvelope(
       type: envelope.type,
       accountId: envelope.accountId,
       deviceId: envelope.deviceId,
       createdAt: envelope.createdAt,
       payload: decryptedPayload,
+      protocolVersion: envelope.protocolVersion,
+      operationId: envelope.operationId,
     );
 
     if (!_acceptTrustedDevicePayload(local, decryptedEnvelope)) {
@@ -1028,16 +1022,10 @@ class SyncService {
       // Legacy encrypted payload from older test builds. Accept during rollout.
       return true;
     }
-    final issuedAt = ReadArcE2eCrypto.encryptedIssuedAt(envelope.payload);
     final now = DateTime.now().toUtc();
-    if (issuedAt == null) {
-      _appendLog('Отклонено событие без issuedAt: ${envelope.type}');
-      return false;
-    }
-    if (issuedAt.isBefore(now.subtract(_replayWindow)) || issuedAt.isAfter(now.add(const Duration(minutes: 5)))) {
-      _appendLog('Отклонено устаревшее/будущее событие: ${envelope.type}');
-      return false;
-    }
+    // issuedAt is authenticated and useful for diagnostics, but is deliberately
+    // not an ordering or acceptance boundary: device clocks can be far apart.
+    // Replay safety comes from eventId plus durable operationId idempotency.
     _seenSecureEventIds.removeWhere((_, seenAt) => seenAt.isBefore(now.subtract(_replayWindow)));
     final replayKey = '${envelope.accountId}:${envelope.deviceId}:$eventId';
     if (_seenSecureEventIds.containsKey(replayKey)) {
@@ -1055,15 +1043,9 @@ class SyncService {
     return false;
   }
 
-  bool _isActiveTrustedDevice(LibraryManifest local, String deviceId) {
-    for (final device in local.trustedDevices) {
-      if (device.deviceId == deviceId) return !device.isRevoked;
-    }
-    return false;
-  }
-
   bool _acceptTrustedDevicePayload(LibraryManifest local, SyncEnvelope envelope) {
-    if (_isActiveTrustedDevice(local, envelope.deviceId)) return true;
+    final capability = envelope.type.startsWith('book_file_') ? SyncCapability.fileTransfer : SyncCapability.metadata;
+    if (_authorization.allows(local, envelope.deviceId, capability)) return true;
 
     // First event from a freshly paired device can be its library snapshot. It is
     // already encrypted with the account key from the one-time QR invite. Accept
@@ -1104,7 +1086,7 @@ class SyncService {
       role: 'device',
       publicKey: acceptedDevicePublicKey,
     );
-    _manifestChanges.add(updated);
+    _emitManifest(updated);
     _appendLog('Устройство снова доверено через QR: $acceptedDeviceName');
     await broadcastLibrarySnapshot(reason: 'pairing_claimed_reauthorized_device');
   }
@@ -1116,28 +1098,6 @@ class SyncService {
     await broadcastLibrarySnapshot(reason: 'requested_by_peer');
   }
 
-  bool _looksLikeAccidentalEmptyLibrarySnapshot({
-    required LibraryManifest local,
-    required LibraryManifest remote,
-    required LibraryManifest merged,
-  }) {
-    final localVisible = local.visibleBooks.length;
-    if (localVisible == 0) return false;
-    if (merged.visibleBooks.isNotEmpty) return false;
-
-    final remoteVisible = remote.visibleBooks.length;
-    final remoteDeleted = remote.books.where((book) => book.isDeleted).length;
-    final localDownloaded = local.books.where((book) => book.isDownloaded).length;
-
-    // Data-safety guard: an online/offline queued snapshot, a just-paired empty
-    // device, or stale tombstones must never wipe the whole visible library on a
-    // device that still has books. A deliberate "delete every book" operation can
-    // be revisited later with an explicit generation/confirmation field; until
-    // then preserving the user's library is more important than applying a mass
-    // destructive snapshot silently.
-    return remoteVisible == 0 || remoteDeleted >= localVisible || localDownloaded > 0;
-  }
-
   Future<void> _handleLibrarySnapshot(SyncEnvelope envelope, LibraryManifest local) async {
     final payloadManifest = envelope.payload['manifest'];
     if (payloadManifest is! Map) {
@@ -1146,35 +1106,67 @@ class SyncService {
     }
 
     final remote = LibraryManifest.fromJson(Map<String, dynamic>.from(payloadManifest));
+    if (remote.deviceId != envelope.deviceId) {
+      _appendLog('Отклонён snapshot с несовпадающим deviceId');
+      return;
+    }
     if (remote.deviceId == local.deviceId) {
       // Ignore echoes of our own snapshot. Relay offline queues can deliver a
       // local snapshot back after reconnect; applying it is useless and can mask
       // more recent local changes.
       return;
     }
-    final merged = mergeManifests(local, remote);
-    if (_looksLikeAccidentalEmptyLibrarySnapshot(local: local, remote: remote, merged: merged)) {
-      _appendLog('Отклонён snapshot, который скрывал всю локальную библиотеку. Запрошена повторная синхронизация.');
-      await requestLibrarySnapshot(reason: 'destructive_snapshot_guard');
+    final applied = await _metadataSyncEngine.applySnapshot(
+      remote: remote,
+      operationId: envelope.operationId,
+      protocolVersion: envelope.protocolVersion,
+    );
+    if (applied.status == SnapshotApplyStatus.duplicate) {
+      _appendLog('Повтор операции ${envelope.operationId} уже применён');
       return;
     }
-    final currentVisible = local.visibleBooks.length;
-    final mergedVisible = merged.visibleBooks.length;
-    if (currentVisible > 0 && mergedVisible == 0) {
-      _appendLog('Отклонён snapshot: локальная библиотека local-first не может быть заменена пустым состоянием.');
-      await requestLibrarySnapshot(reason: 'local_first_empty_merge_guard');
-      return;
+    final saved = applied.manifest;
+    if (saved.trustedDevices.any((device) => device.isRevoked)) {
+      _directTransferServer.revokeAllShares();
     }
-    final saved = await _storage.mutateManifest((current) => mergeManifests(current, remote));
-    _manifestChanges.add(saved);
+    _emitManifest(saved);
     if (saved.isCurrentDeviceRevoked) {
       _appendLog('Доступ этого устройства отозван. Синхронизация остановлена.');
       await disconnect(manual: true);
       _setState(state.value.copyWith(connected: false, statusText: 'Доступ этого устройства отозван'));
       return;
     }
+    if (_tombstoneAcknowledgementsChanged(local, saved)) {
+      unawaited(broadcastLibrarySnapshot(reason: 'tombstone_ack'));
+    }
     _appendLog('Принят snapshot от ${remote.deviceName} — книг: ${remote.books.length}');
     _setState(state.value.copyWith(receivedEvents: state.value.receivedEvents + 1));
+  }
+
+  bool _tombstoneAcknowledgementsChanged(LibraryManifest before, LibraryManifest after) {
+    final beforeBooks = {for (final book in before.books) book.id: book};
+    for (final book in after.books) {
+      final previous = beforeBooks[book.id];
+      if (book.isDeleted &&
+          (previous == null ||
+              !setEquals(previous.tombstoneAckedByDeviceIds.toSet(), book.tombstoneAckedByDeviceIds.toSet()))) {
+        return true;
+      }
+      final beforeBookmarks = {
+        for (final bookmark in previous?.bookmarks ?? const <BookmarkRecord>[]) bookmark.id: bookmark,
+      };
+      for (final bookmark in book.bookmarks.where((item) => item.isDeleted)) {
+        final previousBookmark = beforeBookmarks[bookmark.id];
+        if (previousBookmark == null ||
+            !setEquals(
+              previousBookmark.tombstoneAckedByDeviceIds.toSet(),
+              bookmark.tombstoneAckedByDeviceIds.toSet(),
+            )) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   Future<void> _handleBookFileRequested(SyncEnvelope envelope, LibraryManifest local) async {
@@ -1193,7 +1185,7 @@ class SyncService {
       _appendLog('Файл больше не доступен на этом устройстве: ${book.title}');
       try {
         final updated = await _storage.removeLocalBookCopy(book.id);
-        _manifestChanges.add(updated);
+        _emitManifest(updated);
         await broadcastLibrarySnapshot(reason: 'file_missing_on_source');
       } catch (_) {
         // Best effort: transfer must still be terminated for the requester.
@@ -1259,37 +1251,27 @@ class SyncService {
       return;
     }
 
-    final appDir = await _storage.appDir();
-    final incomingDir = Directory(p.join(appDir.path, 'incoming'));
-    if (!await incomingDir.exists()) {
-      await incomingDir.create(recursive: true);
-    }
-    final tempFile = File(p.join(incomingDir.path, '${session.bookId}.part'));
-    if (!await tempFile.exists()) await tempFile.create(recursive: true);
-
     final chunkSize = (payload['chunkSize'] as num?)?.toInt() ?? _defaultChunkSize;
-    var resumeBytes = await tempFile.length();
-    if (resumeBytes > session.expectedBytes) {
-      await tempFile.writeAsBytes(const [], flush: true);
-      resumeBytes = 0;
-    }
-    final alignedResumeBytes = chunkSize <= 0 ? 0 : (resumeBytes ~/ chunkSize) * chunkSize;
-    if (alignedResumeBytes != resumeBytes) {
-      final raf = await tempFile.open(mode: FileMode.writeOnlyAppend);
-      try {
-        await raf.truncate(alignedResumeBytes);
-      } finally {
-        await raf.close();
-      }
-      resumeBytes = alignedResumeBytes;
-    }
+    final prepared = await _fileTransferManager.prepare(
+      PendingFileTransfer(
+        transferId: transferId,
+        bookId: session.bookId,
+        fileName: session.fileName,
+        format: session.format,
+        expectedSha256: session.expectedSha256,
+        expectedBytes: session.expectedBytes,
+        chunkSize: chunkSize,
+      ),
+    );
+    final tempFile = prepared.partialFile;
+    final resumeBytes = prepared.resumeBytes;
 
     session
       ..sourceDeviceId = sourceDeviceId
       ..tempFile = tempFile
       ..chunkSize = chunkSize
       ..receivedBytes = resumeBytes
-      ..expectedChunkIndex = chunkSize <= 0 ? 0 : resumeBytes ~/ chunkSize;
+      ..expectedChunkIndex = prepared.nextChunkIndex;
 
     final resumeText = resumeBytes > 0
         ? 'Продолжаем с ${_formatBytes(resumeBytes)}...'
@@ -1375,7 +1357,7 @@ class SyncService {
   ) async {
     try {
       final updated = await _storage.removeLocalBookCopy(bookId);
-      _manifestChanges.add(updated);
+      _emitManifest(updated);
       await broadcastLibrarySnapshot(reason: 'file_unavailable_on_source');
     } catch (_) {
       // The transfer error is more important than local manifest cleanup here.
@@ -1624,6 +1606,8 @@ class SyncService {
         clearBytes: data,
         headerFields: {
           'frame': 'readarc-binary-v1',
+          'protocolVersion': SyncEnvelope.currentProtocolVersion,
+          'operationId': '$transferId:$chunkIndex',
           'type': 'book_file_binary_chunk',
           'accountId': local.accountId,
           'deviceId': local.deviceId,
@@ -1653,10 +1637,12 @@ class SyncService {
       final local = await _storage.loadManifest();
       final header = message.header;
       if (header['type'] != 'book_file_binary_chunk') return;
+      final protocolVersion = (header['protocolVersion'] as num?)?.toInt() ?? SyncEnvelope.minimumProtocolVersion;
+      _metadataSyncEngine.validateProtocol(protocolVersion);
       if (header['accountId'] != local.accountId) return;
       if (header['requestingDeviceId'] != local.deviceId) return;
       final sourceDeviceId = header['sourceDeviceId']?.toString() ?? header['deviceId']?.toString() ?? '';
-      if (_isRevokedDevice(local, sourceDeviceId) || !_isActiveTrustedDevice(local, sourceDeviceId)) {
+      if (!_authorization.allows(local, sourceDeviceId, SyncCapability.fileTransfer)) {
         _appendLog('Отклонён binary chunk от недоверенного/отозванного устройства: $sourceDeviceId');
         return;
       }
@@ -1826,13 +1812,8 @@ class SyncService {
       state.value.downloadForBook(session.bookId)!.copyWith(statusText: 'Проверяем SHA-256...', active: true),
     );
 
-    final actualSha = (await sha256.bind(tempFile.openRead()).first).toString();
-    if (actualSha != session.expectedSha256) {
-      await _failDownload(
-        session,
-        'SHA-256 не совпадает: ожидали ${session.expectedSha256}, получили $actualSha',
-        deletePartial: true,
-      );
+    if (!await _fileTransferManager.verifySha256(tempFile, session.expectedSha256)) {
+      await _failDownload(session, 'SHA-256 полученного файла не совпадает с metadata', deletePartial: true);
       return;
     }
 
@@ -1840,9 +1821,10 @@ class SyncService {
     final destination = File(p.join((await _storage.booksDir()).path, '${session.expectedSha256}.$extension'));
     if (await destination.exists()) await destination.delete();
     await tempFile.rename(destination.path);
+    await _fileTransferManager.markCompleted(session.bookId);
 
     final manifest = await _storage.markBookDownloaded(bookId: session.bookId, localPath: destination.path);
-    _manifestChanges.add(manifest);
+    _emitManifest(manifest);
     _downloadsByTransferId.remove(session.transferId);
 
     _clearTransferForBook(session.bookId);
@@ -1886,7 +1868,7 @@ class SyncService {
   Future<void> _failDownload(_DownloadSession session, String message, {bool deletePartial = false}) async {
     session.watchdog?.cancel();
     if (deletePartial) {
-      await _deletePartial(session);
+      await _fileTransferManager.discard(session.bookId);
     }
     _downloadsByTransferId.remove(session.transferId);
     final existing = state.value.downloadForBook(session.bookId);
@@ -1917,12 +1899,21 @@ class SyncService {
     }
   }
 
-  Future<void> _deletePartial(_DownloadSession session) async {
-    try {
-      final tempFile = session.tempFile;
-      if (tempFile != null && await tempFile.exists()) await tempFile.delete();
-    } catch (_) {
-      // Best effort cleanup.
+  Future<void> _resumePendingTransfers() async {
+    if (!state.value.connected) return;
+    final manifest = await _storage.loadManifest();
+    final activeBooks = _downloadsByTransferId.values.map((session) => session.bookId).toSet();
+    for (final pending in await _fileTransferManager.loadPending()) {
+      if (activeBooks.contains(pending.bookId)) continue;
+      final matches = manifest.books.where(
+        (book) => book.id == pending.bookId && !book.isDeleted && !book.isDownloaded,
+      );
+      if (matches.isEmpty) {
+        await _fileTransferManager.discard(pending.bookId);
+        continue;
+      }
+      _appendLog('Возобновляем незавершённую передачу: ${pending.fileName}');
+      await requestBookFile(matches.first);
     }
   }
 
@@ -1933,115 +1924,11 @@ class SyncService {
   }
 
   Future<void> _ensureDirectFileServer() async {
-    if (_directFileServer != null) return;
-    for (final port in const [8790, 8791, 0]) {
-      try {
-        final server = await HttpServer.bind(InternetAddress.anyIPv4, port, shared: true);
-        _directFileServer = server;
-        _directFileServerPort = server.port;
-        server.listen(
-          (request) => unawaited(_handleDirectFileRequest(request)),
-          onError: (Object error) => debugPrint('Direct file server error: $error'),
-          cancelOnError: false,
-        );
-        _appendLog('Direct/LAN file endpoint: port ${server.port}');
-        return;
-      } catch (_) {
-        if (port == 0) rethrow;
-      }
-    }
+    await _directTransferServer.ensureStarted();
   }
 
-  Future<List<String>> _createDirectShareUrls({required BookRecord book, required File file}) async {
-    try {
-      await _ensureDirectFileServer();
-      final port = _directFileServerPort;
-      if (port == null) return const [];
-      final token = _uuid.v4().replaceAll('-', '');
-      _directShares[token] = _DirectFileShare(
-        token: token,
-        bookId: book.id,
-        file: file,
-        fileName: book.fileName,
-        sha256: book.contentSha256,
-        sizeBytes: await file.length(),
-        expiresAt: DateTime.now().toUtc().add(const Duration(minutes: 15)),
-      );
-      _directShares.removeWhere((_, share) => share.expiresAt.isBefore(DateTime.now().toUtc()));
-      final interfaces = await NetworkInterface.list(type: InternetAddressType.IPv4, includeLoopback: false);
-      final urls = <String>[];
-      for (final interface in interfaces) {
-        for (final address in interface.addresses) {
-          final host = address.address;
-          if (host.startsWith('169.254.')) continue;
-          urls.add('http://$host:$port/direct-file/$token');
-        }
-      }
-      return urls.toSet().toList()..sort();
-    } catch (error) {
-      debugPrint('Cannot create Direct/LAN share: $error');
-      return const [];
-    }
-  }
-
-  Future<void> _handleDirectFileRequest(HttpRequest request) async {
-    try {
-      final segments = request.uri.pathSegments;
-      final isDownloadMethod = request.method == 'GET' || request.method == 'HEAD';
-      if (!isDownloadMethod || segments.length != 2 || segments[0] != 'direct-file') {
-        request.response.statusCode = HttpStatus.notFound;
-        await request.response.close();
-        return;
-      }
-      final token = segments[1];
-      final share = _directShares[token];
-      if (share == null || share.expiresAt.isBefore(DateTime.now().toUtc())) {
-        _directShares.remove(token);
-        request.response.statusCode = HttpStatus.notFound;
-        await request.response.close();
-        return;
-      }
-      if (!await share.file.exists()) {
-        _directShares.remove(token);
-        request.response.statusCode = HttpStatus.gone;
-        request.response.headers.set('X-ReadArc-Error', 'source-file-unavailable');
-        await request.response.close();
-        return;
-      }
-      final size = await share.file.length();
-      var start = 0;
-      final range = request.headers.value(HttpHeaders.rangeHeader);
-      if (range != null) {
-        final match = RegExp(r'bytes=(\d+)-').firstMatch(range);
-        if (match != null) start = int.tryParse(match.group(1) ?? '0') ?? 0;
-      }
-      start = start.clamp(0, size).toInt();
-      request.response.headers
-        ..set(HttpHeaders.acceptRangesHeader, 'bytes')
-        ..set(HttpHeaders.contentTypeHeader, 'application/octet-stream')
-        ..set('X-ReadArc-Book-Id', share.bookId)
-        ..set('X-ReadArc-Sha256', share.sha256)
-        ..set('X-ReadArc-File-Name', Uri.encodeComponent(share.fileName));
-      if (start > 0) {
-        request.response.statusCode = HttpStatus.partialContent;
-        request.response.headers.set(HttpHeaders.contentRangeHeader, 'bytes $start-${size - 1}/$size');
-      } else {
-        request.response.statusCode = HttpStatus.ok;
-      }
-      request.response.contentLength = size - start;
-      if (request.method == 'HEAD') {
-        await request.response.close();
-      } else {
-        await share.file.openRead(start).pipe(request.response);
-      }
-    } catch (error) {
-      try {
-        request.response.statusCode = HttpStatus.internalServerError;
-        await request.response.close();
-      } catch (_) {}
-      debugPrint('Direct file request failed: $error');
-    }
-  }
+  Future<List<String>> _createDirectShareUrls({required BookRecord book, required File file}) =>
+      _directTransferServer.createShareUrls(book: book, file: file);
 
   List<Uri> _directDownloadCandidates(List<String> urls) {
     final seen = <String>{};
@@ -2269,7 +2156,10 @@ class SyncService {
         return false;
       }
       final encryptedPayload = await ReadArcE2eCrypto.encryptPayload(
-        payload: envelope.payload,
+        payload: {
+          ...envelope.payload,
+          '_sync': {'protocolVersion': envelope.protocolVersion, 'operationId': envelope.operationId},
+        },
         accountEncryptionKey: local.accountEncryptionKey,
         eventType: envelope.type,
         accountId: envelope.accountId,
@@ -2283,6 +2173,8 @@ class SyncService {
           deviceId: envelope.deviceId,
           createdAt: envelope.createdAt,
           payload: encryptedPayload,
+          protocolVersion: envelope.protocolVersion,
+          operationId: envelope.operationId,
         ),
       );
       if (logLabel != null && logLabel.isNotEmpty) {
@@ -2314,21 +2206,32 @@ class SyncService {
   }
 
   void _appendLog(String line) {
+    if (_disposed) return;
     final timestamp = DateTime.now().toLocal().toIso8601String().substring(11, 19);
     final updated = ['[$timestamp] $line', ...state.value.logLines];
     _setState(state.value.copyWith(logLines: updated.take(30).toList()));
   }
 
   void _setState(SyncStateSnapshot snapshot) {
+    if (_disposed) return;
     state.value = snapshot;
   }
 
+  void _emitManifest(LibraryManifest manifest) {
+    if (_disposed || _manifestChanges.isClosed) return;
+    _manifestChanges.add(manifest);
+  }
+
   Future<void> dispose() async {
+    if (_disposed) return;
+    _disposed = true;
+    for (final session in _downloadsByTransferId.values) {
+      session.watchdog?.cancel();
+    }
+    _downloadsByTransferId.clear();
     await disconnect(manual: true);
     _reconnectTimer?.cancel();
-    await _directFileServer?.close(force: true);
-    _directFileServer = null;
-    _directShares.clear();
+    await _directTransferServer.dispose();
     await _manifestChanges.close();
     state.dispose();
   }
@@ -2359,24 +2262,4 @@ class _DownloadSession {
   int? totalChunks;
   Timer? watchdog;
   final DateTime startedAt = DateTime.now();
-}
-
-class _DirectFileShare {
-  const _DirectFileShare({
-    required this.token,
-    required this.bookId,
-    required this.file,
-    required this.fileName,
-    required this.sha256,
-    required this.sizeBytes,
-    required this.expiresAt,
-  });
-
-  final String token;
-  final String bookId;
-  final File file;
-  final String fileName;
-  final String sha256;
-  final int sizeBytes;
-  final DateTime expiresAt;
 }

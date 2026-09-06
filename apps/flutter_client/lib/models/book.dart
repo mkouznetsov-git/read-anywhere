@@ -1,5 +1,7 @@
 import 'package:uuid/uuid.dart';
 
+import 'sync_revision.dart';
+
 const _uuid = Uuid();
 
 enum BookDownloadStatus { downloaded, remoteOnly, missingLocalFile }
@@ -14,9 +16,12 @@ class BookmarkRecord {
     DateTime? createdAt,
     DateTime? updatedAt,
     this.deletedAt,
+    this.revision = SyncRevision.zero,
+    List<String>? tombstoneAckedByDeviceIds,
   }) : id = id ?? _uuid.v4(),
        createdAt = createdAt ?? DateTime.now().toUtc(),
-       updatedAt = updatedAt ?? DateTime.now().toUtc();
+       updatedAt = updatedAt ?? DateTime.now().toUtc(),
+       tombstoneAckedByDeviceIds = _uniqueStrings(tombstoneAckedByDeviceIds ?? const []);
 
   final String id;
   final String bookId;
@@ -26,10 +31,20 @@ class BookmarkRecord {
   final DateTime createdAt;
   final DateTime updatedAt;
   final DateTime? deletedAt;
+  final SyncRevision revision;
+  final List<String> tombstoneAckedByDeviceIds;
 
   bool get isDeleted => deletedAt != null;
 
-  BookmarkRecord copyWith({String? label, String? locator, String? note, DateTime? updatedAt, DateTime? deletedAt}) {
+  BookmarkRecord copyWith({
+    String? label,
+    String? locator,
+    String? note,
+    DateTime? updatedAt,
+    DateTime? deletedAt,
+    SyncRevision? revision,
+    List<String>? tombstoneAckedByDeviceIds,
+  }) {
     return BookmarkRecord(
       id: id,
       bookId: bookId,
@@ -39,6 +54,8 @@ class BookmarkRecord {
       createdAt: createdAt,
       updatedAt: updatedAt ?? DateTime.now().toUtc(),
       deletedAt: deletedAt ?? this.deletedAt,
+      revision: revision ?? this.revision,
+      tombstoneAckedByDeviceIds: tombstoneAckedByDeviceIds ?? this.tombstoneAckedByDeviceIds,
     );
   }
 
@@ -51,6 +68,8 @@ class BookmarkRecord {
     'createdAt': createdAt.toIso8601String(),
     'updatedAt': updatedAt.toIso8601String(),
     'deletedAt': deletedAt?.toIso8601String(),
+    'revision': revision.toJson(),
+    'tombstoneAckedByDeviceIds': tombstoneAckedByDeviceIds,
   };
 
   factory BookmarkRecord.fromJson(Map<String, dynamic> json) => BookmarkRecord(
@@ -62,6 +81,10 @@ class BookmarkRecord {
     createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ?? DateTime.now().toUtc(),
     updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ?? DateTime.now().toUtc(),
     deletedAt: json['deletedAt'] == null ? null : DateTime.tryParse(json['deletedAt'] as String),
+    revision: SyncRevision.fromJson(json['revision'], legacyDeviceId: json['updatedByDeviceId']?.toString() ?? ''),
+    tombstoneAckedByDeviceIds: ((json['tombstoneAckedByDeviceIds'] as List?) ?? const [])
+        .map((item) => item.toString())
+        .toList(),
   );
 }
 
@@ -83,10 +106,15 @@ class BookRecord {
     this.deletedAt,
     List<String>? availableOnDeviceIds,
     List<BookmarkRecord>? bookmarks,
+    this.metadataRevision = SyncRevision.zero,
+    SyncRevision? progressRevision,
+    List<String>? tombstoneAckedByDeviceIds,
   }) : addedAt = addedAt ?? DateTime.now().toUtc(),
        updatedAt = updatedAt ?? DateTime.now().toUtc(),
        availableOnDeviceIds = _uniqueStrings(availableOnDeviceIds ?? const []),
-       bookmarks = bookmarks ?? [];
+       bookmarks = bookmarks ?? [],
+       progressRevision = progressRevision ?? SyncRevision(counter: progressVersion, deviceId: updatedByDeviceId),
+       tombstoneAckedByDeviceIds = _uniqueStrings(tombstoneAckedByDeviceIds ?? const []);
 
   final String id;
   final String title;
@@ -108,9 +136,13 @@ class BookRecord {
   final DateTime? deletedAt;
   final List<String> availableOnDeviceIds;
   final List<BookmarkRecord> bookmarks;
+  final SyncRevision metadataRevision;
+  final SyncRevision progressRevision;
+  final List<String> tombstoneAckedByDeviceIds;
 
   bool get isDeleted => deletedAt != null;
   bool get isDownloaded => !isDeleted && localPath != null && localPath!.isNotEmpty;
+  List<BookmarkRecord> get visibleBookmarks => bookmarks.where((bookmark) => !bookmark.isDeleted).toList();
 
   BookDownloadStatus get downloadStatus => isDownloaded ? BookDownloadStatus.downloaded : BookDownloadStatus.remoteOnly;
 
@@ -133,6 +165,9 @@ class BookRecord {
     bool clearDeletedAt = false,
     List<String>? availableOnDeviceIds,
     List<BookmarkRecord>? bookmarks,
+    SyncRevision? metadataRevision,
+    SyncRevision? progressRevision,
+    List<String>? tombstoneAckedByDeviceIds,
   }) {
     return BookRecord(
       id: id,
@@ -151,6 +186,9 @@ class BookRecord {
       deletedAt: clearDeletedAt ? null : (deletedAt ?? this.deletedAt),
       availableOnDeviceIds: availableOnDeviceIds ?? this.availableOnDeviceIds,
       bookmarks: bookmarks ?? this.bookmarks,
+      metadataRevision: metadataRevision ?? this.metadataRevision,
+      progressRevision: progressRevision ?? this.progressRevision,
+      tombstoneAckedByDeviceIds: tombstoneAckedByDeviceIds ?? this.tombstoneAckedByDeviceIds,
     );
   }
 
@@ -171,6 +209,9 @@ class BookRecord {
     'deletedAt': deletedAt?.toIso8601String(),
     'availableOnDeviceIds': availableOnDeviceIds,
     'bookmarks': bookmarks.map((b) => b.toJson()).toList(),
+    'metadataRevision': metadataRevision.toJson(),
+    'progressRevision': progressRevision.toJson(),
+    'tombstoneAckedByDeviceIds': tombstoneAckedByDeviceIds,
   };
 
   factory BookRecord.fromJson(Map<String, dynamic> json) => BookRecord(
@@ -191,6 +232,18 @@ class BookRecord {
     availableOnDeviceIds: ((json['availableOnDeviceIds'] as List?) ?? []).map((item) => item.toString()).toList(),
     bookmarks: ((json['bookmarks'] as List?) ?? [])
         .map((item) => BookmarkRecord.fromJson(item as Map<String, dynamic>))
+        .toList(),
+    metadataRevision: SyncRevision.fromJson(
+      json['metadataRevision'],
+      legacyDeviceId: json['updatedByDeviceId']?.toString() ?? '',
+    ),
+    progressRevision: SyncRevision.fromJson(
+      json['progressRevision'],
+      legacyCounter: (json['progressVersion'] as num?)?.toInt() ?? 0,
+      legacyDeviceId: json['updatedByDeviceId']?.toString() ?? '',
+    ),
+    tombstoneAckedByDeviceIds: ((json['tombstoneAckedByDeviceIds'] as List?) ?? const [])
+        .map((item) => item.toString())
         .toList(),
   );
 }
