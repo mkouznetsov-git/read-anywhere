@@ -53,6 +53,16 @@ class PreparedFileTransfer {
   final int nextChunkIndex;
 }
 
+enum IncomingChunkDisposition { appended, duplicate, waitingForMissingChunk }
+
+class IncomingChunkResult {
+  const IncomingChunkResult({required this.disposition, required this.nextChunkIndex, required this.receivedBytes});
+
+  final IncomingChunkDisposition disposition;
+  final int nextChunkIndex;
+  final int receivedBytes;
+}
+
 /// Persists transfer intent so a new SyncService can resume the same `.part` file.
 class FileTransferManager {
   FileTransferManager({required Future<Directory> Function() appDirectory}) : this._(appDirectory);
@@ -114,6 +124,53 @@ class FileTransferManager {
       }
     }
     return result..sort((a, b) => a.bookId.compareTo(b.bookId));
+  }
+
+  /// Commits exactly the next chunk and makes it durable before an ACK may be
+  /// sent. Duplicates and future chunks are no-ops, so retries/reordering cannot
+  /// append bytes twice or create holes in the partial file.
+  Future<IncomingChunkResult> commitChunk({
+    required File partialFile,
+    required int expectedChunkIndex,
+    required int receivedChunkIndex,
+    required int chunkSize,
+    required int expectedBytes,
+    required List<int> data,
+  }) async {
+    if (expectedChunkIndex < 0 || receivedChunkIndex < 0 || chunkSize <= 0 || expectedBytes < 0) {
+      throw const FormatException('Invalid incoming chunk coordinates');
+    }
+    final currentBytes = await partialFile.length();
+    final expectedOffset = expectedChunkIndex * chunkSize;
+    if (currentBytes != expectedOffset) {
+      throw StateError('Partial file length $currentBytes does not match expected offset $expectedOffset');
+    }
+    if (receivedChunkIndex < expectedChunkIndex) {
+      return IncomingChunkResult(
+        disposition: IncomingChunkDisposition.duplicate,
+        nextChunkIndex: expectedChunkIndex,
+        receivedBytes: currentBytes,
+      );
+    }
+    if (receivedChunkIndex > expectedChunkIndex) {
+      return IncomingChunkResult(
+        disposition: IncomingChunkDisposition.waitingForMissingChunk,
+        nextChunkIndex: expectedChunkIndex,
+        receivedBytes: currentBytes,
+      );
+    }
+    if (data.isEmpty && currentBytes != expectedBytes) {
+      throw const FormatException('Non-final incoming chunk is empty');
+    }
+    if (data.length > chunkSize || currentBytes + data.length > expectedBytes) {
+      throw const FormatException('Incoming chunk exceeds declared transfer bounds');
+    }
+    await partialFile.writeAsBytes(data, mode: FileMode.append, flush: true);
+    return IncomingChunkResult(
+      disposition: IncomingChunkDisposition.appended,
+      nextChunkIndex: expectedChunkIndex + 1,
+      receivedBytes: currentBytes + data.length,
+    );
   }
 
   Future<bool> verifySha256(File file, String expectedSha256) async {
