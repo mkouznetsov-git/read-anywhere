@@ -50,6 +50,23 @@ if [[ "$PLATFORMS" == *macos* ]]; then
   grep -q 'PRODUCT_NAME = ReadArc' macos/Runner/Configs/AppInfo.xcconfig
   grep -q 'com.apple.security.network.client' macos/Runner/Release.entitlements
   grep -q 'com.apple.security.files.user-selected.read-write' macos/Runner/Release.entitlements
+  python3 - <<'PY'
+import plistlib
+from pathlib import Path
+
+for path in (
+    Path('macos/Runner/DebugProfile.entitlements'),
+    Path('macos/Runner/Release.entitlements'),
+):
+    with path.open('rb') as source:
+        entitlements = plistlib.load(source)
+    if 'keychain-access-groups' in entitlements:
+        raise SystemExit(
+            f'ERROR: {path} must not require Keychain Sharing while ReadArc '
+            'is distributed as an ad-hoc signed macOS app.'
+        )
+PY
+  grep -q 'useDataProtectionKeyChain: false' lib/services/library_repository.dart
 fi
 
 if [[ "$PLATFORMS" == *ios* ]]; then

@@ -21,7 +21,15 @@ class PlatformLibrarySecretStore implements LibrarySecretStore {
           storage ??
           const FlutterSecureStorage(
             aOptions: AndroidOptions(encryptedSharedPreferences: true),
-            mOptions: MacOsOptions(accessibility: KeychainAccessibility.first_unlock_this_device),
+            // ReadArc's current macOS artifacts are ad-hoc signed and do not
+            // carry a provisioning profile. The Data Protection Keychain
+            // requires the Keychain Sharing entitlement, which makes such an
+            // app fail to launch on another Mac. The legacy macOS Keychain is
+            // still encrypted and avoids that distribution-only entitlement.
+            mOptions: MacOsOptions(
+              accessibility: KeychainAccessibility.first_unlock_this_device,
+              useDataProtectionKeyChain: false,
+            ),
           );
 
   final FlutterSecureStorage _storage;
