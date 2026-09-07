@@ -50,6 +50,23 @@ if [[ "$PLATFORMS" == *macos* ]]; then
   grep -q 'PRODUCT_NAME = ReadArc' macos/Runner/Configs/AppInfo.xcconfig
   grep -q 'com.apple.security.network.client' macos/Runner/Release.entitlements
   grep -q 'com.apple.security.files.user-selected.read-write' macos/Runner/Release.entitlements
+  python3 - <<'PY'
+import plistlib
+from pathlib import Path
+
+for path in (
+    Path('macos/Runner/DebugProfile.entitlements'),
+    Path('macos/Runner/Release.entitlements'),
+):
+    with path.open('rb') as source:
+        entitlements = plistlib.load(source)
+    groups = entitlements.get('keychain-access-groups')
+    if groups != []:
+        raise SystemExit(
+            f'ERROR: {path} must declare an empty keychain-access-groups array '
+            'for flutter_secure_storage on macOS.'
+        )
+PY
 fi
 
 if [[ "$PLATFORMS" == *ios* ]]; then
