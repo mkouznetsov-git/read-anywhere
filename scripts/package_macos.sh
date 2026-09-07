@@ -79,17 +79,22 @@ if command -v codesign >/dev/null 2>&1; then
     codesign --force --sign - "$STAGED_APP/Contents/Frameworks/libreadarc_djvu_engine.dylib"
   fi
   # Re-sign only the modified outer bundle and explicitly restore its release
-  # entitlements. A plain `codesign --deep --sign -` discards the Xcode-produced
-  # Keychain entitlement, which makes flutter_secure_storage hang/fail while it
-  # creates the initial library secrets on a freshly installed Mac.
+  # entitlements. A plain `codesign --deep --sign -` discards every
+  # Xcode-produced entitlement. ReadArc intentionally uses the legacy encrypted
+  # macOS Keychain until Developer ID signing is available, because the Data
+  # Protection Keychain entitlement requires a provisioning profile.
   codesign \
     --force \
     --sign - \
     --entitlements "$APP_DIR/macos/Runner/Release.entitlements" \
     "$STAGED_APP"
   signed_entitlements="$(codesign -d --entitlements :- "$STAGED_APP" 2>/dev/null)"
-  if ! grep -q '<key>keychain-access-groups</key>' <<< "$signed_entitlements"; then
-    echo "ERROR: packaged ReadArc.app lost its required Keychain entitlement." >&2
+  if ! grep -q '<key>com.apple.security.app-sandbox</key>' <<< "$signed_entitlements"; then
+    echo "ERROR: packaged ReadArc.app lost its release entitlements." >&2
+    exit 1
+  fi
+  if grep -q '<key>keychain-access-groups</key>' <<< "$signed_entitlements"; then
+    echo "ERROR: ad-hoc ReadArc.app unexpectedly requires a Keychain Sharing provisioning profile." >&2
     exit 1
   fi
   codesign --verify --deep --strict "$STAGED_APP"

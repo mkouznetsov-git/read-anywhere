@@ -60,13 +60,13 @@ for path in (
 ):
     with path.open('rb') as source:
         entitlements = plistlib.load(source)
-    groups = entitlements.get('keychain-access-groups')
-    if groups != []:
+    if 'keychain-access-groups' in entitlements:
         raise SystemExit(
-            f'ERROR: {path} must declare an empty keychain-access-groups array '
-            'for flutter_secure_storage on macOS.'
+            f'ERROR: {path} must not require Keychain Sharing while ReadArc '
+            'is distributed as an ad-hoc signed macOS app.'
         )
 PY
+  grep -q 'useDataProtectionKeyChain: false' lib/services/library_repository.dart
 fi
 
 if [[ "$PLATFORMS" == *ios* ]]; then
