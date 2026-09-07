@@ -10,17 +10,13 @@ import 'package:readarc/services/sync/sync_service.dart';
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('ReadArc creates its initial manifest and opens the empty library', (
-    tester,
-  ) async {
+  testWidgets('ReadArc creates its initial manifest and opens the empty library', (tester) async {
     final errors = <FlutterErrorDetails>[];
     final previousHandler = FlutterError.onError;
     FlutterError.onError = errors.add;
     addTearDown(() => FlutterError.onError = previousHandler);
 
-    final directory = await Directory.systemTemp.createTemp(
-      'readarc-platform-smoke-',
-    );
+    final directory = await Directory.systemTemp.createTemp('readarc-platform-smoke-');
     addTearDown(() async {
       if (await directory.exists()) await directory.delete(recursive: true);
     });
@@ -29,14 +25,7 @@ void main() {
     // Relay behavior has its own real two-client integration harness. Keep the
     // platform boot smoke deterministic and independent from production DNS,
     // internet reachability and live peer traffic.
-    await tester.pumpWidget(
-      app.ReadArcApp(
-        autoConnect: false,
-        storage: storage,
-        sync: sync,
-        disposeSync: false,
-      ),
-    );
+    await tester.pumpWidget(app.ReadArcApp(autoConnect: false, storage: storage, sync: sync, disposeSync: false));
     try {
       await tester.pumpAndSettle(
         const Duration(milliseconds: 100),
@@ -47,16 +36,8 @@ void main() {
       expect(find.byType(MaterialApp), findsOneWidget);
       expect(find.byType(app.LibraryScreen), findsOneWidget);
       expect(find.textContaining('Библиотека пока пуста'), findsOneWidget);
-      expect(
-        find.textContaining('Не удалось загрузить библиотеку'),
-        findsNothing,
-      );
-      expect(
-        errors,
-        isEmpty,
-        reason:
-            'ReadArc emitted a Flutter framework error during startup: $errors',
-      );
+      expect(find.textContaining('Не удалось загрузить библиотеку'), findsNothing);
+      expect(errors, isEmpty, reason: 'ReadArc emitted a Flutter framework error during startup: $errors');
     } finally {
       // Explicitly dispose application-owned sync streams, timers and HTTP
       // resources. Device integration runners keep the process alive while any
