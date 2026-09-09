@@ -310,17 +310,7 @@ jobs:
           arch: x86_64
           profile: pixel_6
           disable-animations: true
-          script: |
-            bash -lc '
-              set -euo pipefail
-              mkdir -p test-results
-              old_apk="$(find previous-release -maxdepth 1 -type f -name "*-android-universal-release.apk" -print -quit)"
-              new_apk="$(find dist/android -maxdepth 1 -type f -name "*-android-universal-release.apk" -print -quit)"
-              [[ -n "$old_apk" && -n "$new_apk" ]]
-              [[ "$(find previous-release -maxdepth 1 -type f -name "*-android-universal-release.apk" | wc -l | tr -d " ")" == 1 ]]
-              [[ "$(find dist/android -maxdepth 1 -type f -name "*-android-universal-release.apk" | wc -l | tr -d " ")" == 1 ]]
-              bash scripts/android_upgrade_smoke.sh "$old_apk" "$new_apk" test-results/android-upgrade-smoke.txt
-            '
+          script: bash scripts/run_android_upgrade_smoke_ci.sh
 
       - name: Upload packaged Android verification logs
         if: always()

@@ -56,6 +56,7 @@ void main() {
       final lockfile = _read('pubspec.lock');
       final androidPackager = _read('../../scripts/package_android.sh');
       final androidUpgrade = _read('../../scripts/android_upgrade_smoke.sh');
+      final androidUpgradeCi = _read('../../scripts/run_android_upgrade_smoke_ci.sh');
       final macosUpgrade = _read('../../scripts/macos_package_upgrade_smoke.sh');
       final workflow = _read('../../.github/workflows/quality_gate.yml');
 
@@ -65,6 +66,7 @@ void main() {
       expect(androidUpgrade, contains('adb install -r'));
       expect(androidUpgrade, contains('upgrade-sentinel'));
       expect(androidUpgrade, contains('OLD_FINGERPRINT" != "\$NEW_FINGERPRINT'));
+      expect(androidUpgradeCi, contains('android_upgrade_smoke.sh'));
       expect(macosUpgrade, contains('legacySchemaV1ToV2ToV3=true'));
       expect(macosUpgrade, contains('booksProgressBookmarksPairingPreserved=true'));
       expect(workflow, contains('Run packaged Android adb install -r upgrade test'));
