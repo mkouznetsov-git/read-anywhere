@@ -35,14 +35,16 @@ void main() {
     expect(pairingField, findsOneWidget);
     await tester.enterText(pairingField, '123456');
     tester.view.viewInsets = const FakeViewPadding(bottom: 180);
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
     await tester.ensureVisible(find.text('Подключиться по коду'));
-    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 300));
     expect(tester.takeException(), isNull);
 
     tester.view.resetViewInsets();
     tester.view.physicalSize = const Size(360, 800);
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('123456'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
