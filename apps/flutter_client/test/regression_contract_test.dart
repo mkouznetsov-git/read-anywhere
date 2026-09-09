@@ -50,6 +50,34 @@ void main() {
       expect(platformValidator, isNot(contains('find android/app')));
     });
 
+    test('production package upgrade gates cannot be silently removed', () {
+      final gradleProperties = _read('android/gradle.properties');
+      final pubspec = _read('pubspec.yaml');
+      final lockfile = _read('pubspec.lock');
+      final androidPackager = _read('../../scripts/package_android.sh');
+      final androidUpgrade = _read('../../scripts/android_upgrade_smoke.sh');
+      final androidUpgradeCi = _read('../../scripts/run_android_upgrade_smoke_ci.sh');
+      final macosUpgrade = _read('../../scripts/macos_package_upgrade_smoke.sh');
+      final workflow = _read('../../.github/workflows/quality_gate.yml');
+
+      expect(gradleProperties, contains('force-version-code-ignoring-abi=true'));
+      expect(androidPackager, contains('version_code" != "\$ANDROID_BUILD_NUMBER'));
+      expect(androidPackager, contains('certificateSha256='));
+      expect(androidUpgrade, contains('adb install -r'));
+      expect(androidUpgrade, contains('adb root'));
+      expect(androidUpgrade, contains('upgrade-sentinel'));
+      expect(androidUpgrade, contains('OLD_FINGERPRINT" != "\$NEW_FINGERPRINT'));
+      expect(androidUpgradeCi, contains('android_upgrade_smoke.sh'));
+      expect(macosUpgrade, contains('legacySchemaV1ToV2ToV3=true'));
+      expect(macosUpgrade, contains('booksProgressBookmarksPairingPreserved=true'));
+      expect(workflow, contains('Run packaged Android adb install -r upgrade test'));
+      expect(workflow, contains('Configure ephemeral Android signing for pull-request verification'));
+      expect(workflow, contains('Run packaged macOS clean and legacy-library upgrade test'));
+      expect(pubspec, contains('flutter_secure_storage: 10.3.0'));
+      expect(lockfile, contains('flutter_secure_storage_darwin'));
+      expect(lockfile, contains('version: "0.3.2"'));
+    });
+
     test('pairing UI remains six-digit-code based', () {
       final main = _read('lib/app/readarc_app.dart');
       expect(main, contains('Создать код подключения'));

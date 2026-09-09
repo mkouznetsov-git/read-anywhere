@@ -121,6 +121,32 @@ void main() {
     expect(firstDisk, isNot(contains('legacy-device-key')));
   });
 
+  test('failed legacy secret migration preserves the original manifest and a recovery copy', () async {
+    final legacy = _initial().copyWith(books: [_book('preserved')]).toJson()
+      ..remove('schemaVersion')
+      ..['accountEncryptionKey'] = 'legacy-account-key'
+      ..['deviceSigningPrivateKey'] = 'legacy-device-key';
+    final raw = jsonEncode(legacy);
+    final manifestFile = File(p.join(directory.path, 'manifest.json'));
+    await manifestFile.writeAsString(raw, flush: true);
+    secrets.failWrites = true;
+
+    await expectLater(repository.read(), throwsA(isA<ManifestRecoveryException>()));
+    expect(await manifestFile.readAsString(), raw);
+    final recoveryDirectory = Directory(p.join(directory.path, 'manifest_recovery'));
+    final recoveryCopies = await recoveryDirectory
+        .list()
+        .where((entry) => entry is File && p.basename(entry.path).startsWith('broken_manifest_'))
+        .toList();
+    expect(recoveryCopies, isNotEmpty);
+
+    secrets.failWrites = false;
+    final retried = await _repository(directory, secrets).read();
+    expect(retried.books.single.id, 'preserved');
+    expect(retried.accountEncryptionKey, 'legacy-account-key');
+    expect(retried.deviceSigningPrivateKey, 'legacy-device-key');
+  });
+
   test('schema v2 is durably migrated to logical revisions in schema v3', () async {
     final book = _book('legacy-book').toJson()
       ..remove('metadataRevision')
