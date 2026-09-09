@@ -170,32 +170,64 @@ if [[ "$(adb shell id -u | tr -d '\r')" != "0" ]]; then
   exit 1
 fi
 adb install -r "$TEST_OLD_APK"
-adb shell am start -W -n "$PACKAGE_ID/.MainActivity" | tee /tmp/readarc-old-launch.txt
-grep -q 'Status: ok' /tmp/readarc-old-launch.txt
-for attempt in {1..100}; do
-  if adb shell "test -s '$MANIFEST_PATH'"; then
-    break
-  fi
-  sleep 0.2
-done
-if ! adb shell "test -s '$MANIFEST_PATH'"; then
-  echo "ERROR: previous release did not create its manifest." >&2
+APP_UID="$(adb shell stat -c %u "$APP_DATA_ROOT" | tr -d '\r')"
+if [[ ! "$APP_UID" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: could not determine the installed app UID." >&2
   exit 1
 fi
-adb exec-out cat "$MANIFEST_PATH" > "$TEMP_DIRECTORY/old-manifest.json"
-python3 - "$TEMP_DIRECTORY/old-manifest.json" <<'PY'
+BOOK_PATH="$APP_DATA_ROOT/app_flutter/ReadArc/books/upgrade.txt"
+python3 - "$TEMP_DIRECTORY/old-manifest.json" "$BOOK_PATH" <<'PY'
 import json
 import pathlib
 import sys
 
-manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert manifest['accountId']
-assert manifest['deviceId']
-assert isinstance(manifest['books'], list)
-assert isinstance(manifest['trustedDevices'], list)
+manifest = {
+    'accountId': 'android-upgrade-account',
+    'accountEncryptionKey': 'android-upgrade-account-secret',
+    'deviceId': 'android-upgrade-device',
+    'deviceName': 'Previous Android device',
+    'deviceSigningPublicKey': 'android-upgrade-public',
+    'deviceSigningPrivateKey': 'android-upgrade-private-secret',
+    'updatedAt': '2026-01-01T00:00:00.000Z',
+    'trustedDevices': [
+        {'deviceId': 'android-upgrade-device', 'name': 'Previous Android device', 'role': 'owner'},
+        {'deviceId': 'paired-device', 'name': 'Paired device', 'role': 'device'},
+    ],
+    'books': [{
+        'id': 'android-upgrade-book',
+        'title': 'Preserved Android upgrade book',
+        'fileName': 'upgrade.txt',
+        'format': 'txt',
+        'sizeBytes': 29,
+        'contentSha256': 'android-upgrade-sha256',
+        'localPath': sys.argv[2],
+        'addedAt': '2026-01-01T00:00:00.000Z',
+        'updatedAt': '2026-01-02T00:00:00.000Z',
+        'progressPercent': 64,
+        'currentLocator': 'paragraph:42',
+        'progressVersion': 7,
+        'updatedByDeviceId': 'android-upgrade-device',
+        'availableOnDeviceIds': ['android-upgrade-device'],
+        'bookmarks': [{
+            'id': 'android-upgrade-bookmark',
+            'bookId': 'android-upgrade-book',
+            'label': 'Preserved bookmark',
+            'locator': 'paragraph:42',
+            'note': 'Upgrade must retain this note',
+            'createdAt': '2026-01-01T00:00:00.000Z',
+            'updatedAt': '2026-01-01T00:00:00.000Z',
+        }],
+    }],
+}
+pathlib.Path(sys.argv[1]).write_text(json.dumps(manifest))
 PY
-adb shell am force-stop "$PACKAGE_ID"
-adb shell "mkdir -p '$APP_DATA_ROOT/files' && printf '%s' '$SENTINEL' > '$APP_DATA_ROOT/files/upgrade-sentinel'"
+printf '%s' 'preserved Android book payload' > "$TEMP_DIRECTORY/upgrade.txt"
+printf '%s' "$SENTINEL" > "$TEMP_DIRECTORY/upgrade-sentinel"
+adb shell "mkdir -p '$APP_DATA_ROOT/app_flutter/ReadArc/books' '$APP_DATA_ROOT/files'"
+adb push "$TEMP_DIRECTORY/old-manifest.json" "$MANIFEST_PATH" >/dev/null
+adb push "$TEMP_DIRECTORY/upgrade.txt" "$BOOK_PATH" >/dev/null
+adb push "$TEMP_DIRECTORY/upgrade-sentinel" "$APP_DATA_ROOT/files/upgrade-sentinel" >/dev/null
+adb shell "chown -R '$APP_UID:$APP_UID' '$APP_DATA_ROOT/app_flutter' '$APP_DATA_ROOT/files'"
 if [[ "$(adb shell "cat '$APP_DATA_ROOT/files/upgrade-sentinel'" | tr -d '\r')" != "$SENTINEL" ]]; then
   echo "ERROR: could not create application-data sentinel before upgrade." >&2
   exit 1
@@ -216,12 +248,12 @@ for attempt in {1..75}; do
     echo "ERROR: ReadArc displayed a library load error after package upgrade." >&2
     exit 1
   fi
-  if grep -q 'Библиотека пока пуста' "$TEMP_DIRECTORY/window.xml"; then
+  if grep -q 'Preserved Android upgrade book' "$TEMP_DIRECTORY/window.xml"; then
     break
   fi
   sleep 0.2
 done
-if ! grep -q 'Библиотека пока пуста' "$TEMP_DIRECTORY/window.xml"; then
+if ! grep -q 'Preserved Android upgrade book' "$TEMP_DIRECTORY/window.xml"; then
   echo "ERROR: ReadArc did not finish loading its preserved library after package upgrade." >&2
   exit 1
 fi
@@ -243,13 +275,26 @@ import sys
 
 old = json.loads(pathlib.Path(sys.argv[1]).read_text())
 new = json.loads(pathlib.Path(sys.argv[2]).read_text())
+assert new['schemaVersion'] == 3
+assert 'accountEncryptionKey' not in new
+assert 'deviceSigningPrivateKey' not in new
 assert new['accountId'] == old['accountId']
 assert new['deviceId'] == old['deviceId']
 assert {book['id'] for book in new['books']} == {book['id'] for book in old['books']}
 assert {device['deviceId'] for device in new['trustedDevices']} == {
     device['deviceId'] for device in old['trustedDevices']
 }
+book = new['books'][0]
+assert book['progressPercent'] == 64
+assert book['currentLocator'] == 'paragraph:42'
+assert book['progressRevision']['counter'] == 7
+assert book['bookmarks'][0]['id'] == 'android-upgrade-bookmark'
+assert book['bookmarks'][0]['note'] == 'Upgrade must retain this note'
 PY
+if [[ "$(adb shell "cat '$BOOK_PATH'" | tr -d '\r')" != 'preserved Android book payload' ]]; then
+  echo "ERROR: application book data was lost during adb install -r." >&2
+  exit 1
+fi
 
 mkdir -p "$(dirname "$REPORT_FILE")"
 {
@@ -263,6 +308,8 @@ mkdir -p "$(dirname "$REPORT_FILE")"
   echo "testedCertificateSha256=$NEW_FINGERPRINT"
   echo "resignedFixtures=${READARC_RESIGN_UPGRADE_FIXTURES:-false}"
   echo "dataPreserved=true"
+  echo "legacySchemaV1ToV2ToV3=true"
+  echo "booksProgressBookmarksPairingPreserved=true"
   echo "accountAndDeviceIdentityPreserved=true"
   echo "launchAfterUpgrade=true"
 } | tee "$REPORT_FILE"
