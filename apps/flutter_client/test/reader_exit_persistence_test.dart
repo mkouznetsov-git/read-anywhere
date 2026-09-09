@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -12,6 +13,7 @@ void main() {
   testWidgets('system Back persists the current PDF locator before returning to the library', (tester) async {
     final directory = await Directory.systemTemp.createTemp('readarc-reader-exit-');
     final storage = StorageService(appDirectory: () async => directory, secretStore: _MemorySecretStore());
+    final checkpointCompleted = Completer<void>();
     final book = BookRecord(
       id: 'pdf-exit-regression',
       title: 'PDF exit regression',
@@ -43,6 +45,7 @@ void main() {
                         progressPercent: 100,
                         locator: jsonEncode({'type': 'pdf-page-v1', 'page': 2, 'pages': 2}),
                       );
+                      checkpointCompleted.complete();
                     },
                     child: const Scaffold(body: Text('PDF page 2')),
                   ),
@@ -59,7 +62,9 @@ void main() {
     expect(find.text('PDF page 2'), findsOneWidget);
 
     await tester.binding.handlePopRoute();
-    await tester.pumpAndSettle();
+    await checkpointCompleted.future.timeout(const Duration(seconds: 5));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('Open PDF'), findsOneWidget);
 
     final saved = (await storage.loadManifest()).books.singleWhere((candidate) => candidate.id == book.id);
