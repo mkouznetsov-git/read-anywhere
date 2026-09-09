@@ -38,6 +38,7 @@ if [[ "$PLATFORMS" == *android* ]]; then
   grep -q 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml
   grep -q 'android.permission.CAMERA' android/app/src/main/AndroidManifest.xml
   grep -q 'android:usesCleartextTraffic="false"' android/app/src/main/AndroidManifest.xml
+  grep -q '^force-version-code-ignoring-abi=true$' android/gradle.properties
   if [[ -n "$(git -C "$ROOT_DIR" ls-files -- \
     'apps/flutter_client/android/app/*.jks' \
     'apps/flutter_client/android/app/*.keystore')" ]]; then
@@ -66,7 +67,7 @@ for path in (
             'is distributed as an ad-hoc signed macOS app.'
         )
 PY
-  grep -q 'useDataProtectionKeyChain: false' lib/services/library_repository.dart
+  grep -q 'usesDataProtectionKeychain: false' lib/services/library_repository.dart
 fi
 
 if [[ "$PLATFORMS" == *ios* ]]; then

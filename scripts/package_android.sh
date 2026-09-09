@@ -88,7 +88,7 @@ else
 fi
 
 echo "Building Android release APKs split per ABI..."
-build_with_optional_define build apk --release --build-name "$BUILD_NAME" --build-number "$ANDROID_BUILD_NUMBER" --split-per-abi -P force-version-code-ignoring-abi=true
+build_with_optional_define build apk --release --build-name "$BUILD_NAME" --build-number "$ANDROID_BUILD_NUMBER" --split-per-abi
 
 for apk in build/app/outputs/flutter-apk/*-release.apk; do
   [[ -f "$apk" ]] || continue
@@ -138,19 +138,55 @@ find_android_build_tool() {
 
 APKSIGNER="$(find_android_build_tool apksigner || true)"
 ZIPALIGN="$(find_android_build_tool zipalign || true)"
-if [[ -z "$APKSIGNER" || -z "$ZIPALIGN" ]]; then
+AAPT="$(find_android_build_tool aapt || true)"
+if [[ -z "$APKSIGNER" || -z "$ZIPALIGN" || -z "$AAPT" ]]; then
   if [[ "$REQUIRE_RELEASE_SIGNING" == "true" ]]; then
-    echo "ERROR: apksigner/zipalign are required to verify published Android APKs." >&2
+    echo "ERROR: apksigner, zipalign and aapt are required to verify published Android APKs." >&2
     exit 1
   fi
-  echo "WARNING: apksigner/zipalign unavailable; skipping local APK verification." >&2
+  echo "WARNING: Android build tools unavailable; skipping local APK verification." >&2
 else
-  echo "Verifying final APK alignment and signatures..."
-  for apk in "$DIST_DIR"/*.apk; do
+  echo "Verifying final APK alignment, identity, version codes and signatures..."
+  reference_fingerprint=""
+  : > "$DIST_DIR/APK_METADATA.txt"
+  for apk in "$DIST_DIR"/*-release.apk; do
     [[ -f "$apk" ]] || continue
     "$ZIPALIGN" -c -v 4 "$apk" >/dev/null
-    "$APKSIGNER" verify --verbose --print-certs "$apk"
+    verification="$($APKSIGNER verify --verbose --print-certs "$apk")"
+    package_line="$($AAPT dump badging "$apk" | head -n 1)"
+    package_name="$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" <<< "$package_line")"
+    version_code="$(sed -n "s/^package: .* versionCode='\([^']*\)'.*/\1/p" <<< "$package_line")"
+    fingerprint="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' <<< "$verification" | head -n 1)"
+    if [[ "$package_name" != "com.readarc.readarc" ]]; then
+      echo "ERROR: unexpected applicationId in $(basename "$apk"): $package_name" >&2
+      exit 1
+    fi
+    if [[ "$version_code" != "$ANDROID_BUILD_NUMBER" ]]; then
+      echo "ERROR: unexpected versionCode in $(basename "$apk"): expected=$ANDROID_BUILD_NUMBER actual=$version_code" >&2
+      exit 1
+    fi
+    if [[ -z "$fingerprint" ]]; then
+      echo "ERROR: certificate fingerprint is missing in $(basename "$apk")." >&2
+      exit 1
+    fi
+    if [[ -n "$reference_fingerprint" && "$fingerprint" != "$reference_fingerprint" ]]; then
+      echo "ERROR: release APK signing certificates are inconsistent." >&2
+      exit 1
+    fi
+    reference_fingerprint="$fingerprint"
+    {
+      echo "file=$(basename "$apk")"
+      echo "package=$package_name"
+      echo "versionCode=$version_code"
+      echo "certificateSha256=$fingerprint"
+      echo "zipaligned=true"
+      echo
+    } >> "$DIST_DIR/APK_METADATA.txt"
   done
+  if [[ -z "$reference_fingerprint" ]]; then
+    echo "ERROR: no release APKs were available for verification." >&2
+    exit 1
+  fi
 fi
 
 if command -v jarsigner >/dev/null 2>&1; then

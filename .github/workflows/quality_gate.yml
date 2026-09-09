@@ -75,8 +75,8 @@ jobs:
       - name: Capture formatter diff
         if: failure()
         run: |
-          dart format apps/flutter_client/lib apps/flutter_client/test
-          git diff -- apps/flutter_client/lib apps/flutter_client/test > test-results/dart-format.patch
+          dart format apps/flutter_client/lib apps/flutter_client/test apps/flutter_client/integration_test
+          git diff -- apps/flutter_client/lib apps/flutter_client/test apps/flutter_client/integration_test > test-results/dart-format.patch
 
       - name: Upload quality logs
         if: always()
@@ -203,6 +203,7 @@ jobs:
   android-package:
     name: Verified Android packages
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [android-smoke, macos-smoke, ios-build-smoke]
     env:
       READARC_REQUIRE_RELEASE_SIGNING: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true') }}
@@ -233,6 +234,21 @@ jobs:
       - name: Install pinned Android native build helper
         run: cargo install cargo-ndk --version "${CARGO_NDK_VERSION}" --locked
 
+      - name: Download previous production universal APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p previous-release
+          gh release download main-latest \
+            --pattern '*-android-*-release.apk' \
+            --dir previous-release
+          mapfile -t previous_apks < <(find previous-release -maxdepth 1 -type f -name '*-android-universal-release.apk')
+          if [[ ${#previous_apks[@]} -ne 1 ]]; then
+            echo "ERROR: expected exactly one previous production universal APK, found ${#previous_apks[@]}." >&2
+            exit 1
+          fi
+
       - name: Configure protected Android signing
         if: env.READARC_REQUIRE_RELEASE_SIGNING == 'true'
         env:
@@ -259,6 +275,42 @@ jobs:
       - name: Build Android packages
         run: bash ./scripts/package_android.sh
 
+      - name: Enable KVM for packaged APK upgrade test
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run packaged Android adb install -r upgrade test
+        uses: reactivecircus/android-emulator-runner@4c44018e59b437e86cdfc41da381398f93ed8808 # v2
+        env:
+          READARC_RESIGN_UPGRADE_FIXTURES: ${{ github.event_name == 'pull_request' && 'true' || 'false' }}
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            bash -lc '
+              set -euo pipefail
+              mkdir -p test-results
+              old_apk="$(find previous-release -maxdepth 1 -type f -name "*-android-universal-release.apk" -print -quit)"
+              new_apk="$(find dist/android -maxdepth 1 -type f -name "*-android-universal-release.apk" -print -quit)"
+              [[ -n "$old_apk" && -n "$new_apk" ]]
+              [[ "$(find previous-release -maxdepth 1 -type f -name "*-android-universal-release.apk" | wc -l | tr -d " ")" == 1 ]]
+              [[ "$(find dist/android -maxdepth 1 -type f -name "*-android-universal-release.apk" | wc -l | tr -d " ")" == 1 ]]
+              bash scripts/android_upgrade_smoke.sh "$old_apk" "$new_apk" test-results/android-upgrade-smoke.txt
+            '
+
+      - name: Upload packaged Android verification logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: android-package-verification-logs
+          path: test-results/*
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Upload Android packages
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -270,6 +322,7 @@ jobs:
   macos-package:
     name: Verified macOS packages
     runs-on: macos-15
+    timeout-minutes: 45
     needs: [android-smoke, macos-smoke, ios-build-smoke]
     env:
       READARC_REQUIRE_NATIVE_ENGINES: 'true'
@@ -292,6 +345,24 @@ jobs:
 
       - name: Build macOS packages
         run: bash ./scripts/package_macos.sh
+
+      - name: Run packaged macOS clean and legacy-library upgrade test
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          app_zip="$(find dist/macos -maxdepth 1 -type f -name '*-macos-release-app.zip' -print -quit)"
+          [[ -n "$app_zip" ]]
+          [[ "$(find dist/macos -maxdepth 1 -type f -name '*-macos-release-app.zip' | wc -l | tr -d ' ')" == 1 ]]
+          bash scripts/macos_package_upgrade_smoke.sh "$app_zip" test-results/macos-package-upgrade-smoke.txt
+
+      - name: Upload packaged macOS verification logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: macos-package-verification-logs
+          path: test-results/*
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Upload macOS packages
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -360,7 +431,7 @@ jobs:
           cat > RELEASE_NOTES.md <<EOF
           # ${{ steps.channel.outputs.title }}
 
-          Эта сборка опубликована только после успешных unit/regression/static checks, Android emulator smoke, macOS application smoke и iOS unsigned build smoke.
+          Эта сборка опубликована только после успешных unit/regression/static checks, Android emulator smoke, реального Android `adb install -r` package upgrade с проверкой сохранности данных, macOS application smoke, запуска упакованного ad-hoc `.app` на чистых и legacy-данных и iOS unsigned build smoke.
 
           - Commit: \`${GITHUB_SHA}\`
           - Build: \`${GITHUB_RUN_NUMBER}\`
