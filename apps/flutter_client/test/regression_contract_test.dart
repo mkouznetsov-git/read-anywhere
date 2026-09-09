@@ -119,11 +119,7 @@ void main() {
 
       for (final state in ['_DjvuReaderScreenState', '_PdfReaderScreenState']) {
         final body = RegExp('class ${RegExp.escape(state)}[\\s\\S]*?(?=\\nclass )').firstMatch(main)?.group(0);
-        expect(
-          body,
-          contains('unawaited(_savePage(_page))'),
-          reason: '$state lost its non-pop disposal fallback',
-        );
+        expect(body, contains('unawaited(_savePage(_page))'), reason: '$state lost its non-pop disposal fallback');
       }
     });
   });
