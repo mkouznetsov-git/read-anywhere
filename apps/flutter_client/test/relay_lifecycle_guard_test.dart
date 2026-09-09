@@ -8,10 +8,7 @@ void main() {
     final neverCompletes = Completer<void>();
     final stopwatch = Stopwatch()..start();
 
-    final completed = await waitForRelayCleanup(
-      neverCompletes.future,
-      timeout: const Duration(milliseconds: 25),
-    );
+    final completed = await waitForRelayCleanup(neverCompletes.future, timeout: const Duration(milliseconds: 25));
 
     stopwatch.stop();
     expect(completed, isFalse);
@@ -23,10 +20,7 @@ void main() {
   });
 
   test('normal relay cleanup still reports completion', () async {
-    final completed = await waitForRelayCleanup(
-      Future<void>.value(),
-      timeout: const Duration(milliseconds: 25),
-    );
+    final completed = await waitForRelayCleanup(Future<void>.value(), timeout: const Duration(milliseconds: 25));
 
     expect(completed, isTrue);
   });
