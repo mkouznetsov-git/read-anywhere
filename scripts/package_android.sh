@@ -152,11 +152,11 @@ else
   for apk in "$DIST_DIR"/*-release.apk; do
     [[ -f "$apk" ]] || continue
     "$ZIPALIGN" -c -v 4 "$apk" >/dev/null
-    verification="$($APKSIGNER verify --verbose --print-certs "$apk")"
+    verification="$($APKSIGNER verify --verbose --print-certs "$apk" 2>&1)"
     package_line="$($AAPT dump badging "$apk" | head -n 1)"
     package_name="$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" <<< "$package_line")"
     version_code="$(sed -n "s/^package: .* versionCode='\([^']*\)'.*/\1/p" <<< "$package_line")"
-    fingerprint="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' <<< "$verification" | head -n 1)"
+    fingerprint="$(sed -n 's/.*certificate SHA-256 digest:[[:space:]]*//p' <<< "$verification" | tr -d '\r' | head -n 1)"
     if [[ "$package_name" != "com.readarc.readarc" ]]; then
       echo "ERROR: unexpected applicationId in $(basename "$apk"): $package_name" >&2
       exit 1
@@ -167,6 +167,7 @@ else
     fi
     if [[ -z "$fingerprint" ]]; then
       echo "ERROR: certificate fingerprint is missing in $(basename "$apk")." >&2
+      printf '%s\n' "$verification" >&2
       exit 1
     fi
     if [[ -n "$reference_fingerprint" && "$fingerprint" != "$reference_fingerprint" ]]; then

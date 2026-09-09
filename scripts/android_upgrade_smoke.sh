@@ -46,8 +46,9 @@ apk_version_code() {
 }
 
 apk_fingerprint() {
-  "$APKSIGNER" verify --print-certs "$1" |
-    sed -n 's/^Signer #1 certificate SHA-256 digest: //p' |
+  "$APKSIGNER" verify --print-certs "$1" 2>&1 |
+    sed -n 's/.*certificate SHA-256 digest:[[:space:]]*//p' |
+    tr -d '\r' |
     head -n 1
 }
 
