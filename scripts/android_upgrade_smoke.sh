@@ -11,6 +11,8 @@ NEW_APK="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 REPORT_FILE="${3:-android-upgrade-smoke.txt}"
 PACKAGE_ID="com.readarc.readarc"
 SENTINEL="readarc-upgrade-data-preserved"
+APP_DATA_ROOT="/data/user/0/$PACKAGE_ID"
+MANIFEST_PATH="$APP_DATA_ROOT/app_flutter/ReadArc/manifest.json"
 
 for apk in "$OLD_APK" "$NEW_APK"; do
   if [[ ! -f "$apk" ]]; then
@@ -160,16 +162,27 @@ if [[ -z "$OLD_FINGERPRINT" || "$OLD_FINGERPRINT" != "$NEW_FINGERPRINT" ]]; then
 fi
 
 adb wait-for-device
+adb root >/tmp/readarc-adb-root.txt
+adb wait-for-device
+if [[ "$(adb shell id -u | tr -d '\r')" != "0" ]]; then
+  echo "ERROR: the package-upgrade emulator must provide root access to inspect non-debuggable release app data." >&2
+  cat /tmp/readarc-adb-root.txt >&2
+  exit 1
+fi
 adb install -r "$TEST_OLD_APK"
 adb shell am start -W -n "$PACKAGE_ID/.MainActivity" | tee /tmp/readarc-old-launch.txt
 grep -q 'Status: ok' /tmp/readarc-old-launch.txt
 for attempt in {1..100}; do
-  if adb shell "run-as $PACKAGE_ID test -s app_flutter/ReadArc/manifest.json"; then
+  if adb shell "test -s '$MANIFEST_PATH'"; then
     break
   fi
   sleep 0.2
 done
-adb exec-out run-as "$PACKAGE_ID" cat app_flutter/ReadArc/manifest.json > "$TEMP_DIRECTORY/old-manifest.json"
+if ! adb shell "test -s '$MANIFEST_PATH'"; then
+  echo "ERROR: previous release did not create its manifest." >&2
+  exit 1
+fi
+adb exec-out cat "$MANIFEST_PATH" > "$TEMP_DIRECTORY/old-manifest.json"
 python3 - "$TEMP_DIRECTORY/old-manifest.json" <<'PY'
 import json
 import pathlib
@@ -182,15 +195,15 @@ assert isinstance(manifest['books'], list)
 assert isinstance(manifest['trustedDevices'], list)
 PY
 adb shell am force-stop "$PACKAGE_ID"
-adb shell "run-as $PACKAGE_ID sh -c 'mkdir -p files && printf %s $SENTINEL > files/upgrade-sentinel'"
-if [[ "$(adb shell "run-as $PACKAGE_ID cat files/upgrade-sentinel" | tr -d '\r')" != "$SENTINEL" ]]; then
+adb shell "mkdir -p '$APP_DATA_ROOT/files' && printf '%s' '$SENTINEL' > '$APP_DATA_ROOT/files/upgrade-sentinel'"
+if [[ "$(adb shell "cat '$APP_DATA_ROOT/files/upgrade-sentinel'" | tr -d '\r')" != "$SENTINEL" ]]; then
   echo "ERROR: could not create application-data sentinel before upgrade." >&2
   exit 1
 fi
 
 adb install -r "$TEST_NEW_APK" | tee /tmp/readarc-adb-upgrade.txt
 grep -q '^Success$' /tmp/readarc-adb-upgrade.txt
-if [[ "$(adb shell "run-as $PACKAGE_ID cat files/upgrade-sentinel" | tr -d '\r')" != "$SENTINEL" ]]; then
+if [[ "$(adb shell "cat '$APP_DATA_ROOT/files/upgrade-sentinel'" | tr -d '\r')" != "$SENTINEL" ]]; then
   echo "ERROR: application data was lost during adb install -r." >&2
   exit 1
 fi
@@ -213,12 +226,16 @@ if ! grep -q 'Библиотека пока пуста' "$TEMP_DIRECTORY/window.
   exit 1
 fi
 for attempt in {1..100}; do
-  if adb shell "run-as $PACKAGE_ID test -s app_flutter/ReadArc/manifest.json"; then
+  if adb shell "test -s '$MANIFEST_PATH'"; then
     break
   fi
   sleep 0.2
 done
-adb exec-out run-as "$PACKAGE_ID" cat app_flutter/ReadArc/manifest.json > "$TEMP_DIRECTORY/new-manifest.json"
+if ! adb shell "test -s '$MANIFEST_PATH'"; then
+  echo "ERROR: upgraded release lost its manifest." >&2
+  exit 1
+fi
+adb exec-out cat "$MANIFEST_PATH" > "$TEMP_DIRECTORY/new-manifest.json"
 python3 - "$TEMP_DIRECTORY/old-manifest.json" "$TEMP_DIRECTORY/new-manifest.json" <<'PY'
 import json
 import pathlib

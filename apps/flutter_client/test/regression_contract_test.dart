@@ -64,6 +64,7 @@ void main() {
       expect(androidPackager, contains('version_code" != "\$ANDROID_BUILD_NUMBER'));
       expect(androidPackager, contains('certificateSha256='));
       expect(androidUpgrade, contains('adb install -r'));
+      expect(androidUpgrade, contains('adb root'));
       expect(androidUpgrade, contains('upgrade-sentinel'));
       expect(androidUpgrade, contains('OLD_FINGERPRINT" != "\$NEW_FINGERPRINT'));
       expect(androidUpgradeCi, contains('android_upgrade_smoke.sh'));
