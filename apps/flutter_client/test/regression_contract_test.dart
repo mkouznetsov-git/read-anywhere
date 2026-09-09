@@ -68,6 +68,7 @@ void main() {
       expect(macosUpgrade, contains('legacySchemaV1ToV2ToV3=true'));
       expect(macosUpgrade, contains('booksProgressBookmarksPairingPreserved=true'));
       expect(workflow, contains('Run packaged Android adb install -r upgrade test'));
+      expect(workflow, contains('Configure ephemeral Android signing for pull-request verification'));
       expect(workflow, contains('Run packaged macOS clean and legacy-library upgrade test'));
       expect(pubspec, contains('flutter_secure_storage: 10.3.0'));
       expect(lockfile, contains('flutter_secure_storage_darwin'));

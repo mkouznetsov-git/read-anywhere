@@ -249,6 +249,26 @@ jobs:
             exit 1
           fi
 
+      - name: Configure ephemeral Android signing for pull-request verification
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          keytool -genkeypair \
+            -keystore apps/flutter_client/android/app/readarc-ci.jks \
+            -storepass readarc-ci-only \
+            -keypass readarc-ci-only \
+            -alias readarc-ci \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 2 \
+            -dname 'CN=ReadArc CI package verification'
+          {
+            echo 'storeFile=readarc-ci.jks'
+            echo 'storePassword=readarc-ci-only'
+            echo 'keyAlias=readarc-ci'
+            echo 'keyPassword=readarc-ci-only'
+          } > apps/flutter_client/android/key.properties
+
       - name: Configure protected Android signing
         if: env.READARC_REQUIRE_RELEASE_SIGNING == 'true'
         env:
