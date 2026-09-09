@@ -16,23 +16,36 @@ import '../models/sync_revision.dart';
 import 'library_repository.dart';
 
 class StorageService {
-  StorageService({LibraryRepository? repository, LibrarySecretStore? secretStore}) : this._(repository, secretStore);
+  StorageService({
+    LibraryRepository? repository,
+    LibrarySecretStore? secretStore,
+    Future<Directory> Function()? appDirectory,
+  }) : this._(repository, secretStore, appDirectory);
 
-  StorageService._(this._repositoryOverride, this._secretStore);
+  StorageService._(this._repositoryOverride, this._secretStore, this._appDirectoryOverride);
 
   final _uuid = const Uuid();
-  LibraryRepository? _repositoryOverride;
+  final LibraryRepository? _repositoryOverride;
   final LibrarySecretStore? _secretStore;
+  final Future<Directory> Function()? _appDirectoryOverride;
   LibraryRepository? _repositoryInstance;
 
-  LibraryRepository get repository => _repositoryOverride ??= _repositoryInstance ??= LibraryRepository(
-    appDirectory: appDir,
-    secretStore: _secretStore ?? PlatformLibrarySecretStore(),
-    createInitialManifest: _createInitialManifest,
-    normalize: _normalizeManifest,
-  );
+  LibraryRepository get repository =>
+      _repositoryOverride ??
+      (_repositoryInstance ??= LibraryRepository(
+        appDirectory: appDir,
+        secretStore: _secretStore ?? PlatformLibrarySecretStore(),
+        createInitialManifest: _createInitialManifest,
+        normalize: _normalizeManifest,
+      ));
 
   Future<Directory> appDir() async {
+    final appDirectoryOverride = _appDirectoryOverride;
+    if (appDirectoryOverride != null) {
+      final directory = await appDirectoryOverride();
+      if (!await directory.exists()) await directory.create(recursive: true);
+      return directory;
+    }
     final repositoryOverride = _repositoryOverride;
     if (repositoryOverride != null) {
       return (await repositoryOverride.manifestFile).parent;
